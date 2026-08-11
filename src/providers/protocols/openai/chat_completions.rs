@@ -87,18 +87,49 @@ impl ChatProvider for OpenAiChatCompletionsClient {
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 
         tokio::spawn(async move {
-            let resp = match client.post(&url).headers(headers).json(&body).send().await {
-                Ok(r) => r,
-                Err(e) => {
+            // Bound the request send: a hung upstream stalls `send().await`
+            // forever with no stream to time out (RFC v2 §六.A). On expiry
+            // emit a StreamEvent::Error so the fallback chain classifies the
+            // timeout and fails over instead of hanging the turn.
+            let resp = match tokio::time::timeout(
+                crate::agents::llm_stream::REQUEST_SEND_TIMEOUT,
+                client.post(&url).headers(headers).json(&body).send(),
+            )
+            .await
+            {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
                     tracing::warn!(url = %url, error = %e, "request failed");
                     let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        url = %url,
+                        timeout_secs = crate::agents::llm_stream::REQUEST_SEND_TIMEOUT.as_secs(),
+                        "request send timed out — no response from provider"
+                    );
+                    let _ = tx
+                        .send(StreamEvent::Error(format!(
+                            "request timed out after {}s",
+                            crate::agents::llm_stream::REQUEST_SEND_TIMEOUT.as_secs()
+                        )))
+                        .await;
                     return;
                 }
             };
 
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
+                let text = match tokio::time::timeout(
+                    crate::agents::llm_stream::ERROR_BODY_TIMEOUT,
+                    resp.text(),
+                )
+                .await
+                {
+                    Ok(t) => t.unwrap_or_default(),
+                    Err(_) => String::new(),
+                };
                 let _ = tx
                     .send(StreamEvent::HttpError {
                         status: status.as_u16(),

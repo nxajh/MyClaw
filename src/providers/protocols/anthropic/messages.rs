@@ -82,18 +82,45 @@ impl AnthropicMessagesClient {
                 headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
             }
 
-            let resp = match client.post(&url).headers(headers).json(&body).send().await {
-                Ok(r) => r,
-                Err(e) => {
+            let resp = match tokio::time::timeout(
+                crate::agents::llm_stream::REQUEST_SEND_TIMEOUT,
+                client.post(&url).headers(headers).json(&body).send(),
+            )
+            .await
+            {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
                     tracing::warn!(url = %url, error = %e, "request failed");
                     let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        url = %url,
+                        timeout_secs = crate::agents::llm_stream::REQUEST_SEND_TIMEOUT.as_secs(),
+                        "request send timed out — no response from provider"
+                    );
+                    let _ = tx
+                        .send(StreamEvent::Error(format!(
+                            "request timed out after {}s",
+                            crate::agents::llm_stream::REQUEST_SEND_TIMEOUT.as_secs()
+                        )))
+                        .await;
                     return;
                 }
             };
 
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
+                let text = match tokio::time::timeout(
+                    crate::agents::llm_stream::ERROR_BODY_TIMEOUT,
+                    resp.text(),
+                )
+                .await
+                {
+                    Ok(t) => t.unwrap_or_default(),
+                    Err(_) => String::new(),
+                };
                 let message = parse_anthropic_error_body(&text)
                     .unwrap_or_else(|| format!("HTTP {}: {}", status, text));
                 if status.as_u16() == 400 {

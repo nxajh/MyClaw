@@ -14,15 +14,42 @@ use crate::providers::{BoxStream, StreamEvent};
 
 /// Time to wait for the first stream chunk before giving up.
 ///
-/// 300 s covers slow models (DeepSeek reasoning, GPT-5 thinking) on long
-/// prompts. Triggered on cold inference or a stalled upstream.
-pub const STREAM_FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
+/// 60 s covers slow models (DeepSeek reasoning, GPT-5 thinking) on long
+/// prompts while still bounding a cold-inference or stalled-upstream wait.
+/// The pre-stream `send()` is bounded separately by [`REQUEST_SEND_TIMEOUT`],
+/// so this timeout only ever applies once the provider has accepted the
+/// request and opened a stream.
+pub const STREAM_FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Time to wait between chunks once streaming has started.
 ///
 /// Lower than first-chunk because mid-stream stalls indicate a real broken
 /// connection. 120 s is enough to ride out brief proxy hiccups.
 pub const STREAM_CHUNK_INTERVAL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Hard ceiling on one full stream-read, from first chunk to terminal event.
+///
+/// Bounds the worst case of many small-but-alive chunks trickling forever
+/// (each individually under the interval timeout) and ensures the whole turn
+/// cannot run past a bounded wall-clock budget. 180 s > first-chunk (60 s) +
+/// interval (120 s) so a single slow chunk never trips it spuriously.
+pub const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Time to wait for the provider to accept the request (`send()`).
+///
+/// This is the one spot a hung upstream can stall forever: a request that
+/// never completes keeps us in `send().await` with no stream to time out.
+/// Provider-side "no overall request timeout" (see `providers/http.rs`)
+/// means nothing bounds this unless we do. On expiry the request is dropped
+/// and a `StreamEvent::Error` is emitted so the routing fallback chain can
+/// classify the timeout and fail over to the next provider.
+pub const REQUEST_SEND_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Time to wait for reading an HTTP error body after a non-2xx status.
+///
+/// Only reached after `send()` already succeeded, so this bounds a small
+/// secondary read; 10 s is generous.
+pub const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read the next event from a stream with a timeout.
 ///
