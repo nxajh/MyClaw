@@ -142,6 +142,7 @@ impl Drop for TurnGuard {
 }
 
 /// Shared, cheaply-clonable dependencies used across the orchestrator.
+#[derive(Clone)]
 pub struct OrchestratorCtx {
     /// Live channels, keyed by (channel_type, account_id).
     pub channels: ChannelRegistry,

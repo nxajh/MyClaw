@@ -86,4 +86,11 @@ pub trait TurnStream: Send + Sync {
     fn fold_candidate(&self) -> Option<FoldCandidate> {
         None
     }
+
+    /// 单 preview (2026-08-12): mark this stream as an intermediate
+    /// (silenced) resume turn of an async-delegation suspension. Its `Done`
+    /// must KEEP the preview lines (append the turn's output as new lines,
+    /// no collapse) so the whole flow stays one evolving message — the
+    /// final collapse happens on the last resume turn. Default: no-op.
+    fn defer_collapse(&mut self) {}
 }

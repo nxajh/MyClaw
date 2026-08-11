@@ -1,6 +1,6 @@
 # Turn 挂起延续 RFC（Turn Suspension & Continuation）
 
-> 状态:已实现(2026-08-10 讨论收敛 + 审查修正;P0-1/P0-2/P0-3/P1-1/P1-2/P1-3 已合入 master,P1-4 测试补齐 + RFC 定稿,本提交;2026-08-10 二次审查修正:输出静默保留,silenced_outputs 回填机制取消,改以 Claude Code 式事前约束保证连续性,§3.3;2026-08-10 三次修正:静默轮输出不屏蔽,转换压缩为 `[进度]` 消息发出,不终结 turn,§3.3;2026-08-10 四次修正 fix v2(E2E 双委托复测):`[进度]` 改由**系统生成**(wake 终态摘要,不转发模型 EndTurn 回复),silenced 轮 `EndTurn` 语义化为 `Continue`(含 history usage 同步补丁),约束语强化"输出不转发",§3.3;2026-08-10 五次修正 fix v2 方案 B:挂起期间 telegram 仅显示**一条 live-edit 进度预览**(跨恢复轮原地编辑,最终轮删除),**绝不逐轮发独立消息**;挂起期间消息一律不发用户(模型输出只落盘);非 telegram 通道(无 edit+delete)挂起期间完全静默;`[进度]` 独立消息机制整体移除(`build_progress_text`/`format_progress_message` 删除),§3.3;2026-08-12 六次修正:挂起轮模型输出**按普通轮次处理**(正常流式 + commentary + 正常投递),移除整个 ⏳/✅ progress preview 机制(`render_progress_preview`/`update_progress_preview`/`take_progress_preview_for_cleanup`/折叠/`ProgressPreview` 结构/`progress_text` 字段全删),§3.3)
+> 状态:已实现(2026-08-10 讨论收敛 + 审查修正;P0-1/P0-2/P0-3/P1-1/P1-2/P1-3 已合入 master,P1-4 测试补齐 + RFC 定稿,本提交;2026-08-10 二次审查修正:输出静默保留,silenced_outputs 回填机制取消,改以 Claude Code 式事前约束保证连续性,§3.3;2026-08-10 三次修正:静默轮输出不屏蔽,转换压缩为 `[进度]` 消息发出,不终结 turn,§3.3;2026-08-10 四次修正 fix v2(E2E 双委托复测):`[进度]` 改由**系统生成**(wake 终态摘要,不转发模型 EndTurn 回复),silenced 轮 `EndTurn` 语义化为 `Continue`(含 history usage 同步补丁),约束语强化"输出不转发",§3.3;2026-08-10 五次修正 fix v2 方案 B:挂起期间 telegram 仅显示**一条 live-edit 进度预览**(跨恢复轮原地编辑,最终轮删除),**绝不逐轮发独立消息**;挂起期间消息一律不发用户(模型输出只落盘);非 telegram 通道(无 edit+delete)挂起期间完全静默;`[进度]` 独立消息机制整体移除(`build_progress_text`/`format_progress_message` 删除),§3.3;2026-08-12 六次修正:挂起轮模型输出**按普通轮次处理**(正常流式 + commentary + 正常投递),移除整个 ⏳/✅ progress preview 机制(`render_progress_preview`/`update_progress_preview`/`take_progress_preview_for_cleanup`/折叠/`ProgressPreview` 结构/`progress_text` 字段全删),§3.3;2026-08-12 七次修正:投递门按「流式是否已实际显示」细化,§3.3;2026-08-12 架构修正:has_pending 语义重定义(origin 轮 `async_delegation_spawned` || 恢复轮 `silenced`),单 preview 跨 turn 接管(恢复轮保留历史行追加,最终轮 collapse),挂起期间用户消息显式排队(静默,最终轮后按序 drain),§3.7/§4)
 > 范围:`agents/agent.rs`(EndTurn 挂起标记) + `agents/delegation_coordinator.rs`(终态事件) + `agents/orchestrator/delegation.rs`(wake) + `agents/orchestrator/inbound.rs`(dispatch 判定 + 恢复锁) + `agents/session_context.rs`(挂起状态挂载) + `storage/session.rs`(持久化)
 > 原则:**主 agent 派发 async 子 agent 后 turn 不结束**;每个子 agent 终态事件各自唤醒主 agent 处理(不聚合等待);全部收尾后主 agent 汇总输出,完整 turn 才结束。
 > 实现机制(审查修正):**方案 X**——`Agent::run` 不改内部循环,照常返回 `TurnResult`;挂起是**语义概念**(history 连续),恢复 = 事件到达时 `process_turn` 一次(复用现有 wake → dispatch 路径),新增的只是挂起状态管理 + 静默轮输出转换(不终结 turn,§3.3) + turn 边界判定。
@@ -167,11 +167,23 @@ pub struct SubResult {
 
 挂起持续时间上限 ≈ max(pending 子 agent 墙钟超时),即子 agent 超时(默认 600s)并行计时,最慢者超时后终态事件必达。无需额外挂起超时机制;子 agent 超时配置即兜底。
 
+### 3.7 架构修正(2026-08-12):turn 不挂起 + 单 preview 跨 turn 接管 + 用户消息排队
+
+**背景**:七次修正后挂起轮输出按普通轮次处理,但挂起期间到达的用户消息经 `turn_lock` 排队后作为**独立用户轮**运行,`turn_result.has_pending` 又被无条件重写为 `has_pending_delegations()`(旧 `session_context.rs` L685),于是命令轮/独立用户轮被投递门(`suspended_turn = silenced || has_pending`)误拦、以中间轮姿态投递。本次架构修正重定义 `has_pending` 语义,并以**单 preview 跨 turn 接管** + **显式排队**替换 turn_lock 隐式排队。
+
+**has_pending 语义重定义**(用户确认边界①/②):「本 turn 属于挂起序列」= **origin 轮**(`agent.rs` EndTurn 时 `async_delegation_spawned` 标记)|| **恢复轮**(`silenced`)。`turn_result.has_pending = turn_result.has_pending || silenced`(origin 轮标记 + 恢复轮 silenced,不再无条件 `= has_pending_delegations()`)。命令轮(挂起期间独立用户轮,`silenced=None` 且非 origin)`has_pending=false` → 正常投递。投递门/TTS 门(`!silenced && !has_pending`)沿用七次修正,不变。
+
+**origin 轮不挂起(模型可继续)**:`agent_delegate(mode="async")` 返回 task_id 后主 agent run **继续**(可输出其他内容、继续工具调用);到 EndTurn 时仅检测 `async_delegation_spawned` 置 `has_pending` 标记并返回,不改内部循环。`SILENCE_GUIDANCE` 相应补充:"发出委托后你可以继续处理其他任务;子代理完成时会主动唤醒你并注入结果,结果未齐时不得输出最终结论"(保留既有断言子串「中间恢复轮」「不会终结」「将作为进度说明展示给用户」「输出简洁的中间进展」「不要生成最终结论」「完整汇总答复」)。
+
+**单 preview 跨 turn 接管(边界②:保留历史行追加)**:`TurnSuspension` 新增 `preview: Option<PreviewState{reply_target, msg_id, text}>`(serde default,持久化进 `suspension.json`;daemon 重启后恢复轮同样经 `route_notice` → `silenced_override=Some` 判定接管)。origin 轮与每个 silenced 恢复轮在 `finish()` 前把流式预览身份 + 当前正文经 `fold_candidate` 回写(`set_preview`);下一个委托通知轮 `create_stream_folding` 接管该消息——**edit-in-place 保留历史行追加**(inherited_preview 头段 + 后续行追加,不清空重写),`fold_candidate` 须在 `finish()` 前调用。**最终轮**(loud)Done 才 collapse 成 summary;恢复轮(silenced)Done 经 `defer_collapse`(TurnStream trait 方法,默认 no-op;**作用于 stream 本身,非 Channel trait**)保留 preview 行不 collapse。非活跃 session(`process_non_active`,channel=None)不接管(无流式)。origin 轮(非 silenced)不 defer_collapse → Done collapse 成 summary(与 OpenClaw 单消息 draft 折叠语义一致)。edit 失败 fallback send 后新 msg_id 经 fold_candidate 回写。
+
+**用户消息排队(边界①:静默排队,不发确认)**:`DispatchTurn` 顶部拦截 `silenced_override=None && !text.starts_with('/') && has_pending_delegations()` → `enqueue_user_message`(SessionContext `VecDeque<ChannelInboundMessage>`,runtime-only)并 return——挂起期间用户消息**不再触发独立用户轮**。最终轮(该 turn `Ok` 且 `!has_pending` 且 session 不再挂起)后 drain 第一条 `take_user_message` → 重新走完整 chain(`dispatch`,同 account_key),天然串行(turn_lock);下一条由下一轮 drain 接续,每层 drain→dispatch→spawn 均返回,无栈递归。ask-reply/callback/已知命令已被前面拦截器消费,不会误排队;`/` 前缀未知命令不排队(用户主动指令不得阻塞在挂起序列后)。**队列不持久化**(daemon 重启即丢,RFC 注明)。
+
 ## 4. 用户插话(挂起期间)
 
 | 输入 | 行为 | 机制 |
 |---|---|---|
-| 普通消息 | 排队,等当前挂起 turn 结束 | 现有 `turn_lock`(`session_context.rs`),零新增 |
+| 普通消息 | **显式排队**(静默,不发确认),等挂起序列结束(最终轮)后按序 drain,重新走完整 chain | `DispatchTurn` 顶部拦截(§3.7)+ `pending_user_messages` VecDeque + 最终轮后 `take_user_message` → `dispatch`;队列 runtime-only 不持久化 |
 | `/btw <问题>` | 即时旁路回答,独立上下文,不进历史 | 现有 `cmd_btw`(`commands/info.rs` L312),命令拦截器 `tokio::spawn` 独立执行,不拿 turn_lock,零新增 |
 
 验证:`/btw` 构造全新 messages(system + 问题),不 touch session history;`SlashCommand` 拦截器在 turn 分发前拦截(`inbound.rs` L367+),挂起期间可用。

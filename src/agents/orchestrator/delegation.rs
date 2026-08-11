@@ -30,7 +30,12 @@ use crate::channels::ChannelInboundMessage;
 /// from Claude Code's fork-async pre-announcement ("results will arrive in a
 /// subsequent message"): telling the model the turn isn't final keeps it
 /// from committing to a conclusion before all results land.
-const SILENCE_GUIDANCE: &str = "[系统提示] 本轮为中间恢复轮:任务尚未全部完成,本轮对话不会终结;你的本轮输出将作为进度说明展示给用户(流式通道以 💬 注释显示,无流式通道直接发送)。请输出简洁的中间进展(如已完成哪些子任务、剩余哪些),不要生成最终结论或收尾语,待全部子代理结果到达后,在最终轮输出完整汇总答复。";
+///
+/// 架构修正 (2026-08-12): also tells the model it may keep working after
+/// spawning a delegation — the sub-agent completion wakes it with the result
+/// injected, so it must not emit a final conclusion while results are
+/// outstanding.
+const SILENCE_GUIDANCE: &str = "[系统提示] 本轮为中间恢复轮:任务尚未全部完成,本轮对话不会终结;你的本轮输出将作为进度说明展示给用户(流式通道以 💬 注释显示,无流式通道直接发送)。发出委托后你可以继续处理其他任务;子代理完成时会主动唤醒你并注入结果,结果未齐时不得输出最终结论。请输出简洁的中间进展(如已完成哪些子任务、剩余哪些),不要生成最终结论或收尾语,待全部子代理结果到达后,在最终轮输出完整汇总答复。";
 
 /// Append the silence guidance when the resume turn is not final — the
 /// session still has pending delegations, so this turn's output is delivered
@@ -592,6 +597,11 @@ mod tests {
         assert!(content.contains("输出简洁的中间进展"));
         assert!(content.contains("不要生成最终结论"));
         assert!(content.contains("完整汇总答复"));
+        // 架构修正 (2026-08-12): 模型 spawn 后可继续其他任务;子代理完成会
+        // 主动唤醒并注入结果;结果未齐不得输出最终结论.
+        assert!(content.contains("发出委托后你可以继续处理其他任务"));
+        assert!(content.contains("子代理完成时会主动唤醒你并注入结果"));
+        assert!(content.contains("结果未齐时不得输出最终结论"));
     }
 
     #[tokio::test]
