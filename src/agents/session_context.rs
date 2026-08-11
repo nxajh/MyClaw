@@ -456,13 +456,17 @@ impl SessionContext {
                 match ch.send_message(&msg).await {
                     Ok(res) => {
                         if let Some(mid) = res.message_ids.first() {
-                            let mut guard =
-                                self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(s) = guard.as_mut() {
-                                if let Some(p) = s.progress_preview.as_mut() {
-                                    p.msg_id = Some(mid.as_str().to_string());
+                            {
+                                let mut guard =
+                                    self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+                                if let Some(s) = guard.as_mut() {
+                                    if let Some(p) = s.progress_preview.as_mut() {
+                                        p.msg_id = Some(mid.as_str().to_string());
+                                    }
                                 }
                             }
+                            // Persist after the guard drops (see L381-382):
+                            // persist_suspension re-locks the same std Mutex.
                             self.persist_suspension();
                         }
                     }
@@ -1055,16 +1059,22 @@ impl SessionContext {
                                 // the final turn deletes it. The folded origin
                                 // output is kept as `origin_text` so renders
                                 // keep it as the body until the final turn.
-                                let mut guard =
-                                    self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
-                                if let Some(s) = guard.as_mut() {
-                                    s.progress_preview = Some(ProgressPreview {
-                                        reply_target: reply_target.clone(),
-                                        msg_id: Some(mid),
-                                        lines: Vec::new(),
-                                        origin_text: Some(turn_result.text.clone()),
-                                    });
+                                {
+                                    let mut guard = self
+                                        .turn_suspension
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    if let Some(s) = guard.as_mut() {
+                                        s.progress_preview = Some(ProgressPreview {
+                                            reply_target: reply_target.clone(),
+                                            msg_id: Some(mid),
+                                            lines: Vec::new(),
+                                            origin_text: Some(turn_result.text.clone()),
+                                        });
+                                    }
                                 }
+                                // Persist after the guard drops (see L381-382):
+                                // persist_suspension re-locks the same std Mutex.
                                 self.persist_suspension();
                             }
                         }
