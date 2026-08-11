@@ -73,6 +73,9 @@ struct SessionMeta {
     /// startup recovery can replay the routing context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_message: Option<crate::channels::PersistedChannelMessage>,
+    /// Optional generated summary of this session's purpose/outcomes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
     /// Owning agent name. "main" for top-level sessions; sub-agent name for
     /// delegate-spawned sessions. Skipped when absent for forward compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -367,20 +370,17 @@ impl SessionBackend for JsonFileBackend {
             last_activity: now,
             message_count: 0,
             segment: 0,
+            compact_version: 0,
+            compact_token_estimate: None,
+            last_total_tokens: None,
+            session_override: None,
+            last_message: None,
             summary: None,
             agent_name: None,
             parent_session_id: None,
             task_id: None,
             delegation_timeout_secs: None,
             delegation_allowed_tools: None,
-            compact_version: 0,
-            compact_token_estimate: None,
-            last_total_tokens: None,
-            session_override: None,
-            last_message: None,
-            agent_name: None,
-            parent_session_id: None,
-            task_id: None,
         };
         self.write_meta(&meta)?;
 
