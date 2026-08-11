@@ -27,6 +27,6 @@ pub use security::{
     warn_if_locked_down,
 };
 pub use telegram::TelegramChannel;
-pub use turn_stream::{StreamDelivery, TurnStream};
+pub use turn_stream::{FoldCandidate, StreamDelivery, TurnStream};
 #[cfg(feature = "wechat")]
 pub use wechat::WechatChannel;
