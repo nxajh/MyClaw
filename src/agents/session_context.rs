@@ -7,6 +7,7 @@
 //! (already-resolved decisions); SessionContext is what the Orchestrator
 //! holds in its session table and what `process_turn` operates on per turn.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -106,6 +107,59 @@ pub struct SessionContext {
     /// semantics drop the SessionContext and let `SessionManager`
     /// rematerialize it from a fresh profile read.
     pub user_profile: Arc<UserProfile>,
+    /// 单 preview (2026-08-12): delegation-notice turns that have been
+    /// dispatched but not yet finished — incremented synchronously at
+    /// dispatch time (`route_notice` active branch / `process_non_active`,
+    /// same sync section as `record_terminal`), decremented when the notice
+    /// turn exits `process_turn` (RAII guard, every path). Feeds the
+    /// suspension-sequence end determination: `pending` may be EMPTY (the
+    /// wake burst already collected every terminal) while notices are still
+    /// queued behind `turn_lock` — the suspension (and its cross-turn
+    /// preview) must survive until the LAST notice turn finishes. Runtime-
+    /// only, not persisted (a daemon restart re-enters via `suspension.json`).
+    pub notice_turns_in_flight: AtomicUsize,
+}
+
+/// 单 preview (2026-08-12): RAII guard decrementing the per-session
+/// in-flight notice-turn counter when a delegation-notice turn exits
+/// `process_turn` — on EVERY path (normal end, early return, error). The
+/// counter is incremented at dispatch time (sync with `record_terminal`), so
+/// a notice queued behind `turn_lock` still counts toward the suspension-
+/// sequence end determination: `pending` may be empty (the wake burst already
+/// collected every terminal) while notices are still queued — clearing the
+/// suspension then would drop the cross-turn preview and make each queued
+/// notice open its own message (the multi-message spam bug, 2026-08-12).
+struct NoticeTurnGuard {
+    sctx: Arc<SessionContext>,
+    active: bool,
+    done: bool,
+}
+
+impl NoticeTurnGuard {
+    fn new(sctx: &Arc<SessionContext>, is_notice: bool) -> Self {
+        Self {
+            sctx: sctx.clone(),
+            active: is_notice,
+            done: false,
+        }
+    }
+
+    /// Decrement now (main turn path) — must run BEFORE
+    /// `clear_suspension_if_collected` so the end-of-sequence check no longer
+    /// counts the current turn. Idempotent; `Drop` covers the early-return /
+    /// error paths.
+    fn finish(&mut self) {
+        if self.active && !self.done {
+            self.sctx.finish_notice_turn();
+            self.done = true;
+        }
+    }
+}
+
+impl Drop for NoticeTurnGuard {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 impl SessionContext {
@@ -123,6 +177,7 @@ impl SessionContext {
             turn_suspension: std::sync::Mutex::new(None),
             suspension_persist,
             pending_user_messages: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            notice_turns_in_flight: AtomicUsize::new(0),
             user_profile: Arc::new(UserProfile::default()),
         };
         ctx.restore_suspension();
@@ -142,6 +197,7 @@ impl SessionContext {
             turn_suspension: std::sync::Mutex::new(None),
             suspension_persist,
             pending_user_messages: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            notice_turns_in_flight: AtomicUsize::new(0),
             user_profile: profile,
         };
         ctx.restore_suspension();
@@ -248,6 +304,32 @@ impl SessionContext {
             .unwrap_or(false)
     }
 
+    /// 单 preview (2026-08-12): mark a delegation-notice turn as in-flight —
+    /// called at dispatch time (sync section right after `record_terminal`,
+    /// no await in between), so a notice queued behind `turn_lock` still
+    /// counts toward the suspension-sequence end determination even after
+    /// `pending` emptied (wake burst). See `notice_turns_in_flight` doc.
+    pub fn bump_notice_turn(&self) {
+        self.notice_turns_in_flight.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 单 preview (2026-08-12): mark a delegation-notice turn as finished.
+    /// Saturating — a notice that reached `process_turn` without a matching
+    /// dispatch-time bump (e.g. a direct test call) must not underflow.
+    pub fn finish_notice_turn(&self) {
+        let _ = self.notice_turns_in_flight.fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |v| Some(v.saturating_sub(1)),
+        );
+    }
+
+    /// 单 preview (2026-08-12): true while any delegation-notice turn is
+    /// queued or running (see `notice_turns_in_flight` doc).
+    pub fn has_notice_turns_in_flight(&self) -> bool {
+        self.notice_turns_in_flight.load(Ordering::SeqCst) > 0
+    }
+
     /// 方案 C: snapshot of the suspension state (P0-2 consumes terminal
     /// events against it; P1-1 persists it).
     pub fn suspension_snapshot(&self) -> Option<TurnSuspension> {
@@ -325,7 +407,14 @@ impl SessionContext {
         {
             let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(s) = guard.as_ref() {
-                if s.pending.is_empty() {
+                // 单 preview (2026-08-12): `pending` empty alone is NOT the end
+                // of the suspension sequence — the wake burst may have collected
+                // every terminal while delegation-notice turns are still queued
+                // behind `turn_lock` (counted in `notice_turns_in_flight`).
+                // Clearing here would drop the cross-turn preview and let each
+                // queued notice open its own message (multi-message spam bug).
+                // Clear only when no notice turns remain.
+                if s.pending.is_empty() && self.notice_turns_in_flight.load(Ordering::SeqCst) == 0 {
                     *guard = None;
                 }
             }
@@ -401,6 +490,13 @@ impl SessionContext {
         // silence intent; capture before `inbound_msg` is moved. User-message
         // turns leave it None → live snapshot decides below.
         let silenced_intent = inbound_msg.silenced_override;
+        // 单 preview (2026-08-12): RAII guard — a delegation-notice turn
+        // (silenced_intent = Some) decrements `notice_turns_in_flight` on
+        // EVERY exit path (normal / early return / error). `finish()` is
+        // called explicitly on the main path BEFORE
+        // `clear_suspension_if_collected` so the end-of-sequence check no
+        // longer counts the current turn; `Drop` covers the rest.
+        let mut notice_guard = NoticeTurnGuard::new(self, silenced_intent.is_some());
 
         // Persist inbound files to session-local storage so their lifetime
         // matches the session.  Read the body stream (via
@@ -692,6 +788,11 @@ impl SessionContext {
                 // `has_pending_delegations()`, which wrongly marked such
                 // turns suspended and gated their delivery.
                 turn_result.has_pending = turn_result.has_pending || silenced;
+                // 单 preview (2026-08-12): this notice turn is now finished —
+                // decrement BEFORE the end-of-sequence check so the final
+                // resume turn can clear its own suspension (otherwise it would
+                // still see its own in-flight count = 1 and never clear).
+                notice_guard.finish();
                 // 方案 C (RFC §3.4): pending 归零 → 最终轮,挂起状态消费完毕,
                 // 清除之(下一轮恢复响亮)。级联轮(本 turn 再次派发)pending
                 // 非空 → 保留,继续挂起。
@@ -1404,6 +1505,67 @@ mod suspension_tests {
         // idempotent
         ctx.clear_suspension_if_collected();
         assert!(ctx.suspension_snapshot().is_none());
+    }
+
+    /// 单 preview (2026-08-12): `pending` empty alone is NOT the end of the
+    /// suspension sequence — delegation notices still queued behind
+    /// `turn_lock` (counted in `notice_turns_in_flight`) must keep the
+    /// suspension (and its cross-turn preview) alive; only the LAST notice
+    /// turn's exit (counter → 0) may clear it.
+    #[test]
+    fn clear_respects_notice_turns_in_flight() {
+        let (ctx, _m) = make_ctx();
+        ctx.add_pending_task("t1".to_string());
+        ctx.bump_notice_turn(); // wake burst dispatched a notice (counter=1)
+        // Wake burst collects the only terminal → pending empty, but the
+        // notice turn has not run yet → suspension must survive.
+        let _ = ctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0);
+        ctx.clear_suspension_if_collected();
+        let snap = ctx.suspension_snapshot().expect("suspension kept while notice in flight");
+        assert!(snap.pending.is_empty());
+        // The notice turn finishes → counter=0 → next clear drops the state.
+        ctx.finish_notice_turn();
+        ctx.clear_suspension_if_collected();
+        assert!(ctx.suspension_snapshot().is_none());
+        // Idempotent with counter at 0.
+        ctx.clear_suspension_if_collected();
+        assert!(ctx.suspension_snapshot().is_none());
+    }
+
+    /// 单 preview (2026-08-12): counter roundtrip — bump increments,
+    /// finish decrements (saturating so a direct `process_turn` call without
+    /// a dispatch-time bump never underflows), and the RAII guard decrements
+    /// exactly once even when `finish()` was already called explicitly.
+    #[test]
+    fn notice_turn_counter_roundtrip() {
+        let (ctx, _m) = make_ctx();
+        assert!(!ctx.has_notice_turns_in_flight());
+        ctx.bump_notice_turn();
+        ctx.bump_notice_turn();
+        assert!(ctx.has_notice_turns_in_flight());
+        ctx.finish_notice_turn();
+        assert!(ctx.has_notice_turns_in_flight());
+        ctx.finish_notice_turn();
+        assert!(!ctx.has_notice_turns_in_flight());
+        // Saturating: extra finishes below zero are no-ops, no underflow.
+        ctx.finish_notice_turn();
+        ctx.finish_notice_turn();
+        assert!(!ctx.has_notice_turns_in_flight());
+
+        // RAII guard: active on a notice turn, decrements on drop.
+        {
+            let mut g = NoticeTurnGuard::new(&ctx, true);
+            ctx.bump_notice_turn();
+            assert!(ctx.has_notice_turns_in_flight());
+            g.finish(); // explicit finish → Drop must not double-decrement
+        }
+        assert!(!ctx.has_notice_turns_in_flight());
+
+        // Inactive guard (user turn) never touches the counter.
+        {
+            let _g = NoticeTurnGuard::new(&ctx, false);
+        }
+        assert!(!ctx.has_notice_turns_in_flight());
     }
 
     #[test]

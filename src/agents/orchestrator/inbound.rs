@@ -524,10 +524,14 @@ pub(super) async fn dispatch_turn(
     // (RFC turn-suspension §3.3 单 preview/排队段). Delegation notices
     // (silenced_override = Some) and slash commands (user-initiated, must not
     // stall behind a suspension) bypass the queue; ask-reply/callback/known
-    // commands were already consumed by earlier interceptors.
+    // commands were already consumed by earlier interceptors. The
+    // `has_notice_turns_in_flight()` arm keeps queueing while `pending` is
+    // already empty but delegation notices are still queued behind
+    // `turn_lock` — the suspension (and its preview) survives until the LAST
+    // notice finishes, so the user message must not cut in between.
     if msg.silenced_override.is_none()
         && !msg.content.text.starts_with('/')
-        && session_ctx.has_pending_delegations()
+        && (session_ctx.has_pending_delegations() || session_ctx.has_notice_turns_in_flight())
     {
         session_ctx.enqueue_user_message(msg);
         return;
@@ -605,7 +609,11 @@ pub(super) async fn dispatch_turn(
         // next such turn (turn_lock serialization makes this safe; each
         // drain→dispatch→spawn returns, so no stack recursion).
         match &result {
-            Ok(turn) if !turn.has_pending && !session_ctx.has_pending_delegations() => {
+            Ok(turn)
+                if !turn.has_pending
+                    && !session_ctx.has_pending_delegations()
+                    && !session_ctx.has_notice_turns_in_flight() =>
+            {
                 if let Some(queued) = session_ctx.take_user_message() {
                     dispatch(&ctx, account.clone(), queued).await;
                 }
@@ -939,6 +947,30 @@ mod tests {
         // 静默排队:不发确认消息、不 spawn turn.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         assert!(ch.texts().is_empty(), "queuing must not send any message");
+    }
+
+    #[tokio::test]
+    async fn dispatch_turn_queues_while_notice_in_flight_even_if_pending_empty() {
+        let ch = MockChannel::new();
+        let ctx = with_channel(ch.clone());
+        let k = key();
+        let sctx = ctx.sessions.get_or_create_context(&k.to_string());
+        // 刷屏 bug 窗口 (2026-08-12): 无挂起任务(或 pending 已被 wake burst 清空),
+        // 但 delegation-notice 轮仍在途(counter=1,排队在 turn_lock 之后)——用户
+        // 消息必须仍静默排队,不得插队开新 turn/preview。
+        sctx.bump_notice_turn();
+
+        dispatch_turn(&ctx, &k, inbound_msg("user1", "queued while notice in flight")).await;
+
+        let queued = sctx
+            .take_user_message()
+            .expect("message should queue while notices are in flight");
+        assert_eq!(queued.content.text, "queued while notice in flight");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(ch.texts().is_empty(), "queuing must not send any message");
+        // 清掉在途计数后队列恢复空(消息仍在队列,等待序列结束后 drain)。
+        sctx.finish_notice_turn();
+        assert!(!sctx.has_notice_turns_in_flight());
     }
 
     #[tokio::test]

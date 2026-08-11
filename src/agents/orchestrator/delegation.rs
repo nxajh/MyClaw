@@ -315,6 +315,15 @@ pub(super) async fn route_notice(
             return;
         }
 
+        // 单 preview (2026-08-12): this notice turn is now dispatched —
+        // count it in-flight synchronously (same sync section as
+        // `record_terminal`, no await in between, zero race window with the
+        // origin turn's `clear_suspension_if_collected`). The RAII guard in
+        // `process_turn` decrements it on exit.
+        if let Some(sctx) = &sctx_opt {
+            sctx.bump_notice_turn();
+        }
+
         let synthetic = ChannelInboundMessage {
             id: synthetic_id,
             sender: crate::channels::MessageSender::new(key.sender.clone()),
@@ -362,6 +371,14 @@ async fn process_non_active(
     let session_id_owned = session_id.to_string();
     let content_owned = content.to_string();
     let turn_tracker = ctx.turn_tracker.clone();
+
+    // 单 preview (2026-08-12): any delegation notice (silenced or loud) is
+    // part of the suspension sequence — count it in-flight before the spawn
+    // (same sync section as `record_terminal` in the wake path; no await
+    // between). The RAII guard in `process_turn` decrements on exit.
+    if silenced_override.is_some() {
+        session_ctx.bump_notice_turn();
+    }
 
     tokio::spawn(async move {
         let _guard = turn_tracker.track();
