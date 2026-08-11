@@ -550,6 +550,21 @@ pub trait Channel: Send + Sync {
         None
     }
 
+    /// 单 preview (2026-08-12): like `create_stream`, but the returned
+    /// stream may TAKE OVER an existing preview message (cross-turn fold for
+    /// async-delegation continuation — the whole suspension flow is one
+    /// evolving message). `fold` carries the platform message id + last
+    /// body; channels without fold support ignore it. Default: plain
+    /// `create_stream`.
+    fn create_stream_folding(
+        &self,
+        reply_target: &str,
+        _fold: Option<crate::channels::FoldCandidate>,
+    ) -> Option<Box<dyn crate::channels::TurnStream>> {
+        let _ = _fold;
+        self.create_stream(reply_target)
+    }
+
     /// Authorization policy snapshot for this channel (RFC §14).
     /// Default: open policy — used by Client (connection-level token authn).
     /// Hot-reload-capable channels read through their internal RwLock and

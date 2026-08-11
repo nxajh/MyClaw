@@ -571,7 +571,13 @@ impl Agent {
                     text: response.text,
                     stop_reason: response.stop_reason,
                     pending_retry: None,
-                    has_pending: false,
+                    // 单 preview (2026-08-12): an EndTurn on a turn that spawned
+                    // async delegations is the ORIGIN turn of a suspension
+                    // sequence — `has_pending` marks it as such so the
+                    // dispatcher suspends instead of ending. The model may have
+                    // continued with other work after the spawn (the old forced
+                    // truncation is gone); its output is the preview content.
+                    has_pending: async_delegation_spawned,
                 });
             }
 
@@ -790,23 +796,11 @@ impl Agent {
             }
 
             if async_delegation_spawned {
-                if session.parent_session_id.is_none() {
-                    tracing::info!(session = %session.id, "async delegation batch completed; suspending origin turn");
-                    return Ok(TurnResult {
-                        // 挂起轮折叠: 保留最后一次 LLM 响应的文本作为 origin
-                        // 输出, 由 dispatch_turn 折叠进 progress preview body
-                        // (OpenClaw draft 语义: output → preview → final), 并
-                        // 让 fallback send_message 路径承载该输出; 空文本
-                        // (模型只输出工具调用) 时 fallback 不发送, 折叠逻辑
-                        // 复用流式预览消息兜底。
-                        text: response.text,
-                        stop_reason: StopReason::EndTurn,
-                        pending_retry: None,
-                        has_pending: true,
-                    });
-                } else {
-                    tracing::debug!(session = %session.id, "async delegation spawned from sub-agent; not suspending");
-                }
+                tracing::debug!(
+                    session = %session.id,
+                    parent = session.parent_session_id.as_deref().unwrap_or("none"),
+                    "async delegation spawned this turn; has_pending flag set at EndTurn"
+                );
             }
 
             // Loop back to the next LLM call with the appended tool_result messages.

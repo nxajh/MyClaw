@@ -52,6 +52,24 @@ pub struct SubResult {
     pub progress: Vec<String>,
 }
 
+/// Cross-turn preview takeover state (单 preview, 2026-08-12).
+///
+/// The whole async-delegation flow is logically ONE turn (one evolving
+/// message): the origin turn streams a preview, delegation-notice resume
+/// turns REOPEN the same message and append lines (保留历史行追加) instead
+/// of sending a second preview. `reply_target`/`msg_id` identify the live
+/// message; `text` is the last rendered body so a resumed stream can seed
+/// its own preview with the inherited history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewState {
+    /// Routing key of the preview message (`chat_id:thread_id`).
+    pub reply_target: String,
+    /// Platform message id (e.g. Telegram message id as string).
+    pub msg_id: String,
+    /// Last rendered preview body (what the user currently sees).
+    pub text: String,
+}
+
 /// 方案 C: a parent turn suspended on pending async delegations.
 ///
 /// Attached to `SessionContext.turn_suspension`; `pending` is registered by
@@ -74,6 +92,11 @@ pub struct TurnSuspension {
     /// task runs; folded into `SubResult.progress` at terminal collection
     /// (RFC §2.2/§2.3 — Progress never enters the parent context).
     pub progress_by_task: HashMap<String, Vec<String>>,
+    /// 单 preview (2026-08-12): streaming preview message identity + last
+    /// body for cross-turn takeover. `None` until an origin turn streams;
+    /// resume turns reuse it; cleared with the suspension.
+    #[serde(default)]
+    pub preview: Option<PreviewState>,
 }
 
 impl TurnSuspension {
@@ -87,6 +110,7 @@ impl TurnSuspension {
             pending: vec![task_id],
             results: Vec::new(),
             progress_by_task: HashMap::new(),
+            preview: None,
         }
     }
 

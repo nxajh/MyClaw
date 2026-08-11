@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::agents::session::{PersistHook, Session};
-use crate::agents::turn::{SubResult, SubStatus, TurnResult, TurnSuspension};
+use crate::agents::turn::{PreviewState, SubResult, SubStatus, TurnResult, TurnSuspension};
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
 use crate::channels::{Channel, ChannelInboundMessage};
 
@@ -94,6 +94,13 @@ pub struct SessionContext {
     /// Mutex is held, so they cannot reach `session.persist` — this copy
     /// keeps the durable state writable on those paths.
     pub suspension_persist: Option<Arc<dyn PersistHook>>,
+    /// 单 preview (2026-08-12): user messages that arrived while the session
+    /// was suspended on async delegations — processed in order AFTER the
+    /// final resume turn completes (静默排队, user-confirmed 2026-08-12; no
+    /// ack is sent to the sender). Runtime-only: NOT persisted, a daemon
+    /// restart drops queued messages (RFC 排队段注明).
+    pub pending_user_messages:
+        std::sync::Mutex<std::collections::VecDeque<ChannelInboundMessage>>,
     /// Loaded UserProfile snapshot taken at SessionContext creation.
     /// Immutable for the lifetime of the context — per RFC §三.A reload
     /// semantics drop the SessionContext and let `SessionManager`
@@ -115,6 +122,7 @@ impl SessionContext {
             turn_lock: Arc::new(Mutex::new(())),
             turn_suspension: std::sync::Mutex::new(None),
             suspension_persist,
+            pending_user_messages: std::sync::Mutex::new(std::collections::VecDeque::new()),
             user_profile: Arc::new(UserProfile::default()),
         };
         ctx.restore_suspension();
@@ -133,6 +141,7 @@ impl SessionContext {
             turn_lock: Arc::new(Mutex::new(())),
             turn_suspension: std::sync::Mutex::new(None),
             suspension_persist,
+            pending_user_messages: std::sync::Mutex::new(std::collections::VecDeque::new()),
             user_profile: profile,
         };
         ctx.restore_suspension();
@@ -324,6 +333,43 @@ impl SessionContext {
         self.persist_suspension();
     }
 
+    /// 单 preview (2026-08-12): persist the streaming preview identity for
+    /// cross-turn takeover — the origin turn and each silenced resume turn
+    /// write the preview message id + current body into the suspension; the
+    /// next delegation-notice turn folds it (edit-in-place append, 保留历史
+    /// 行追加). No-op when the session is not suspended.
+    pub fn set_preview(&self, reply_target: String, fold: crate::channels::FoldCandidate) {
+        {
+            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = guard.as_mut() {
+                s.preview = Some(PreviewState {
+                    reply_target,
+                    msg_id: fold.msg_id,
+                    text: fold.text,
+                });
+            }
+        }
+        self.persist_suspension();
+    }
+
+    /// 单 preview (2026-08-12): enqueue a user message that arrived while
+    /// the session was suspended on async delegations (静默排队 — no ack).
+    /// Draining happens after a turn ends outside the suspension sequence.
+    pub fn enqueue_user_message(&self, msg: ChannelInboundMessage) {
+        self.pending_user_messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(msg);
+    }
+
+    /// 单 preview (2026-08-12): pop the oldest queued user message, if any.
+    pub fn take_user_message(&self) -> Option<ChannelInboundMessage> {
+        self.pending_user_messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
+
     /// Run one turn end-to-end: acquire the turn lock, replay the
     /// inbound message, resolve `TurnContext` from the session override,
     /// invoke `Agent.run`, and return the result. The caller is
@@ -448,9 +494,32 @@ impl SessionContext {
         // turns stream exactly like ordinary turns — the model's output is
         // shown as commentary and the turn does NOT end; later terminal
         // events resume it until the final loud summary.
+        // 单 preview (2026-08-12): the whole async-delegation flow is ONE
+        // evolving message. A delegation-notice turn (silenced_intent = Some)
+        // TAKES OVER the suspension's live preview message (fold → edit the
+        // same message, append lines, 保留历史行追加); origin/user turns start
+        // fresh. Silenced resume turns additionally defer collapse so their
+        // intermediate output appends as 💬 lines; the final resume turn
+        // collapses the preview into a summary (boundary ②, user-confirmed
+        // 2026-08-12).
+        let fold = if silenced_intent.is_some() {
+            self.suspension_snapshot()
+                .and_then(|s| s.preview)
+                .map(|p| crate::channels::FoldCandidate {
+                    msg_id: p.msg_id,
+                    text: p.text,
+                })
+        } else {
+            None
+        };
         session.turn_stream = channel
             .as_ref()
-            .and_then(|ch| ch.create_stream(&reply_target));
+            .and_then(|ch| ch.create_stream_folding(&reply_target, fold));
+        if silenced {
+            if let Some(stream) = session.turn_stream.as_mut() {
+                stream.defer_collapse();
+            }
+        }
         session.channel = channel;
 
         let session_override = session.session_override.clone();
@@ -614,10 +683,15 @@ impl SessionContext {
 
         match (result, turn_stream) {
             (Ok(mut turn_result), stream) => {
-                // 方案 C: turn ended with async delegations still pending →
-                // mark the result so the dispatcher knows to suspend (the
-                // turn does NOT end; terminal events resume it).
-                turn_result.has_pending = self.has_pending_delegations();
+                // 单 preview (2026-08-12): `has_pending` = "this turn belongs
+                // to the suspension sequence" = origin turn (Agent::run set it
+                // via `async_delegation_spawned`) || resume turn (silenced).
+                // Command/user turns that run while delegations are pending
+                // are NOT part of the sequence (has_pending=false → normal
+                // delivery). Replaces the old unconditional overwrite with
+                // `has_pending_delegations()`, which wrongly marked such
+                // turns suspended and gated their delivery.
+                turn_result.has_pending = turn_result.has_pending || silenced;
                 // 方案 C (RFC §3.4): pending 归零 → 最终轮,挂起状态消费完毕,
                 // 清除之(下一轮恢复响亮)。级联轮(本 turn 再次派发)pending
                 // 非空 → 保留,继续挂起。
@@ -713,11 +787,23 @@ impl SessionContext {
                 //     output must not be re-sent as a plain text message.
                 //   - final wheel (!silenced && !has_pending) → deliver as an
                 //     ordinary turn (full summary).
+                // 单 preview (2026-08-12): capture the fold candidate BEFORE
+                // `finish()` consumes the stream. A suspended turn (origin or
+                // intermediate resume) writes the preview identity back into
+                // the suspension so the next delegation-notice turn can take
+                // over the same message (cross-turn fold); the final resume
+                // turn (suspension cleared) has nowhere to write → skip.
+                let fold = stream.as_ref().and_then(|s| s.fold_candidate());
                 let delivery = match stream {
                     Some(s) => s.finish().await,
                     None => crate::channels::StreamDelivery::Pending,
                 };
                 let suspended_turn = silenced || turn_result.has_pending;
+                if suspended_turn {
+                    if let Some(f) = fold {
+                        self.set_preview(reply_target.clone(), f);
+                    }
+                }
                 if delivery != crate::channels::StreamDelivery::FinalDelivered
                     && (delivery == crate::channels::StreamDelivery::Pending || !suspended_turn)
                 {
@@ -1489,5 +1575,39 @@ mod suspension_tests {
             semantic_stop_reason(true, true, StopReason::Continue),
             StopReason::Continue
         );
+    }
+
+    // ── 架构修正 (RFC §3.7): 挂起期间用户消息排队 ─────────────────────────
+
+    fn queued_msg(text: &str) -> crate::channels::ChannelInboundMessage {
+        crate::channels::ChannelInboundMessage {
+            id: "q".to_string(),
+            sender: crate::channels::MessageSender::new("u1".to_string()),
+            receiver: crate::channels::MessageReceiver::new("u1".to_string()),
+            content: crate::channels::ChannelMessageContent::text(text.to_string()),
+            timestamp: 0,
+            interruption_scope_id: None,
+            silenced_override: None,
+        }
+    }
+
+    #[test]
+    fn user_message_queue_is_fifo_and_drains() {
+        let ctx = suspended();
+        ctx.enqueue_user_message(queued_msg("first"));
+        ctx.enqueue_user_message(queued_msg("second"));
+        assert_eq!(ctx.take_user_message().unwrap().content.text, "first");
+        assert_eq!(ctx.take_user_message().unwrap().content.text, "second");
+        assert!(ctx.take_user_message().is_none(), "queue drains to empty");
+    }
+
+    #[test]
+    fn user_message_queue_is_isolated_per_session() {
+        let (ctx_a, _m) = make_ctx();
+        let (ctx_b, _m) = make_ctx();
+        ctx_a.add_pending_task("t1".to_string());
+        ctx_a.enqueue_user_message(queued_msg("for a"));
+        assert!(ctx_b.take_user_message().is_none(), "queue is per-session");
+        assert_eq!(ctx_a.take_user_message().unwrap().content.text, "for a");
     }
 }

@@ -2161,6 +2161,21 @@ impl Channel for TelegramChannel {
     }
 
     fn create_stream(&self, reply_target: &str) -> Option<Box<dyn TurnStream>> {
+        self.create_stream_folding(reply_target, None)
+    }
+
+    /// 单 preview (2026-08-12): like `create_stream`, but when `fold` names
+    /// an existing preview message the stream takes it over — `msg_id` is
+    /// seeded so the first flush EDITS that message (append lines) instead
+    /// of sending a second one; `text` seeds the inherited history so the
+    /// user keeps seeing prior progress (保留历史行追加). If the fold target
+    /// was deleted server-side, `flush_preview` falls back to sending a new
+    /// message.
+    fn create_stream_folding(
+        &self,
+        reply_target: &str,
+        fold: Option<FoldCandidate>,
+    ) -> Option<Box<dyn TurnStream>> {
         let (chat_id_str, thread_id) = Self::parse_reply_target(reply_target);
         let chat_id: i64 = match chat_id_str.parse() {
             Ok(id) => id,
@@ -2178,14 +2193,27 @@ impl Channel for TelegramChannel {
             .lock()
             .insert(reply_target.to_string());
 
+        let (fold_msg_id, inherited) = match fold {
+            Some(f) => (f.msg_id.parse::<i64>().ok(), Some(f.text)),
+            None => (None, None),
+        };
+
         Some(Box::new(TelegramTurnStream {
             channel: self.clone(),
             chat_id,
             thread_id,
             reply_target: reply_target.to_string(),
             mode: self.streaming_mode,
-            msg_id: None,
-            accumulated: String::new(),
+            msg_id: fold_msg_id,
+            // Partial mode: seed accumulated with the inherited body so a
+            // resumed turn keeps prior text instead of replacing it.
+            accumulated: if self.streaming_mode
+                == crate::config::channel::StreamingMode::Partial
+            {
+                inherited.clone().unwrap_or_default()
+            } else {
+                String::new()
+            },
             tool_lines: Vec::new(),
             tool_count: 0,
             thinking_steps: 0,
@@ -2193,6 +2221,8 @@ impl Channel for TelegramChannel {
             thinking_tokens: 0,
             thinking_active: false,
             pending_commentary: String::new(),
+            inherited_preview: inherited,
+            defer_collapse: false,
             start: std::time::Instant::now(),
             last_edit: std::time::Instant::now() - STREAM_THROTTLE,
             delivery: StreamDelivery::Pending,
@@ -2361,6 +2391,14 @@ struct TelegramTurnStream {
     /// 💬 line when a ToolCall arrives (text before tools = commentary;
     /// text after last tool = final answer, discarded on Done).
     pending_commentary: String,
+    /// 单 preview (2026-08-12): body of the preview message taken over from
+    /// a previous (origin) turn — rendered as the leading block so prior
+    /// progress lines stay visible (保留历史行追加). `None` on fresh streams.
+    inherited_preview: Option<String>,
+    /// 单 preview (2026-08-12): intermediate (silenced) resume turn — `Done`
+    /// keeps the preview lines (no collapse); the final resume turn
+    /// collapses. Set via `TurnStream::defer_collapse`.
+    defer_collapse: bool,
     /// Turn start time (progress mode, for collapse summary).
     start: std::time::Instant,
     last_edit: std::time::Instant,
@@ -2391,6 +2429,16 @@ impl TelegramTurnStream {
     fn preview_text(&self) -> String {
         if self.is_progress() {
             let mut lines = Vec::new();
+
+            // 单 preview: inherited body (from the origin turn) stays as the
+            // leading block — prior progress lines are never wiped, new lines
+            // append below (保留历史行追加).
+            if let Some(inh) = &self.inherited_preview {
+                let text = clip_detail(inh.trim());
+                if !text.is_empty() {
+                    lines.push(text);
+                }
+            }
 
             // Headline: pending commentary shown as bold when no steps yet.
             if !self.pending_commentary.trim().is_empty()
@@ -2447,29 +2495,38 @@ impl TelegramTurnStream {
         if preview.is_empty() {
             return;
         }
-        match self.msg_id {
-            Some(mid) => {
-                if self
-                    .channel
-                    .edit_message_rich(self.chat_id, mid, &preview)
-                    .await
-                    .is_ok()
-                {
-                    self.delivery = StreamDelivery::Visible;
+        // Loop so an edit failure (message deleted server-side, e.g. the
+        // taken-over preview was removed) falls back to sending a new message
+        // in the same flush instead of wedging the stream on a dead msg_id.
+        loop {
+            match self.msg_id {
+                Some(mid) => {
+                    if self
+                        .channel
+                        .edit_message_rich(self.chat_id, mid, &preview)
+                        .await
+                        .is_ok()
+                    {
+                        self.delivery = StreamDelivery::Visible;
+                        break;
+                    }
+                    // Edit failed — drop the stale id and retry as a send.
+                    self.msg_id = None;
                 }
-            }
-            None => {
-                if let Ok(Some(id)) = self
-                    .channel
-                    .send_rich_message_simple(
-                        &self.chat_id.to_string(),
-                        &preview,
-                        self.thread_id.as_deref(),
-                    )
-                    .await
-                {
-                    self.msg_id = Some(id);
-                    self.delivery = StreamDelivery::Visible;
+                None => {
+                    if let Ok(Some(id)) = self
+                        .channel
+                        .send_rich_message_simple(
+                            &self.chat_id.to_string(),
+                            &preview,
+                            self.thread_id.as_deref(),
+                        )
+                        .await
+                    {
+                        self.msg_id = Some(id);
+                        self.delivery = StreamDelivery::Visible;
+                    }
+                    break;
                 }
             }
         }
@@ -2613,11 +2670,32 @@ impl TurnStream for TelegramTurnStream {
                         }
                     }
                 }
-                TurnEvent::Done { .. } => {
-                    // Collapse preview into a one-line summary; the final
-                    // answer is sent by `send_message` (delivery != FinalDelivered).
-                    self.collapse_to_summary().await;
-                    self.finished = true;
+                TurnEvent::Done { text } => {
+                    if self.defer_collapse {
+                        // 单 preview (silenced resume turn): the turn's model
+                        // output is intermediate progress — append it as a 💬
+                        // line and KEEP the preview (no collapse). The final
+                        // resume turn collapses. `pending_commentary` carries
+                        // the streamed text; `text` is the fallback for
+                        // non-streaming providers.
+                        let note = if !self.pending_commentary.trim().is_empty() {
+                            std::mem::take(&mut self.pending_commentary)
+                        } else {
+                            text
+                        };
+                        if !note.trim().is_empty() {
+                            self.commentary_notes += 1;
+                            self.tool_lines
+                                .push(format!("💬 {}", clip_detail(note.trim())));
+                        }
+                        self.flush_preview().await;
+                        self.finished = true;
+                    } else {
+                        // Collapse preview into a one-line summary; the final
+                        // answer is sent by `send_message` (delivery != FinalDelivered).
+                        self.collapse_to_summary().await;
+                        self.finished = true;
+                    }
                 }
                 TurnEvent::Cancelled { .. }
                 | TurnEvent::Error { .. }
@@ -2636,14 +2714,24 @@ impl TurnStream for TelegramTurnStream {
                     }
                 }
                 TurnEvent::Done { text } => {
-                    self.accumulated = text;
-                    self.finished = true;
-                    if self.accumulated.chars().count() > STREAM_PREVIEW_LIMIT {
-                        self.delete_preview().await;
-                        // Leave delivery as Visible/Pending → triggers fallback.
-                    } else {
+                    if self.defer_collapse {
+                        // 单 preview (silenced resume turn): append the turn's
+                        // intermediate text to the inherited body; keep the
+                        // message (no delete, no FinalDelivered — the
+                        // suspended-turn gate skips the fallback send).
+                        self.accumulated.push_str(&text);
+                        self.finished = true;
                         self.flush_preview().await;
-                        self.delivery = StreamDelivery::FinalDelivered;
+                    } else {
+                        self.accumulated = text;
+                        self.finished = true;
+                        if self.accumulated.chars().count() > STREAM_PREVIEW_LIMIT {
+                            self.delete_preview().await;
+                            // Leave delivery as Visible/Pending → triggers fallback.
+                        } else {
+                            self.flush_preview().await;
+                            self.delivery = StreamDelivery::FinalDelivered;
+                        }
                     }
                 }
                 TurnEvent::Error { .. } | TurnEvent::EmptyResponse { .. } => {
@@ -2669,8 +2757,10 @@ impl TurnStream for TelegramTurnStream {
         // deleted (partial mode past the 4096 cap) there is nothing to fold.
         let msg_id = self.msg_id?;
         // Report what the user currently sees: progress mode collapses to
-        // the one-line summary on Done, partial mode shows accumulated text.
-        let text = if self.finished && self.is_progress() {
+        // the one-line summary on Done — EXCEPT for defer_collapse resume
+        // turns, which keep the full preview lines (单 preview takeover
+        // needs the real body to seed the next turn's inherited history).
+        let text = if self.finished && self.is_progress() && !self.defer_collapse {
             self.collapse_summary()
         } else {
             self.preview_text()
@@ -2679,6 +2769,10 @@ impl TurnStream for TelegramTurnStream {
             msg_id: msg_id.to_string(),
             text,
         })
+    }
+
+    fn defer_collapse(&mut self) {
+        self.defer_collapse = true;
     }
 
     async fn finish(self: Box<Self>) -> StreamDelivery {
@@ -2817,6 +2911,8 @@ mod tests {
             thinking_tokens: 0,
             thinking_active: false,
             pending_commentary: String::new(),
+            inherited_preview: None,
+            defer_collapse: false,
             start: std::time::Instant::now(),
             last_edit: std::time::Instant::now(),
             delivery: StreamDelivery::FinalDelivered,
