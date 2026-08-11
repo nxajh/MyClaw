@@ -793,7 +793,13 @@ impl Agent {
                 if session.parent_session_id.is_none() {
                     tracing::info!(session = %session.id, "async delegation batch completed; suspending origin turn");
                     return Ok(TurnResult {
-                        text: String::new(),
+                        // 挂起轮折叠: 保留最后一次 LLM 响应的文本作为 origin
+                        // 输出, 由 dispatch_turn 折叠进 progress preview body
+                        // (OpenClaw draft 语义: output → preview → final), 并
+                        // 让 fallback send_message 路径承载该输出; 空文本
+                        // (模型只输出工具调用) 时 fallback 不发送, 折叠逻辑
+                        // 复用流式预览消息兜底。
+                        text: response.text,
                         stop_reason: StopReason::EndTurn,
                         pending_retry: None,
                         has_pending: true,

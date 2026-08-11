@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use crate::agents::session::{PersistHook, Session};
 use crate::agents::turn::{ProgressPreview, SubResult, SubStatus, TurnResult, TurnSuspension};
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
-use crate::channels::{Channel, ChannelInboundMessage};
+use crate::channels::{Channel, ChannelInboundMessage, FoldCandidate, StreamDelivery};
 
 /// 方案 B (RFC §3.3, 2026-08-10): render the live progress preview body —
 /// header + one ✅ line per collected task + trailing remaining count. The
@@ -61,6 +61,38 @@ fn render_progress_preview(origin: Option<&str>, lines: &[String], remaining: us
             out.push_str(&tail);
             out
         }
+    }
+}
+
+/// 挂起轮折叠基底选择 (2026-08-11): 优先 fallback `send_message` 的正式消息;
+/// 无 fallback (`turn_result.text` 为空, 如模型只输出工具调用) 时复用流式预览
+/// 消息 — progress mode 下 `finish()` 只到 Visible, 但该消息就是用户看到的
+/// origin 草稿, 折叠它才能保证单消息语义 (OpenClaw draft: output → preview →
+/// final)。纯函数以便单测覆盖全部组合。
+fn fold_base_msg(
+    delivered_msg_id: &Option<String>,
+    fold: &Option<FoldCandidate>,
+) -> Option<String> {
+    delivered_msg_id
+        .clone()
+        .or_else(|| fold.as_ref().map(|f| f.msg_id.clone()))
+}
+
+/// 残留流式消息删除判定 (2026-08-11): 仅当存在正式 fallback 消息且与基底
+/// 不同时才删除 — 基底复用流式消息时删除等于自杀 (会把正在折叠成 preview 的
+/// 消息删掉); `FinalDelivered` 时基底即流式消息, 亦不删除。
+/// 返回需要删除的消息 id, `None` 表示无需删除。
+fn residual_stream_msg_to_delete(
+    delivered_msg_id: &Option<String>,
+    delivery: StreamDelivery,
+    fold: &Option<FoldCandidate>,
+) -> Option<String> {
+    if delivered_msg_id.is_some() && delivery != StreamDelivery::FinalDelivered {
+        fold.as_ref()
+            .filter(|extra| delivered_msg_id.as_deref() != Some(extra.msg_id.as_str()))
+            .map(|extra| extra.msg_id.clone())
+    } else {
+        None
     }
 }
 
@@ -963,37 +995,35 @@ impl SessionContext {
                     if let Some(ref ch) = channel_for_send {
                         let caps = ch.capabilities();
                         if caps.supports_edit && caps.supports_delete {
-                            let base_msg = if delivery
-                                == crate::channels::StreamDelivery::FinalDelivered
-                            {
-                                fold.as_ref().map(|f| f.msg_id.clone())
-                            } else {
-                                delivered_msg_id.clone()
-                            };
+                            // 基底消息 (挂起轮折叠修复 2026-08-11): 优先 fallback
+                            // send_message 的正式消息; 无 fallback (turn_result.text
+                            // 为空, 如模型只输出工具调用) 时复用流式预览消息 —
+                            // progress mode 下 finish() 只到 Visible, 但该消息
+                            // 就是用户看到的 origin 草稿, 折叠它才能保证单消息
+                            // 语义 (OpenClaw draft: output → preview → final)。
+                            // 选择与删除判定抽为纯函数, 边界矩阵见单测。
+                            let base_msg = fold_base_msg(&delivered_msg_id, &fold);
                             if let Some(mid) = base_msg {
                                 let receiver =
                                     crate::channels::MessageReceiver::new(reply_target.clone());
-                                // Fallback path: the stream's own preview
-                                // (progress summary / partial tool lines) is a
-                                // leftover next to the real output message —
-                                // delete it so only ONE message survives.
-                                if delivery != crate::channels::StreamDelivery::FinalDelivered {
-                                    if let Some(extra) = fold.as_ref() {
-                                        if let Err(e) = ch
-                                            .delete_message(
-                                                &receiver,
-                                                &crate::channels::MessageId::new(
-                                                    extra.msg_id.clone(),
-                                                ),
-                                            )
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                session = %session.id,
-                                                err = %e,
-                                                "process_turn: fold leftover stream message delete failed"
-                                            );
-                                        }
+                                // Fallback path: 残留流式消息仅当存在正式 fallback
+                                // 消息且与基底不同时才删除 — 基底复用流式消息时
+                                // 删除等于自杀 (会把正在折叠成 preview 的消息删掉)。
+                                if let Some(extra_id) =
+                                    residual_stream_msg_to_delete(&delivered_msg_id, delivery, &fold)
+                                {
+                                    if let Err(e) = ch
+                                        .delete_message(
+                                            &receiver,
+                                            &crate::channels::MessageId::new(extra_id),
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            session = %session.id,
+                                            err = %e,
+                                            "process_turn: fold leftover stream message delete failed"
+                                        );
                                     }
                                 }
                                 let pending_count = self
@@ -1757,6 +1787,65 @@ mod suspension_tests {
         let empty = render_progress_preview(Some("   "), &[], 1);
         assert!(empty.starts_with("⏳ 任务进行中…"));
         assert!(empty.ends_with("⏳ 等待 1 个任务…"));
+    }
+
+    /// 挂起轮折叠边界矩阵 (2026-08-11): base_msg 选择 — fallback 正式消息优先,
+    /// 无 fallback (模型只输出工具调用, text 为空) 时复用流式预览消息, 两者皆无
+    /// (从未 flush) 时跳过折叠。
+    #[test]
+    fn fold_base_msg_boundary_matrix() {
+        let stream = Some(FoldCandidate {
+            msg_id: "s1".into(),
+            text: "preview".into(),
+        });
+        // fallback 正式消息优先
+        assert_eq!(fold_base_msg(&Some("d1".into()), &stream), Some("d1".into()));
+        assert_eq!(fold_base_msg(&Some("d1".into()), &None), Some("d1".into()));
+        // 无 fallback → 复用流式预览消息 (修复前此组合恒为 None, 折叠从未触发)
+        assert_eq!(fold_base_msg(&None, &stream), Some("s1".into()));
+        // 两者皆无 → 跳过折叠 (从未 flush 的 Pending)
+        assert_eq!(fold_base_msg(&None, &None), None);
+    }
+
+    /// 残留流式消息删除判定 (2026-08-11): 仅当存在正式 fallback 消息且与基底
+    /// 不同时才删除; 自删陷阱 (基底复用流式消息) / FinalDelivered / 无 fold 均
+    /// 不删除。
+    #[test]
+    fn residual_delete_boundary_matrix() {
+        use crate::channels::StreamDelivery as D;
+        let stream = Some(FoldCandidate {
+            msg_id: "s1".into(),
+            text: "preview".into(),
+        });
+        // Fallback path: 正式 fallback 消息与流式残留不同 → 删除残留
+        assert_eq!(
+            residual_stream_msg_to_delete(&Some("d1".into()), D::Visible, &stream),
+            Some("s1".into())
+        );
+        assert_eq!(
+            residual_stream_msg_to_delete(&Some("d1".into()), D::Pending, &stream),
+            Some("s1".into())
+        );
+        // 自删陷阱: fallback 消息即流式消息 → 不删除
+        assert_eq!(
+            residual_stream_msg_to_delete(&Some("s1".into()), D::Visible, &stream),
+            None
+        );
+        // 无 fallback (base = 流式消息) → 不删除
+        assert_eq!(
+            residual_stream_msg_to_delete(&None, D::Visible, &stream),
+            None
+        );
+        // FinalDelivered (base = 流式消息, 承载完整输出) → 不删除
+        assert_eq!(
+            residual_stream_msg_to_delete(&Some("d1".into()), D::FinalDelivered, &stream),
+            None
+        );
+        // 无流式残留可删 → 不删除
+        assert_eq!(
+            residual_stream_msg_to_delete(&Some("d1".into()), D::Visible, &None),
+            None
+        );
     }
 
     /// 方案 B: pre-B `suspension.json` (no `progress_preview` field) must
