@@ -121,6 +121,11 @@ pub struct Session {
     /// its permanent config. If Some(empty), all tools are forbidden.
     /// If None, uses permanent config. Never persisted; reset on session creation.
     pub turn_tool_allowlist: Option<Vec<String>>,
+    /// Per-turn cancellation token. Created fresh by `process_turn` and stored
+    /// here so `Agent::run` can check it at the top of each iteration.
+    /// A clone lives on `SessionContext::turn_cancel` so `/stop` can trigger it
+    /// without locking the session. Never persisted; reset on clone.
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 // `Session` cannot derive `Clone` because `Box<dyn TurnStream>` is not
@@ -150,6 +155,7 @@ impl Clone for Session {
             turn_injections: self.turn_injections.clone(),
             turn_silenced: self.turn_silenced,
             turn_tool_allowlist: self.turn_tool_allowlist.clone(),
+            cancel_token: None,
         }
     }
 }
@@ -202,6 +208,7 @@ impl Session {
             turn_injections: Vec::new(),
             turn_silenced: false,
             turn_tool_allowlist: None,
+            cancel_token: None,
         }
     }
 

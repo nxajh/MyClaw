@@ -220,7 +220,7 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         "compact" => Some(session::cmd_compact(ctx).await),
         "model" => Some(model::cmd_model(args, ctx).await),
         "models" => Some(model::cmd_models(ctx)),
-        "stop" => Some(reload::cmd_stop()),
+        "stop" => Some(reload::cmd_stop(ctx).await),
         // ── Batch 2: enhanced ──
         "tools" => Some(info::cmd_tools(ctx)),
         "config" => Some(config::cmd_config(args, ctx)),

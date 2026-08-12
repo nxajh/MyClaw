@@ -197,6 +197,20 @@ impl Agent {
                 }
             }
 
+            // User-cancel checkpoint (non-streaming channels): session.cancel_token
+            // is set by process_turn and triggered by `/stop`. Works for all
+            // channels regardless of TurnStream support.
+            if let Some(ref token) = session.cancel_token {
+                if token.is_cancelled() {
+                    return Ok(TurnResult {
+                        text: String::new(),
+                        stop_reason: StopReason::EndTurn,
+                        pending_retry: None,
+                        has_pending: false,
+                    });
+                }
+            }
+
             // Pre-send compaction guard: compact BEFORE the request when the
             // history we're about to send is over threshold. Driven by a direct
             // history estimate (not the token tracker) so a stale/under-counted

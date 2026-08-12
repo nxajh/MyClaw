@@ -241,6 +241,7 @@ impl SessionManager {
             turn_injections: Vec::new(),
             turn_silenced: false,
             turn_tool_allowlist: None,
+            cancel_token: None,
         };
         // Breakpoints are detected purely for the incomplete-turn flag below;
         // recovery itself is handled by `Agent::run_recovery` (which re-reads

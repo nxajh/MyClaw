@@ -118,6 +118,9 @@ pub struct SessionContext {
     /// preview) must survive until the LAST notice turn finishes. Runtime-
     /// only, not persisted (a daemon restart re-enters via `suspension.json`).
     pub notice_turns_in_flight: AtomicUsize,
+    /// Per-turn cancel token. Recreated each turn by `process_turn`.
+    /// `/stop` fires this to cancel the in-flight turn without locking `session`.
+    pub turn_cancel: std::sync::Mutex<tokio_util::sync::CancellationToken>,
 }
 
 /// 单 preview (2026-08-12): RAII guard decrementing the per-session
@@ -178,6 +181,7 @@ impl SessionContext {
             suspension_persist,
             pending_user_messages: std::sync::Mutex::new(std::collections::VecDeque::new()),
             notice_turns_in_flight: AtomicUsize::new(0),
+            turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             user_profile: Arc::new(UserProfile::default()),
         };
         ctx.restore_suspension();
@@ -198,6 +202,7 @@ impl SessionContext {
             suspension_persist,
             pending_user_messages: std::sync::Mutex::new(std::collections::VecDeque::new()),
             notice_turns_in_flight: AtomicUsize::new(0),
+            turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             user_profile: profile,
         };
         ctx.restore_suspension();
@@ -644,6 +649,13 @@ impl SessionContext {
         }
         session.channel = channel;
 
+        // Create a fresh cancellation token for this turn. A clone goes to
+        // SessionContext (for `/stop`) and another to the session (for
+        // Agent::run to check at the top of each loop iteration).
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        *self.turn_cancel.lock().unwrap() = cancel_token.clone();
+        session.cancel_token = Some(cancel_token);
+
         let session_override = session.session_override.clone();
         let mut prompt_config = runtime.defaults.prompt.clone();
         if let Some(pm) = session_override.permission_mode {
@@ -802,6 +814,7 @@ impl SessionContext {
         // abort on error cancels the WS transport.
         let turn_stream = session.turn_stream.take();
         session.channel = None;
+        session.cancel_token = None;
 
         match (result, turn_stream) {
             (Ok(mut turn_result), stream) => {

@@ -2,8 +2,18 @@
 
 use super::CommandContext;
 
-pub fn cmd_stop() -> String {
-    "⏹️ 停止信号已发送。\n_注意：当前请求完成后才会生效。_".to_string()
+pub async fn cmd_stop(ctx: CommandContext<'_>) -> String {
+    if let Some(session_ctx) = ctx.session_ctx {
+        let token = session_ctx.turn_cancel.lock().unwrap();
+        if !token.is_cancelled() {
+            token.cancel();
+            "⏹️ 已停止当前任务。".to_string()
+        } else {
+            "⏹️ 当前没有正在执行的任务。".to_string()
+        }
+    } else {
+        "⏹️ 无法停止：未找到活动会话。".to_string()
+    }
 }
 
 pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
