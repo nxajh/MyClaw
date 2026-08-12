@@ -593,6 +593,7 @@ impl Agent {
                         tool_specs: tool_specs.clone(),
                         tool_registry: Arc::clone(&runtime.tools),
                         session_owner: session.owner.clone(),
+                        session_id: session.id.clone(),
                         knowledge_dir: runtime.defaults.prompt.knowledge_dir.clone(),
                         registry: Arc::clone(&runtime.providers) as Arc<dyn ProviderRegistry>,
                     };

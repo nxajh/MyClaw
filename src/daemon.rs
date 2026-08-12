@@ -501,6 +501,7 @@ async fn build_tools(
     known_users: &Arc<crate::agents::KnownUsersRegistry>,
     user_registry: &Arc<crate::agents::UserRegistry>,
     namespace: &str,
+    session_backend: Arc<dyn crate::storage::SessionBackend>,
 ) -> (
     ToolRegistry,
     Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
@@ -569,6 +570,12 @@ async fn build_tools(
         Arc::clone(&r),
     )));
     tools.register(Arc::new(crate::tools::MemoryManageTool::new(wd, r)));
+
+    // Session query tool — provenance lookup (session IDs + message IDs).
+    tools.register(Arc::new(crate::tools::SessionQueryTool::new(
+        Arc::clone(&session_backend),
+        Arc::clone(user_resolver),
+    )));
 
     // Friend tools (RFC §4.2) — main-agent only, share one ctx so the
     // daemon can inject the live ChannelRegistry for §4.3 notifications.
@@ -1018,6 +1025,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     ));
     user_registry.migrate_legacy_to_root(&known_users, &user_resolver);
 
+    // Build session backend + manager early — B15: the DelegationCoordinator
+    // needs SessionManager (shared backend) to create sub-sessions as
+    // top-level peers instead of opening a per-parent JsonFileBackend at
+    // `{sessions_root}/{parent}/subagents/`.
+    // Also built before build_tools so SessionQueryTool can share the backend.
+    let session_backend = build_session_backend(&config);
+
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
     let (mut tools, task_state, send_message_tool, friend_ctx) = build_tools(
         &mcp_manager,
@@ -1030,6 +1044,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         &known_users,
         &user_registry,
         &config.system.namespace,
+        Arc::clone(&session_backend),
     )
     .await;
     // P1 cross-user delivery (RFC §3.5): give send_message access to the
@@ -1079,11 +1094,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         skills_arc.clone(),
     )?;
 
-    // Build session backend + manager early — B15: the DelegationCoordinator
-    // needs SessionManager (shared backend) to create sub-sessions as
-    // top-level peers instead of opening a per-parent JsonFileBackend at
-    // `{sessions_root}/{parent}/subagents/`.
-    let session_backend = build_session_backend(&config);
     let session_manager = Arc::new(
         SessionManager::new(Arc::clone(&session_backend))
             .with_agents(Arc::clone(&sub_agent_registry))

@@ -674,13 +674,6 @@ impl SessionContext {
             None => runtime.build_system_prompt(&prompt_config),
         };
 
-        // Expose the current session ID so the agent can annotate provenance
-        // when writing memories.
-        let system_prompt = format!(
-            "{}\n\n## Session\n\nID: {}",
-            system_prompt, session.id
-        );
-
         // RFC §三.A line 312-323: process_turn computes the attachment
         // delta (skills/agents/MCP/memory/date/autonomy) against the
         // history's announced state and prepends a <system-reminder> to

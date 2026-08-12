@@ -38,6 +38,8 @@ pub struct ForkInput {
     pub tool_registry: Arc<ToolRegistry>,
     /// Session owner (routing key) for memory scoping.
     pub session_owner: String,
+    /// Real session ID for provenance annotation (e.g. `myclaw/s/019fe564-...`).
+    pub session_id: String,
     /// Knowledge directory (memory files live here).
     pub knowledge_dir: String,
     /// Provider registry for resolving model config (reasoning flag).
@@ -50,6 +52,7 @@ const ALLOWED: &[&str] = &[
     "memory_view",
     "memory_search",
     "memory_manage",
+    "session_query",
 ];
 
 const MAX_ROUNDS: usize = 3;
@@ -193,9 +196,11 @@ fn sanitize_fork_context(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
 }
 
 async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
-    // Build a minimal Session shell — memory tools only need `owner`.
+    // Build a minimal Session shell — memory tools need `owner`;
+    // session_query needs the real `id` for provenance lookup.
     let mut session_shell = Session::new("memory_fork".to_string());
     session_shell.owner = input.session_owner.clone();
+    session_shell.id = input.session_id.clone();
 
     // Resolve thinking config from model config (same as do_summarize).
     let thinking = input
@@ -215,7 +220,7 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
 
     // Assemble messages: compacted recent context + extraction prompt.
     let mut messages = compact_fork_messages(input.messages);
-    let extraction_prompt = build_extraction_prompt(&input.knowledge_dir);
+    let extraction_prompt = build_extraction_prompt(&input.knowledge_dir, &input.session_id);
     messages.push(ChatMessage::user_text(extraction_prompt));
 
     let provider = input.provider;
@@ -482,7 +487,7 @@ async fn collect_fork_stream(mut stream: BoxStream<StreamEvent>) -> Result<ForkR
 ///
 /// Independent from `context_engine::build_memory_prompt` — tuned for
 /// turn-end extraction (not compaction), with its own taxonomy and rules.
-fn build_extraction_prompt(knowledge_dir: &str) -> String {
+fn build_extraction_prompt(knowledge_dir: &str, session_id: &str) -> String {
     // Build existing memory index so the model avoids duplicates.
     let existing_index = if !knowledge_dir.is_empty() {
         let memory_dir = std::path::Path::new(knowledge_dir);
@@ -591,8 +596,17 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          - If no memory changes are needed, respond with exactly: no memory changes needed\n\
          \n\
          You have a limited turn budget. Be efficient: decide what to write, then write it.\n\
-         Available tools: memory_list, memory_view, memory_search, memory_manage.",
+         Available tools: memory_list, memory_view, memory_search, memory_manage, session_query.\n\
+         \n\
+         ## Provenance annotation\n\
+         After writing each fact in memory content, add a provenance marker on its own line:\n\
+         > 📌 provenance:`<session_id>#<msg_id>` <YYYY-MM-DD>\n\
+         - `<session_id>`: the current session ID is `{session_id}`. For facts from earlier sessions, call session_query(action=\"list\") to find the ID.\n\
+         - `<msg_id>`: global message ID. Call session_query(action=\"messages\", session_id=\"...\") to see message IDs. Can be a range like `42-58`.\n\
+         - Date: today's date (YYYY-MM-DD).\n\
+         Omit the marker for self-derived knowledge (e.g. your own analysis of tool output).",
         existing_index = existing_index,
+        session_id = session_id,
     )
 }
 
@@ -602,7 +616,7 @@ mod tests {
 
     #[test]
     fn extraction_prompt_forces_user_scope() {
-        let prompt = build_extraction_prompt("memory");
+        let prompt = build_extraction_prompt("memory", "myclaw/s/test123");
         assert!(
             prompt.contains("scope='user'"),
             "fork prompt must force the user scope (agent layer is distillation-only)"
@@ -615,7 +629,7 @@ mod tests {
 
     #[test]
     fn extraction_prompt_forces_profile_fidelity() {
-        let prompt = build_extraction_prompt("memory");
+        let prompt = build_extraction_prompt("memory", "myclaw/s/test123");
         assert!(
             prompt.contains("User profile fidelity"),
             "prompt must mandate profile fidelity for user-level memories"

@@ -28,6 +28,7 @@ mod search;
 mod search_cooldown;
 mod send_message;
 pub mod shell;
+mod session_query;
 mod skill_manage_tool;
 mod skill_tool;
 mod skills_list_tool;
@@ -57,6 +58,7 @@ pub use memory_tool::{MemoryListTool, MemoryManageTool, MemorySearchTool, Memory
 pub use search::{ContentSearchTool, GlobSearchTool};
 pub use search_cooldown::SearchProviderCooldown;
 pub use send_message::SendMessageTool;
+pub use session_query::SessionQueryTool;
 pub use shell::{ShellPollTool, ShellTool};
 pub use skill_manage_tool::SkillManageTool;
 pub use skill_tool::SkillTool;
