@@ -267,7 +267,7 @@ impl JsonFileBackend {
 
         let mut result: Vec<(i64, ChatMessage)> = BufReader::new(f)
             .lines()
-            .filter_map(|line| line.ok())
+            .map_while(Result::ok)
             .filter(|line| !line.trim().is_empty())
             .filter_map(|line| {
                 let msg: ChatMessage = serde_json::from_str(&line).ok()?;
@@ -562,7 +562,7 @@ impl JsonFileBackend {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
-            let session_id = id_from_dir(dir_name);
+            let _session_id = id_from_dir(dir_name);
 
             // Walk segments: archive 0000, 0001, ..., then active.
             let mut segments: Vec<SegmentRecord> = Vec::new();
