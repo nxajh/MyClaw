@@ -358,10 +358,19 @@ impl JsonFileBackend {
 
         // Write only real messages (id != 0) to the new active segment, and
         // collect compaction summaries (id == 0) into the new segment record.
+        //
+        // The new segment always starts at the computed value
+        // (archived_start_id + archived_count) so the segment chain stays
+        // continuous and non-overlapping. Never fall back to a survivor's
+        // in-memory id: when meta.json was rebuilt externally (e.g. the
+        // message-id migration) while the daemon kept old in-memory ids, that
+        // override wrote stale ids into new segments and broke the chain.
+        // Surviving messages keep their in-memory ids for the rest of the run;
+        // on reload they are renumbered from the recorded start_id.
         let mut live_hashes: HashSet<String> = HashSet::new();
         let mut real_count = 0usize;
         let mut new_compactions: Vec<CompactionEntry> = Vec::new();
-        let mut new_start_id = archived_start_id + archived_count as i64;
+        let new_start_id = archived_start_id + archived_count as i64;
 
         if !surviving.is_empty() {
             let mut f = fs::File::create(&history_path)?;
@@ -379,9 +388,6 @@ impl JsonFileBackend {
                     let json =
                         serde_json::to_string(&externalized).map_err(std::io::Error::other)?;
                     writeln!(f, "{json}")?;
-                    if real_count == 0 {
-                        new_start_id = id;
-                    }
                     real_count += 1;
                 }
             }
@@ -1379,5 +1385,50 @@ mod tests {
 
         let loaded = backend.load_delegation_checkpoints();
         assert_eq!(loaded.len(), 3, "corrupt file should be skipped");
+    }
+
+    #[test]
+    fn rotate_uses_computed_start_id_not_survivor_in_memory_id() {
+        let (_dir, backend, sid) = backend_with_session();
+        backend
+            .append_message(&sid, &ChatMessage::user_text("m1".into()))
+            .unwrap();
+        backend
+            .append_message(&sid, &ChatMessage::user_text("m2".into()))
+            .unwrap();
+
+        // Simulate a session whose meta.json was rebuilt externally: segment 0
+        // is the active segment covering ids 1..=2, while the daemon's
+        // in-memory survivors still carry stale ids (here 100/101).
+        let mut meta = backend.read_meta(&sid).unwrap();
+        meta.segments = vec![SegmentRecord {
+            segment: 0,
+            start_id: 1,
+            count: 2,
+            compactions: vec![],
+        }];
+        backend.write_meta(&meta).unwrap();
+
+        let surviving = vec![
+            (0i64, ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY]".into())),
+            (100i64, ChatMessage::user_text("m2".into())),
+        ];
+        backend.rotate_history_impl(&sid, &surviving).unwrap();
+
+        let meta = backend.read_meta(&sid).unwrap();
+        let archived = meta.segments.iter().find(|s| s.segment == 0).unwrap();
+        assert_eq!((archived.start_id, archived.count), (1, 2));
+        let active = meta.segments.iter().find(|s| s.segment == 1).unwrap();
+        // Chain must be continuous: start == archived start + archived count,
+        // never the stale in-memory id (100).
+        assert_eq!((active.start_id, active.count), (3, 1));
+        assert_eq!(meta.segment, 1);
+
+        // Reload assigns ids from the recorded start_id (renumbered); the
+        // compaction summary is inserted at its position with id 0.
+        let loaded = backend.read_history_with_ids(&sid);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].0, 0);
+        assert_eq!(loaded[1].0, 3);
     }
 }
