@@ -59,7 +59,10 @@ pub struct SubResult {
 /// turns REOPEN the same message and append lines (保留历史行追加) instead
 /// of sending a second preview. `reply_target`/`msg_id` identify the live
 /// message; `text` is the last rendered body so a resumed stream can seed
-/// its own preview with the inherited history.
+/// its own preview with the inherited history. The cumulative counters and
+/// wall-clock start ride along so the FINAL summary line reflects the WHOLE
+/// message ("summary 没有累计", user-confirmed); `#[serde(default)]` keeps
+/// older `suspension.json` files loadable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreviewState {
     /// Routing key of the preview message (`chat_id:thread_id`).
@@ -68,6 +71,19 @@ pub struct PreviewState {
     pub msg_id: String,
     /// Last rendered preview body (what the user currently sees).
     pub text: String,
+    /// Cumulative thinking-step count (progress mode).
+    #[serde(default)]
+    pub thinking_steps: usize,
+    /// Cumulative tool-call count (progress mode).
+    #[serde(default)]
+    pub tool_count: usize,
+    /// Cumulative commentary-notes count (progress mode).
+    #[serde(default)]
+    pub commentary_notes: usize,
+    /// Wall-clock start (unix seconds) of the ORIGIN turn — taken-over
+    /// streams re-anchor `start` so the summary's ⏱️ spans the whole flow.
+    #[serde(default)]
+    pub started_at_unix_secs: Option<u64>,
 }
 
 /// 方案 C: a parent turn suspended on pending async delegations.

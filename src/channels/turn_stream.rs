@@ -38,12 +38,27 @@ pub enum StreamDelivery {
 /// repurpose (edit in place) instead of leaving it visible next to a second
 /// message — OpenClaw single-message draft semantics: one message evolves
 /// (output → preview → final), never output + preview side by side.
+///
+/// 单 preview (2026-08-12): carries the cumulative counters (thinking /
+/// tool calls / notes) and the wall-clock start so a TAKEN-OVER stream
+/// (origin → silenced notice → final loud) keeps counting across turns —
+/// the FINAL summary line must reflect the WHOLE message, not just the
+/// last turn's activity ("summary 没有累计", user-confirmed).
 #[derive(Debug, Clone)]
 pub struct FoldCandidate {
     /// Platform message id (e.g. Telegram message id).
     pub msg_id: String,
     /// Current body of that message (what the user sees right now).
     pub text: String,
+    /// Cumulative thinking-step count (progress mode).
+    pub thinking_steps: usize,
+    /// Cumulative tool-call count (progress mode).
+    pub tool_count: usize,
+    /// Cumulative commentary-notes count (progress mode).
+    pub commentary_notes: usize,
+    /// Wall-clock start (unix seconds) of the ORIGIN turn — taken-over
+    /// streams re-anchor `start` so the summary's ⏱️ spans the whole flow.
+    pub started_at_unix_secs: Option<u64>,
 }
 
 /// A per-turn streaming output handle. Owned by `Session.turn_stream`;
@@ -96,12 +111,11 @@ pub trait TurnStream: Send + Sync {
 
     /// 单 preview (2026-08-12): mark this stream as the FINAL (loud) resume
     /// turn of an async-delegation suspension that took over the origin's
-    /// preview message. Its `Done` must append the final answer INTO the
-    /// same preview message (edit in place, no collapse) and report
-    /// `FinalDelivered` so the caller skips the `send_message` fallback —
-    /// otherwise the collapse + fallback would open a SECOND message next
-    /// to the evolving preview (multi-message spam). On transport failure
-    /// the delivery stays non-final so the fallback still reaches the user.
-    /// Default: no-op (ordinary turns keep collapse + fallback semantics).
+    /// preview message. Its `Done` collapses the taken-over preview into the
+    /// one-line summary (the progress message ENDS as the summary — 最终才
+    /// summary); the final answer is then delivered by the caller's
+    /// `send_message` fallback as a SEPARATE message (user-confirmed shape:
+    /// 2 messages). Default: no-op (ordinary turns keep the same collapse +
+    /// fallback semantics).
     fn final_takeover(&mut self) {}
 }

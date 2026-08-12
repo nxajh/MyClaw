@@ -2193,9 +2193,38 @@ impl Channel for TelegramChannel {
             .lock()
             .insert(reply_target.to_string());
 
-        let (fold_msg_id, inherited) = match fold {
-            Some(f) => (f.msg_id.parse::<i64>().ok(), Some(f.text)),
-            None => (None, None),
+        // 单 preview (2026-08-12): the fold carries the cumulative counters
+        // and wall-clock start so the taken-over stream keeps counting the
+        // WHOLE message across turns (origin → silenced notice → final loud)
+        // — the FINAL summary line must reflect everything, not just the
+        // last turn's activity ("summary 没有累计", user-confirmed).
+        let (fold_msg_id, inherited, fold_steps, fold_tools, fold_notes, fold_started_at) =
+            match fold {
+                Some(f) => (
+                    f.msg_id.parse::<i64>().ok(),
+                    Some(f.text),
+                    f.thinking_steps,
+                    f.tool_count,
+                    f.commentary_notes,
+                    f.started_at_unix_secs,
+                ),
+                None => (None, None, 0, 0, 0, None),
+            };
+        // Re-anchor `start` to the origin's wall-clock moment so the
+        // summary's ⏱️ spans the whole flow (including sub-agent runtime).
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let start = match fold_started_at {
+            Some(u) => {
+                std::time::Instant::now() - std::time::Duration::from_secs(now_unix.saturating_sub(u))
+            }
+            None => std::time::Instant::now(),
+        };
+        let absolute_start = match fold_started_at {
+            Some(u) => std::time::UNIX_EPOCH + std::time::Duration::from_secs(u),
+            None => std::time::SystemTime::now(),
         };
 
         Some(Box::new(TelegramTurnStream {
@@ -2215,16 +2244,17 @@ impl Channel for TelegramChannel {
                 String::new()
             },
             tool_lines: Vec::new(),
-            tool_count: 0,
-            thinking_steps: 0,
-            commentary_notes: 0,
+            tool_count: fold_tools,
+            thinking_steps: fold_steps,
+            commentary_notes: fold_notes,
             thinking_tokens: 0,
             thinking_active: false,
             pending_commentary: String::new(),
             inherited_preview: inherited,
             defer_collapse: false,
             final_takeover: false,
-            start: std::time::Instant::now(),
+            start,
+            absolute_start,
             last_edit: std::time::Instant::now() - STREAM_THROTTLE,
             delivery: StreamDelivery::Pending,
             finished: false,
@@ -2402,13 +2432,16 @@ struct TelegramTurnStream {
     defer_collapse: bool,
     /// 单 preview (2026-08-12): FINAL (loud) resume turn of an
     /// async-delegation suspension that took over the origin's preview —
-    /// `Done` appends the final answer into the same preview message
-    /// (no collapse) and reports `FinalDelivered` (no fallback send), so
-    /// the whole flow stays ONE evolving message. Set via
-    /// `TurnStream::final_takeover`.
+    /// `Done` collapses it into the one-line summary; the final answer is
+    /// delivered by the `send_message` fallback as a separate message.
+    /// Set via `TurnStream::final_takeover`.
     final_takeover: bool,
     /// Turn start time (progress mode, for collapse summary).
     start: std::time::Instant,
+    /// 单 preview (2026-08-12): wall-clock start (unix seconds) of the
+    /// ORIGIN turn of the whole suspension flow — taken-over streams keep it
+    /// so the summary's ⏱️ spans the whole message, not just the last turn.
+    absolute_start: std::time::SystemTime,
     last_edit: std::time::Instant,
     delivery: StreamDelivery,
     finished: bool,
@@ -2805,6 +2838,17 @@ impl TurnStream for TelegramTurnStream {
         Some(FoldCandidate {
             msg_id: msg_id.to_string(),
             text,
+            // 单 preview (2026-08-12): cumulative counters + wall-clock start
+            // ride along so a taken-over stream keeps counting the WHOLE
+            // message across turns ("summary 没有累计", user-confirmed).
+            thinking_steps: self.thinking_steps,
+            tool_count: self.tool_count,
+            commentary_notes: self.commentary_notes,
+            started_at_unix_secs: self
+                .absolute_start
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs()),
         })
     }
 
@@ -2956,6 +3000,7 @@ mod tests {
             defer_collapse: false,
             final_takeover: false,
             start: std::time::Instant::now(),
+            absolute_start: std::time::SystemTime::now(),
             last_edit: std::time::Instant::now(),
             delivery: StreamDelivery::FinalDelivered,
             finished: true,
@@ -2963,6 +3008,16 @@ mod tests {
         let f = s.fold_candidate().unwrap();
         assert_eq!(f.msg_id, "7");
         assert_eq!(f.text, "hello");
+        // 单 preview (2026-08-12): cumulative counters ride along so a
+        // taken-over stream keeps counting the WHOLE message across turns.
+        s.thinking_steps = 3;
+        s.tool_count = 2;
+        s.commentary_notes = 1;
+        let f2 = s.fold_candidate().unwrap();
+        assert_eq!(f2.thinking_steps, 3);
+        assert_eq!(f2.tool_count, 2);
+        assert_eq!(f2.commentary_notes, 1);
+        assert!(f2.started_at_unix_secs.is_some());
         // No flushed message (deleted / never sent) → None.
         s.msg_id = None;
         assert!(s.fold_candidate().is_none());
@@ -2989,6 +3044,7 @@ mod tests {
             defer_collapse: false,
             final_takeover: false,
             start: std::time::Instant::now(),
+            absolute_start: std::time::SystemTime::now(),
             last_edit: std::time::Instant::now(),
             delivery: StreamDelivery::Pending,
             finished: false,

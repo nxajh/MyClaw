@@ -435,6 +435,13 @@ impl SessionContext {
                     reply_target,
                     msg_id: fold.msg_id,
                     text: fold.text,
+                    // 单 preview (2026-08-12): cumulative counters + wall-clock
+                    // start ride along so the FINAL summary line reflects the
+                    // WHOLE message ("summary 没有累计", user-confirmed).
+                    thinking_steps: fold.thinking_steps,
+                    tool_count: fold.tool_count,
+                    commentary_notes: fold.commentary_notes,
+                    started_at_unix_secs: fold.started_at_unix_secs,
                 });
             }
         }
@@ -604,6 +611,13 @@ impl SessionContext {
                 .map(|p| crate::channels::FoldCandidate {
                     msg_id: p.msg_id,
                     text: p.text,
+                    // 单 preview (2026-08-12): cumulative counters + wall-clock
+                    // start ride along so the FINAL summary line reflects the
+                    // WHOLE message ("summary 没有累计", user-confirmed).
+                    thinking_steps: p.thinking_steps,
+                    tool_count: p.tool_count,
+                    commentary_notes: p.commentary_notes,
+                    started_at_unix_secs: p.started_at_unix_secs,
                 })
         } else {
             None
