@@ -82,17 +82,19 @@ pub struct DelegationTimeout {
 
 /// Events sent from background sub-agents to the Orchestrator.
 ///
-/// RFC v2 §三.C: `session_id` identifies the parent session that spawned
-/// the sub-agent — orchestrator routes the completion message back into
-/// this session's `process_turn` so the LLM can react to the sub-agent's
-/// result.
+/// RFC v2 §三.C: `parent_session_id` identifies the parent session that
+/// spawned the sub-agent — orchestrator routes the completion message back
+/// into this session's `process_turn` so the LLM can react to the sub-agent's
+/// result. `sub_session_id` is the sub-agent's own session FQID — its
+/// identity and the addressing key for `agent_kill` / `send_message`.
 #[derive(Debug, Clone)]
 pub enum DelegationEvent {
     /// Sub-agent completed successfully.
     Completed {
-        task_id: String,
-        /// Hex session ID of the parent session (NOT a routing key).
-        session_id: String,
+        /// The sub-agent's own session FQID (identity / addressing key).
+        sub_session_id: String,
+        /// Parent session FQID that spawned the sub-agent.
+        parent_session_id: String,
         summary: String,
         /// How long the sub-agent ran (in seconds).
         duration_secs: u64,
@@ -104,9 +106,10 @@ pub enum DelegationEvent {
     },
     /// Sub-agent failed.
     Failed {
-        task_id: String,
-        /// Hex session ID of the parent session (NOT a routing key).
-        session_id: String,
+        /// The sub-agent's own session FQID (identity / addressing key).
+        sub_session_id: String,
+        /// Parent session FQID that spawned the sub-agent.
+        parent_session_id: String,
         error: String,
     },
     /// Sub-agent was killed by its wall-clock timeout.
@@ -114,9 +117,10 @@ pub enum DelegationEvent {
     /// Distinct from `Failed`: the parent should treat the task as
     /// abandoned (possibly mid-flight) rather than finished-with-error.
     TimedOut {
-        task_id: String,
-        /// Hex session ID of the parent session (NOT a routing key).
-        session_id: String,
+        /// The sub-agent's own session FQID (identity / addressing key).
+        sub_session_id: String,
+        /// Parent session FQID that spawned the sub-agent.
+        parent_session_id: String,
         /// The effective timeout that killed the sub-agent (seconds).
         timeout_secs: u64,
         /// How long the sub-agent ran before the timeout fired (seconds).
@@ -124,12 +128,12 @@ pub enum DelegationEvent {
     },
     /// Sub-agent sent a message to the parent while running in background.
     ///
-    /// RFC agent-messaging §3.4/§3.6: the payload's `task_id` is the
-    /// **sender's own** task id (identity, so the parent can reply via
-    /// `recipient`); its `session_id` is the parent session the message
-    /// must wake. Wrapped in a payload struct (not inline named fields) so
-    /// the message type is addressable as a type in the `AgentMessenger`
-    /// trait.
+    /// RFC agent-messaging §3.4/§3.6: the payload's `sub_session_id` is the
+    /// **sender's own** session id (identity, so the parent can reply via
+    /// `recipient`); its `parent_session_id` is the parent session the
+    /// message must wake. Wrapped in a payload struct (not inline named
+    /// fields) so the message type is addressable as a type in the
+    /// `AgentMessenger` trait.
     Message(AgentMessage),
 }
 
@@ -158,10 +162,10 @@ pub struct AgentMessage {
     pub msg_id: String,
     /// Display name of the sending sub-agent (its agent name).
     pub sender_name: String,
-    /// The sub-agent's own task_id (identity — NOT the recipient).
-    pub task_id: String,
-    /// Hex session ID of the parent session (NOT a routing key).
-    pub session_id: String,
+    /// The sub-agent's own session FQID (identity — NOT the recipient).
+    pub sub_session_id: String,
+    /// Parent session FQID that spawned the sub-agent.
+    pub parent_session_id: String,
     pub text: String,
     /// `Final` (default) wakes/injects; `Progress` is suppressed (§2.3).
     pub kind: MessageKind,
@@ -188,8 +192,8 @@ pub struct AgentMail {
 /// A running async sub-agent's parent → sub mailbox.
 ///
 /// `tx` is held by the coordinator's `mailboxes` map — the parent's
-/// `send_message(recipient=task_id)` routes through it. `rx` lives on the
-/// sub-agent's `Session` so `Agent::run` can drain it before every LLM
+/// `send_message(recipient=sub_session_id)` routes through it. `rx` lives on
+/// the sub-agent's `Session` so `Agent::run` can drain it before every LLM
 /// request. `rx` is mutex-wrapped to keep `Session` cheaply cloneable
 /// (snapshots share the same mailbox handle).
 pub struct SubAgentMailbox {

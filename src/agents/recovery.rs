@@ -16,13 +16,12 @@ use crate::agents::session::SessionManager;
 /// Info about a sub-agent that was still running when the daemon was killed.
 ///
 /// Reconstructed from session metadata on startup — no on-disk marker file
-/// is required. `task_id` reuses the sub-session id (which is the durable
-/// identifier post-restart); `task_preview` is derived from the first user
-/// message in the sub-session history.
+/// is required. `sub_session_id` is the durable identifier post-restart;
+/// `task_preview` is derived from the first user message in the sub-session
+/// history.
 #[derive(Debug, Clone)]
 pub struct UnfinishedSubAgent {
     pub agent_name: String,
-    pub task_id: String,
     pub task_preview: String,
     pub parent_session_id: String,
     pub sub_session_id: String,
@@ -91,15 +90,11 @@ pub fn scan_unfinished_subagents(session_manager: &SessionManager) -> Vec<Unfini
 
         unfinished.push(UnfinishedSubAgent {
             agent_name: session.agent_name.clone(),
-            // P1-1: prefer the persisted task FQID (matches the parent's
-            // suspension `pending` entry) over the opaque sub-session id.
-            // Legacy sub-sessions without the field fall back to the hex id.
-            task_id: session
-                .sub_agent_task_id
-                .clone()
-                .unwrap_or_else(|| session.id.clone()),
             task_preview,
             parent_session_id: parent_id,
+            // The sub-session id is the durable identifier: it matches the
+            // parent's suspension `pending` entry and the delegation
+            // checkpoint, so recovery events key on it directly.
             sub_session_id: session.id.clone(),
             session_key,
             reply_target,

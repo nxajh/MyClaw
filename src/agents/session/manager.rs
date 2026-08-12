@@ -237,7 +237,6 @@ impl SessionManager {
             channel: None,
             turn_stream: None,
             sub_agent_inbox: None,
-            sub_agent_task_id: self.backend.load_task_id(&session_id),
             turn_injections: Vec::new(),
             turn_silenced: false,
             turn_tool_allowlist: None,
@@ -463,11 +462,15 @@ impl SessionManager {
     /// `DelegationCoordinator`) populates it (run_mode = Background,
     /// permission_mode = Full, system_prompt_override = identity prompt)
     /// before calling `process_turn`.
+    ///
+    /// Returns the context along with the sub-session FQID so callers
+    /// (sync `delegate` / async `spawn_delegate_async`) can use the id as
+    /// the agent identity and addressing key without locking the session.
     pub fn create_sub_session_context(
         &self,
         parent_session_id: &str,
         agent_name: &str,
-    ) -> std::io::Result<Arc<SessionContext>> {
+    ) -> std::io::Result<(std::sync::Arc<SessionContext>, String)> {
         let info = self.create_sub_session(parent_session_id, agent_name)?;
         // Load the freshly-created session through the standard get_or_create
         // path — owner is resolved from backend metadata.
@@ -488,7 +491,8 @@ impl SessionManager {
         }
         session.persist = Some(self.build_persist_hook());
         let agent = self.build_agent_for_session(&session);
-        Ok(Arc::new(SessionContext::new(session, agent)))
+        let sub_session_id = session.id.clone();
+        Ok((Arc::new(SessionContext::new(session, agent)), sub_session_id))
     }
 
     /// Create a sub-session that delegates work back to its parent for routing

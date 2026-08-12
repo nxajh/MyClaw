@@ -25,7 +25,7 @@ impl Tool for AgentListTool {
 
     fn description(&self) -> &str {
         "List all sub-agents currently running in the background for this session. \
-         Shows task_id, agent name, and status."
+         Shows session id, agent name, and status."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -51,7 +51,7 @@ impl Tool for AgentListTool {
             .into_iter()
             .map(|r| {
                 json!({
-                    "task_id": r.task_id,
+                    "session_id": r.sub_session_id,
                     "agent_name": r.agent_name,
                     "status": r.status,
                     "elapsed_secs": r.elapsed_secs

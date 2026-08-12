@@ -324,12 +324,12 @@ impl SessionBackend for InMemoryBackend {
     ) -> std::io::Result<()> {
         self.checkpoints
             .write()
-            .insert(checkpoint.task_id.clone(), checkpoint.clone());
+            .insert(checkpoint.sub_session_id.clone(), checkpoint.clone());
         Ok(())
     }
 
-    fn delete_delegation_checkpoint(&self, task_id: &str) -> std::io::Result<()> {
-        self.checkpoints.write().remove(task_id);
+    fn delete_delegation_checkpoint(&self, sub_session_id: &str) -> std::io::Result<()> {
+        self.checkpoints.write().remove(sub_session_id);
         Ok(())
     }
 

@@ -24,20 +24,20 @@ impl Tool for AgentKillTool {
     }
 
     fn description(&self) -> &str {
-        "Terminate a running sub-agent by its task_id. Returns the partial result \
-         captured before termination. Use agent_list first to find the task_id."
+        "Terminate a running sub-agent by its session id. Returns the partial result \
+         captured before termination. Use agent_list first to find the session id."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "task_id": {
+                "sub_session_id": {
                     "type": "string",
-                    "description": "The task_id of the sub-agent to terminate."
+                    "description": "The session id of the sub-agent to terminate."
                 }
             },
-            "required": ["task_id"]
+            "required": ["sub_session_id"]
         })
     }
 
@@ -50,18 +50,18 @@ impl Tool for AgentKillTool {
         args: serde_json::Value,
         _session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
-        let task_id = args["task_id"]
+        let sub_session_id = args["sub_session_id"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("'task_id' is required"))?;
+            .ok_or_else(|| anyhow::anyhow!("'sub_session_id' is required"))?;
 
-        let cancelled = self.delegator.cancel(task_id).await;
+        let cancelled = self.delegator.cancel(sub_session_id).await;
 
         if cancelled {
             Ok(ToolResult {
                 success: true,
                 output: format!(
-                    r#"{{"status": "cancelled", "task_id": "{}"}}"#,
-                    task_id
+                    r#"{{"status": "cancelled", "sub_session_id": "{}"}}"#,
+                    sub_session_id
                 ),
                 error: None,
             })
@@ -69,7 +69,10 @@ impl Tool for AgentKillTool {
             Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("Task '{}' not found or already completed", task_id)),
+                error: Some(format!(
+                    "Sub-agent '{}' not found or already completed",
+                    sub_session_id
+                )),
             })
         }
     }

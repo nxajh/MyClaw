@@ -1,6 +1,6 @@
 //! RFC §6 数据迁移引擎（identity-id-rfc §6）。
 //!
-//! 启动自动迁移（[`run_auto`]）收敛 5 项格式 + 1 项清理：
+//! 启动自动迁移（[`run_auto`]）收敛 5 项格式 + 2 项清理：
 //! - 6.1 `users.json`：v1 孤儿 `root` 条目 → uuidv7 FQID（Case A 原位升级 /
 //!   Case B 丢弃孤儿、保留 `username=root` 的 FQID 条目），key/uid 归一化
 //!   （含双重前缀污染值）；
@@ -16,7 +16,10 @@
 //!   同步改名，`active.json` 的 `_cron_` 键连带（键内含 job id，不 rename 则
 //!   cron 会话历史断链）；
 //! - 6.6 `users/` 遗留 rk 目录 → `users/.legacy-rk-archive/`（仅自动模式；
-//!   不动内容，不归档新布局根目录）。
+//!   不动内容，不归档新布局根目录）；
+//! - B 清理：`sessions/*/meta.json` 遗留顶层 `task_id` 字段（寻址面迁移 B：
+//!   agent 寻址从 task_id 迁到 session id 后的数据卫生；仅自动模式，备份
+//!   策略同 6.3：`.migration-backups/<dir>/meta.json.bak`）。
 //!
 //! 手动命令 `myclaw migrate-namespace <new>`（RFC §6.7）复用同一 builder：
 //! 目标 namespace 参数化，流程 备份 → 干跑 → 确认 → 执行。
@@ -232,6 +235,7 @@ pub fn build_plan(
     migrate_tasks(&mut plan, workspace_dir, to_namespace)?;
     if auto {
         archive_legacy_user_dirs(&mut plan, workspace_dir, to_namespace)?;
+        migrate_session_meta_task_ids(&mut plan, workspace_dir)?;
     }
     Ok(plan)
 }
@@ -792,6 +796,75 @@ fn archive_legacy_user_dirs(plan: &mut MigrationPlan, workspace: &Path, to_ns: &
             from: entry.path(),
             to: archive.join(&name),
             label: format!("users/{name} → users/.legacy-rk-archive/{name}"),
+        });
+    }
+    Ok(())
+}
+
+// ── B 清理：session meta 遗留 task_id ───────────────────────────────────────
+
+/// 清理 `sessions/*/meta.json` 中遗留的顶层 `task_id` 字段。
+///
+/// 寻址面迁移 B 后，sub-agent 的持久标识是 session id（`delegations/` 主键、
+/// suspension pending 匹配均按 sub_session_id），`task_id` 字段已无消费方。
+/// 数据卫生：仅自动模式（daemon 启动、组件加载前）执行；幂等——无 `task_id`
+/// → 无动作。备份策略与 6.3 一致（`.migration-backups/<dir>/meta.json.bak`），
+/// 重跑/崩溃恢复保留首轮原始备份。
+fn migrate_session_meta_task_ids(plan: &mut MigrationPlan, workspace: &Path) -> Result<()> {
+    let sessions_root = workspace.join("sessions");
+    if !sessions_root.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&sessions_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = entry.path();
+        let meta_path = dir.join("meta.json");
+        if !meta_path.exists() {
+            continue;
+        }
+        // 可写探测（与 migrate_sessions 一致）：owner 异常/只读目录无法重写 →
+        // warn + 跳过（数据不丢，等有权限时重跑收敛）。
+        if std::fs::OpenOptions::new().write(true).open(&meta_path).is_err() {
+            tracing::warn!(
+                "migration: {}/meta.json 不可写（owner/权限异常），跳过 task_id 清理",
+                dir.file_name().unwrap_or_default().to_string_lossy()
+            );
+            continue;
+        }
+        let raw = std::fs::read_to_string(&meta_path)
+            .with_context(|| format!("migration: 读 {} 失败", meta_path.display()))?;
+        let mut meta: serde_json::Value = serde_json::from_str(&raw)
+            .with_context(|| format!("migration: 解析 {} 失败", meta_path.display()))?;
+        let has_task_id = meta
+            .as_object()
+            .map(|o| o.contains_key("task_id"))
+            .unwrap_or(false);
+        if !has_task_id {
+            continue;
+        }
+        if let Some(obj) = meta.as_object_mut() {
+            obj.remove("task_id");
+        }
+        let dir_name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        plan.backups.push(Backup {
+            from: meta_path.clone(),
+            to: sessions_root
+                .join(".migration-backups")
+                .join(&dir_name)
+                .join("meta.json.bak"),
+            label: format!("{dir_name}/meta.json → .migration-backups/{dir_name}/meta.json.bak"),
+        });
+        plan.steps.push(Step::WriteJson {
+            path: meta_path,
+            body: serde_json::to_string(&meta)?,
+            label: format!("{dir_name}/meta.json：删除遗留 task_id 字段"),
         });
     }
     Ok(())
@@ -1457,5 +1530,91 @@ mod tests {
         );
         // 可写目录正常迁移。
         assert!(!sessions.join("00112233").exists(), "可写目录应已 rename");
+    }
+
+    // ── B 清理：session meta task_id ────────────────────────────────────────
+
+    #[test]
+    fn session_meta_task_id_cleanup_removes_field_and_backs_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        let dir = "myclaw_s_019fec31-ed7d-7791-92e9-6822b5053031";
+        fs::create_dir_all(sessions.join(dir)).unwrap();
+        write_json(
+            &sessions.join(dir).join("meta.json"),
+            r#"{"id":"myclaw/s/019fec31-ed7d-7791-92e9-6822b5053031","owner":"telegram:myclaw:6270938644","created_at":"2026-08-10T15:02:02Z","message_count":8,"parent_session_id":"myclaw/s/019fe564-1566-7453-b9b0-89c5d707fa93","task_id":"myclaw/t/019fec31-ed1f-7032-b666-ff67bd0c10c4","segments":[{"segment":0,"start_id":1,"count":8}]}"#,
+        );
+        // auto=true（daemon 启动路径）→ 清理步骤 + 备份。
+        let plan = build_plan(tmp.path(), tmp.path(), "myclaw", true).unwrap();
+        assert!(!plan.is_empty(), "带 task_id 的 meta 应触发清理");
+        plan.apply().unwrap();
+        let meta: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(sessions.join(dir).join("meta.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(meta.get("task_id").is_none(), "task_id 应已删除");
+        assert_eq!(
+            meta["id"].as_str().unwrap(),
+            "myclaw/s/019fec31-ed7d-7791-92e9-6822b5053031",
+            "其余字段原样保留"
+        );
+        assert_eq!(meta["message_count"].as_u64().unwrap(), 8);
+        assert!(sessions
+            .join(".migration-backups")
+            .join(dir)
+            .join("meta.json.bak")
+            .exists());
+        // 幂等：再次构建 → 空 plan。
+        let plan2 = build_plan(tmp.path(), tmp.path(), "myclaw", true).unwrap();
+        assert!(
+            plan2.is_empty(),
+            "重跑应为 no-op，实际 {} 备份 {} 步骤",
+            plan2.backups.len(),
+            plan2.steps.len()
+        );
+    }
+
+    #[test]
+    fn session_meta_task_id_cleanup_only_auto_and_only_dirty_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        let clean = "myclaw_s_019fee03-bd90-7353-bf91-65300eabdb85";
+        let dirty = "myclaw_s_019fee03-f18f-70c2-96fa-f97d109dd34f";
+        fs::create_dir_all(sessions.join(clean)).unwrap();
+        write_json(
+            &sessions.join(clean).join("meta.json"),
+            r#"{"id":"myclaw/s/019fee03-bd90-7353-bf91-65300eabdb85","owner":"x","created_at":"2026-08-11T00:00:00Z","message_count":1}"#,
+        );
+        fs::create_dir_all(sessions.join(dirty)).unwrap();
+        write_json(
+            &sessions.join(dirty).join("meta.json"),
+            r#"{"id":"myclaw/s/019fee03-f18f-70c2-96fa-f97d109dd34f","owner":"x","created_at":"2026-08-11T00:00:00Z","message_count":2,"task_id":"myclaw/t/019fee03-ed1f-7032-b666-ff67bd0c10c4"}"#,
+        );
+        // auto=false（migrate-namespace CLI 路径）→ 不产生 task_id 清理。
+        let plan = build_plan(tmp.path(), tmp.path(), "brand", false).unwrap();
+        assert!(
+            !plan.steps.iter().any(|s| s.label().contains("task_id")),
+            "auto=false 不应清理 task_id: {:?}",
+            plan.steps.iter().map(|s| s.label()).collect::<Vec<_>>()
+        );
+        // auto=true → 只清理带 task_id 的文件，干净文件不动。
+        let plan = build_plan(tmp.path(), tmp.path(), "myclaw", true).unwrap();
+        let labels: Vec<&str> = plan.steps.iter().map(|s| s.label()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains(dirty)),
+            "应清理带 task_id 的 meta: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.contains(clean)),
+            "无 task_id 的 meta 不应有步骤: {labels:?}"
+        );
+        // 备份仅覆盖被清理的文件。
+        plan.apply().unwrap();
+        assert!(sessions
+            .join(".migration-backups")
+            .join(dirty)
+            .join("meta.json.bak")
+            .exists());
+        assert!(!sessions.join(".migration-backups").join(clean).exists());
     }
 }

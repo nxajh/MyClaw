@@ -288,12 +288,12 @@ impl SessionContext {
 
     /// 方案 C: register an async delegation against this session's suspension
     /// (called from the sync `spawn_delegate_async` path; std Mutex, no await).
-    pub fn add_pending_task(&self, task_id: String) {
+    pub fn add_pending_task(&self, sub_session_id: String) {
         {
             let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
             match guard.as_mut() {
-                Some(s) => s.add_pending(task_id),
-                None => *guard = Some(TurnSuspension::new(task_id)),
+                Some(s) => s.add_pending(sub_session_id),
+                None => *guard = Some(TurnSuspension::new(sub_session_id)),
             }
         }
         self.persist_suspension();
@@ -347,12 +347,12 @@ impl SessionContext {
     /// 方案 C: accumulate a suppressed progress report (RFC §2.3 — never
     /// injected into the parent context, suspended or not). No-op when the
     /// session is not suspended.
-    pub fn add_progress(&self, task_id: &str, text: &str) {
+    pub fn add_progress(&self, sub_session_id: &str, text: &str) {
         {
             let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(s) = guard.as_mut() {
-                s.progress_by_task
-                    .entry(task_id.to_string())
+                s.progress_by_sub_session
+                    .entry(sub_session_id.to_string())
                     .or_default()
                     .push(text.to_string());
             }
@@ -367,7 +367,7 @@ impl SessionContext {
     /// callers detect full collection via `snapshot.pending.is_empty()`.
     pub fn record_terminal(
         &self,
-        task_id: String,
+        sub_session_id: String,
         status: SubStatus,
         content: String,
         sent_message_count: u64,
@@ -375,20 +375,23 @@ impl SessionContext {
         let snapshot = {
             let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard.as_mut()?;
-            // Idempotent: if the task was already collected (not in
+            // Idempotent: if the sub-session was already collected (not in
             // pending and already in results), return the current
             // snapshot without adding a duplicate result entry. This
             // guards against double-delivery when both recover_suspension
             // and the sub-agent recovery loop handle the same task.
-            if !s.pending.iter().any(|t| t == &task_id)
-                && s.results.iter().any(|r| r.task_id == task_id)
+            if !s.pending.iter().any(|t| t == &sub_session_id)
+                && s.results.iter().any(|r| r.sub_session_id == sub_session_id)
             {
                 return guard.clone();
             }
-            s.pending.retain(|t| t != &task_id);
-            let progress = s.progress_by_task.remove(&task_id).unwrap_or_default();
+            s.pending.retain(|t| t != &sub_session_id);
+            let progress = s
+                .progress_by_sub_session
+                .remove(&sub_session_id)
+                .unwrap_or_default();
             s.results.push(SubResult {
-                task_id,
+                sub_session_id,
                 status,
                 content,
                 sent_message_count,
@@ -1491,13 +1494,13 @@ mod suspension_tests {
             .unwrap();
         assert_eq!(snap.results.len(), 1);
         let r = &snap.results[0];
-        assert_eq!(r.task_id, "t1");
+        assert_eq!(r.sub_session_id, "t1");
         assert_eq!(r.status, SubStatus::Completed);
         assert_eq!(r.content, "summary text");
         assert_eq!(r.sent_message_count, 0);
         assert_eq!(r.progress, vec!["working on it", "still going"]);
         assert!(snap.pending.is_empty());
-        assert!(snap.progress_by_task.is_empty());
+        assert!(snap.progress_by_sub_session.is_empty());
     }
 
     #[test]
@@ -1510,7 +1513,7 @@ mod suspension_tests {
         ctx.record_terminal("t1".into(), SubStatus::Completed, "c1".into(), 0);
         ctx.record_terminal("t2".into(), SubStatus::TimedOut, "t2".into(), 0);
         let snap = ctx.suspension_snapshot().unwrap();
-        let order: Vec<&str> = snap.results.iter().map(|r| r.task_id.as_str()).collect();
+        let order: Vec<&str> = snap.results.iter().map(|r| r.sub_session_id.as_str()).collect();
         assert_eq!(order, vec!["t3", "t1", "t2"]);
         assert_eq!(snap.results[1].status, SubStatus::Completed);
         assert_eq!(snap.results[2].status, SubStatus::TimedOut);
@@ -1631,10 +1634,10 @@ mod suspension_tests {
         let snap = ctx.suspension_snapshot().unwrap();
         assert_eq!(snap.results.len(), 8);
         assert!(snap.pending.is_empty());
-        let mut by_task: Vec<&SubResult> = snap.results.iter().collect();
-        by_task.sort_by_key(|r| r.task_id.clone());
-        for (i, r) in by_task.iter().enumerate() {
-            assert_eq!(r.task_id, format!("t{}", i));
+        let mut by_sub_session: Vec<&SubResult> = snap.results.iter().collect();
+        by_sub_session.sort_by_key(|r| r.sub_session_id.clone());
+        for (i, r) in by_sub_session.iter().enumerate() {
+            assert_eq!(r.sub_session_id, format!("t{}", i));
             assert_eq!(r.content, format!("r{}", i));
             assert_eq!(r.sent_message_count, i as u64);
         }
@@ -1657,7 +1660,7 @@ mod suspension_tests {
         let snap2 = ctx2.suspension_snapshot().unwrap();
         assert_eq!(snap2.results.len(), 1);
         let r = &snap2.results[0];
-        assert_eq!(r.task_id, "t1");
+        assert_eq!(r.sub_session_id, "t1");
         assert_eq!(r.status, SubStatus::Completed);
         assert_eq!(r.content, "final summary");
         assert_eq!(r.sent_message_count, 2);

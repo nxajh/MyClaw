@@ -15,11 +15,10 @@ pub use crate::providers::ChatMessage;
 /// reconstructs resumable tasks instead of broadcasting `Failed`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DelegationCheckpoint {
-    /// Task FQID (`<ns>/t/<uuidv7>`).
-    pub task_id: String,
     /// Parent session FQID that spawned the delegation.
     pub parent_session_id: String,
-    /// Sub-session FQID the sub-agent runs in.
+    /// Sub-session FQID the sub-agent runs in. This is the agent's identity
+    /// and the checkpoint's primary key (`delegations/<sub_session_id>.json`).
     pub sub_session_id: String,
     /// Sub-agent config name (e.g. "coder").
     pub agent_name: String,
@@ -358,20 +357,6 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
-    /// Persist the sub-agent's task FQID (`<ns>/t/<uuidv7>`) for sub-sessions.
-    /// Needed for P1-1 restart recovery: `scan_unfinished_subagents` must
-    /// emit terminal events keyed by the same task id the parent's
-    /// suspension recorded (FQID), not the opaque sub-session id.
-    fn save_task_id(&self, _session_id: &str, _task_id: &str) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    /// Load the sub-agent's task FQID. None → top-level session or legacy
-    /// sub-session persisted before the field existed.
-    fn load_task_id(&self, _session_id: &str) -> Option<String> {
-        None
-    }
-
     /// Save the sub-agent's delegation timeout and allowed tools.
     fn save_delegation_args(
         &self,
@@ -401,7 +386,7 @@ pub trait SessionBackend: Send + Sync {
     }
 
     /// Delete a delegation checkpoint (called after terminal completion).
-    fn delete_delegation_checkpoint(&self, _task_id: &str) -> std::io::Result<()> {
+    fn delete_delegation_checkpoint(&self, _sub_session_id: &str) -> std::io::Result<()> {
         Ok(())
     }
 

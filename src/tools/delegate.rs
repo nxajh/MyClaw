@@ -5,7 +5,7 @@
 //! 1. Looks up the sub-agent by name
 //! 2. Creates a temporary AgentLoop with the sub-agent's system prompt and tools
 //! 3. Runs the sub-agent to completion (sync) or in background (async)
-//! 4. Returns the result (sync) or task_id (async) to the main agent
+//! 4. Returns the result (sync) or session id (async) to the main agent
 //!
 //! H47: this tool now talks to [`AgentDelegator`] (the RFC v2 trait that
 //! carries `&Session`); the legacy `TaskDelegator` trait was deleted.
@@ -40,7 +40,7 @@ impl Tool for AgentDelegateTool {
     fn description(&self) -> &str {
         "Delegate a task to a specialized sub-agent. Each sub-agent has its own system prompt and tool set. \
          Use this to break complex tasks into specialized sub-tasks that are handled by experts. \
-         mode='sync' (default) blocks until the sub-agent finishes; mode='async' returns a task_id immediately \
+         mode='sync' (default) blocks until the sub-agent finishes; mode='async' returns the sub-agent's session id immediately \
          and the sub-agent runs in the background — you will be notified when it completes."
     }
 
@@ -81,7 +81,7 @@ impl Tool for AgentDelegateTool {
                 "mode": {
                     "type": "string",
                     "enum": ["sync", "async"],
-                    "description": "Execution mode. 'sync' (default) blocks until completion. 'async' runs in the background and returns a task_id."
+                    "description": "Execution mode. 'sync' (default) blocks until completion. 'async' runs in the background and returns the sub-agent's session id."
                 },
                 "allowed_tools": {
                     "type": "array",
@@ -130,12 +130,12 @@ impl Tool for AgentDelegateTool {
 
         if mode == "async" {
             match self.delegator.delegate_async(agent_name, task, session, timeout, allowed_tools.clone()) {
-                Ok(task_id) => Ok(ToolResult {
+                Ok(sub_session_id) => Ok(ToolResult {
                     success: true,
                     output: json!({
                         "ok": true,
                         "mode": "async",
-                        "task_id": task_id,
+                        "session_id": sub_session_id,
                         "message": "Sub-agent spawned in background. Use agent_list to check status."
                     })
                     .to_string(),

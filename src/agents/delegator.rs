@@ -30,7 +30,8 @@ pub trait AgentDelegator: Send + Sync {
         allowed_tools: Option<Vec<String>>,
     ) -> anyhow::Result<String>;
 
-    /// Spawn the sub-agent in the background and return a `task_id` immediately.
+    /// Spawn the sub-agent in the background and return its `session_id`
+    /// immediately.
     ///
     /// Completion or failure is reported asynchronously via `DelegationEvent`.
     /// The default implementation returns an error (sync-only delegators).
@@ -63,9 +64,9 @@ pub trait AgentDelegator: Send + Sync {
 pub trait AgentMessenger: Send + Sync {
     /// Parent → sub: deliver a message to a running async sub-agent's inbox.
     ///
-    /// Returns `Err` with a user-facing message when the task_id is unknown
-    /// (never spawned, already finished, or sync-only).
-    fn send_to_sub_agent(&self, task_id: &str, mail: AgentMail) -> Result<(), String>;
+    /// Returns `Err` with a user-facing message when the session id is
+    /// unknown (never spawned, already finished, or sync-only).
+    fn send_to_sub_agent(&self, sub_session_id: &str, mail: AgentMail) -> Result<(), String>;
 
     /// Sub → parent: emit a `DelegationEvent::Message` to wake the parent
     /// agent. Returns `false` when the event channel is not wired.

@@ -35,7 +35,7 @@ use crate::agents::delegation::{
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::agents::SessionContext;
 use crate::config::sub_agent::AgentIsolation;
-use crate::ids::{Fqid, TYPE_SESSION, TYPE_TASK};
+use crate::ids::{Fqid, TYPE_SESSION};
 
 /// Default wall-clock timeout for a sub-agent when neither the tool caller
 /// nor the SubAgentConfig specifies one.
@@ -75,7 +75,7 @@ pub struct RunningEntry {
     /// `cancel` (agent_kill) can broadcast the terminal
     /// `DelegationEvent::Failed { error: "cancelled" }` to the right
     /// session (the parent may be suspended waiting on this task).
-    pub session_id: String,
+    pub parent_session_id: String,
     pub spawned_at: std::time::Instant,
     /// Sub → parent messages delivered while running (counted in
     /// `AgentMessenger::send_to_parent`). Read at completion to decide
@@ -87,7 +87,9 @@ pub struct RunningEntry {
 /// Snapshot view of a running-table entry for `agent_list` / logging.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunningAgentInfo {
-    pub task_id: String,
+    /// The sub-agent's session FQID (`<ns>/s/<uuidv7>`) — its identity and
+    /// the addressing key for `agent_kill` / `send_message`.
+    pub sub_session_id: String,
     pub agent_name: String,
     pub status: DelegationStatus,
     /// Seconds since the sub-agent was spawned.
@@ -119,18 +121,18 @@ pub struct DelegationCoordinator {
     /// `SessionContext::process_turn`. `OnceLock` encodes the set-once
     /// contract and gives lock-free reads on the hot delegate path.
     runtime_cell: Arc<OnceLock<crate::agents::AgentRuntime>>,
-    /// In-flight background delegations (task_id → entry). Powers
+    /// In-flight background delegations (sub_session_id → entry). Powers
     /// `/agent_list` (read snapshot with live status) and `/agent_kill`
-    /// (abort by id).
+    /// (abort by session id).
     running: Arc<DashMap<String, RunningEntry>>,
-    /// Parent → sub inboxes of running async sub-agents (task_id → sender).
-    /// Registered by `spawn_delegate_async`, removed when the sub-agent
-    /// finishes; powers the `send_message(recipient=task_id)` tool via
+    /// Parent → sub inboxes of running async sub-agents
+    /// (sub_session_id → sender). Registered by `spawn_delegate_async`,
+    /// removed when the sub-agent finishes; powers the
+    /// `send_message(recipient=sub_session_id)` tool via
     /// `AgentMessenger::send_to_sub_agent`.
     mailboxes: Arc<DashMap<String, mpsc::Sender<AgentMail>>>,
-    /// Namespace for generated FQIDs (`<ns>/t/<uuidv7>` task ids,
-    /// `<ns>/s/<uuidv7>` ephemeral sub-session ids). Bound at construction
-    /// from `[system] namespace`.
+    /// Namespace for generated FQIDs (`<ns>/s/<uuidv7>` session ids). Bound
+    /// at construction from `[system] namespace`.
     namespace: String,
     /// Maximum delegation depth, counting the main agent as depth 1
     /// (RFC §6, `[delegation] max_depth`). A delegation whose child depth
@@ -200,7 +202,7 @@ impl DelegationCoordinator {
             .map(|e| {
                 let entry = e.value();
                 RunningAgentInfo {
-                    task_id: e.key().clone(),
+                    sub_session_id: e.key().clone(),
                     agent_name: entry.agent_name.clone(),
                     status: match entry.status.read() {
                         Ok(guard) => *guard,
@@ -295,10 +297,10 @@ impl DelegationCoordinator {
             .filter_map(|id| self.running.remove(&id).map(|(_, v)| (id, v)))
             .collect();
 
-        for (task_id, entry) in &entries {
+        for (sub_session_id, entry) in &entries {
             let checkpoint = existing
                 .iter()
-                .find(|c| &c.task_id == task_id)
+                .find(|c| &c.sub_session_id == sub_session_id)
                 .cloned()
                 .map(|mut c| {
                     c.status = "checkpointed".to_string();
@@ -306,9 +308,8 @@ impl DelegationCoordinator {
                     c
                 })
                 .unwrap_or_else(|| crate::storage::DelegationCheckpoint {
-                    task_id: task_id.clone(),
-                    parent_session_id: entry.session_id.clone(),
-                    sub_session_id: String::new(),
+                    parent_session_id: entry.parent_session_id.clone(),
+                    sub_session_id: sub_session_id.clone(),
                     agent_name: entry.agent_name.clone(),
                     status: "checkpointed".to_string(),
                     started_at: chrono::Utc::now(),
@@ -317,7 +318,7 @@ impl DelegationCoordinator {
                     last_checkpoint: Some(chrono::Utc::now()),
                 });
             if let Err(e) = backend.save_delegation_checkpoint(&checkpoint) {
-                tracing::warn!(task_id = %task_id, err = %e, "shutdown checkpoint failed");
+                tracing::warn!(sub_session_id = %sub_session_id, err = %e, "shutdown checkpoint failed");
             }
         }
 
@@ -382,42 +383,42 @@ impl DelegationCoordinator {
     /// P1-3 decision) so a parent turn suspended on this task's terminal
     /// event resolves instead of hanging. The event send is awaited AFTER
     /// the running-table guard is dropped so the future stays `Send`.
-    pub async fn cancel(&self, task_id: &str) -> bool {
+    pub async fn cancel(&self, sub_session_id: &str) -> bool {
         // Scope the DashMap `Ref` (shard read guard) so it drops BEFORE the
         // write-locking `remove` below — holding a `Ref` across `remove`
         // deadlocks (parking_lot RwLock is not reentrant; the writer waits
         // for the very read guard this task is still holding).
-        let session_id = {
-            let Some(entry) = self.running.get(task_id) else {
+        let parent_session_id = {
+            let Some(entry) = self.running.get(sub_session_id) else {
                 return false;
             };
-            let session_id = entry.session_id.clone();
+            let parent_session_id = entry.parent_session_id.clone();
             if let Ok(mut status) = entry.status.write() {
                 *status = DelegationStatus::Cancelled;
             }
             entry.handle.abort();
-            session_id
+            parent_session_id
         };
-        self.running.remove(task_id);
+        self.running.remove(sub_session_id);
         // Delete the durable checkpoint — the task was cancelled by the user.
         if let Err(e) = self
             .session_manager
             .backend()
-            .delete_delegation_checkpoint(task_id)
+            .delete_delegation_checkpoint(sub_session_id)
         {
-            tracing::warn!(task_id, err = %e, "agent_kill: delete delegation checkpoint failed");
+            tracing::warn!(sub_session_id, err = %e, "agent_kill: delete delegation checkpoint failed");
         }
         if let Some(tx) = self.event_sender() {
             if tx
                 .send(DelegationEvent::Failed {
-                    task_id: task_id.to_string(),
-                    session_id,
+                    sub_session_id: sub_session_id.to_string(),
+                    parent_session_id,
                     error: "cancelled".to_string(),
                 })
                 .await
                 .is_err()
             {
-                tracing::warn!(task_id, "agent_kill: event channel closed, cancelled event dropped");
+                tracing::warn!(sub_session_id, "agent_kill: event channel closed, cancelled event dropped");
             }
         }
         true
@@ -516,9 +517,7 @@ impl DelegationCoordinator {
         agent_name: &'a str,
         task: &'a str,
         parent_session_id: &'a str,
-        task_id_override: Option<&'a str>,
-        session_key: Option<&'a str>,
-        reply_target: Option<&'a str>,
+        sub_ctx: std::sync::Arc<SessionContext>,
         timeout_secs: u64,
         inbox: Option<SubAgentMailbox>,
         allowed_tools: Option<Vec<String>>,
@@ -545,13 +544,14 @@ impl DelegationCoordinator {
             // H50: no marker file. Recovery scans SessionManager for sub-sessions
             // (by `meta.parent_session_id`) and checks their history shape —
             // see `agents::recovery::scan_unfinished_subagents`.
-            let task_id = task_id_override
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| Fqid::new(&self.namespace, TYPE_TASK).to_string());
+            let sub_session_id = {
+                let session = sub_ctx.session.lock().await;
+                session.id.clone()
+            };
 
             tracing::info!(
                 agent = %config.name,
-                task_id = %task_id,
+                sub_session_id = %sub_session_id,
                 parent = %parent_session_id,
                 tools = ?config.tools,
                 task_len = task.len(),
@@ -561,11 +561,11 @@ impl DelegationCoordinator {
             // --- worktree creation (moved BEFORE prompt so we can inject the path) ---
             let (worktree_path, cleanup_worktree, branch_name) = match config.isolation {
                 AgentIsolation::Worktree => {
-                    let task_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-                    let branch_name = format!("subagent/{}_{}", config.name, task_id);
+                    let worktree_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                    let branch_name = format!("subagent/{}_{}", config.name, worktree_id);
                     let worktree_path = self
                         .worktrees_root
-                        .join(format!("{}_{}", config.name, task_id));
+                        .join(format!("{}_{}", config.name, worktree_id));
 
                     if let Some(parent) = worktree_path.parent() {
                         std::fs::create_dir_all(parent).ok();
@@ -598,7 +598,7 @@ impl DelegationCoordinator {
                         branch = %branch_name,
                         "created git worktree for sub-agent"
                     );
-                    (worktree_path, Some(task_id), Some(branch_name))
+                    (worktree_path, Some(worktree_id), Some(branch_name))
                 }
                 AgentIsolation::Shared => (PathBuf::new(), None, None),
             };
@@ -615,30 +615,29 @@ impl DelegationCoordinator {
                 format!("\n\nWorking directory: {}", workspace_dir)
             };
 
+            // Identity prompt: the sub-agent must know its own session id —
+            // it is the addressing key for `agent_list` (self-identification),
+            // `send_message` (sub → parent), and recovery. Injecting it also
+            // prevents the model from fabricating an id (f362).
             let identity = if config.system_prompt.is_empty() {
                 format!(
-                    "You are a specialized agent named '{}'.{}",
-                    config.name, workspace_section
+                    "You are a specialized agent named '{}'. Your session id is '{}'.{}",
+                    config.name, sub_session_id, workspace_section
                 )
             } else {
-                format!("{}{}", config.system_prompt, workspace_section)
+                format!(
+                    "{}\n\nYour session id is '{}'.{}",
+                    config.system_prompt, sub_session_id, workspace_section
+                )
             };
-
-            // session_key + reply_target args are still accepted (delegate_async
-            // passes them) but no longer persisted to a marker file.
-            let _ = (session_key, reply_target, &agent);
 
             // RFC §三.A line 404-419: sub-sessions flow through the unified
             // path — SessionManager builds a SessionContext (held only by this
             // function), session-level overrides carry the run_mode / model /
-            // identity prompt, and `process_turn` does the rest.
-            let sub_ctx = self
-                .session_manager
-                .create_sub_session_context(parent_session_id, &config.name)?;
-            let sub_session_id = {
-                let session = sub_ctx.session.lock().await;
-                session.id.clone()
-            };
+            // identity prompt, and `process_turn` does the rest. The
+            // SessionContext is created by the caller (delegate /
+            // spawn_delegate_async) so the sub-session id is known before the
+            // delegation starts — it is the agent's identity and addressing key.
 
             // Capture whether this is an async delegation BEFORE `inbox` is
             // moved below — the completion branch uses it to decide who owns
@@ -656,14 +655,13 @@ impl DelegationCoordinator {
                 }
                 session.session_override.system_prompt_override = Some(identity.clone());
                 // RFC agent-messaging §3: async sub-agents receive an inbox
-                // (parent → sub messages) via `inbox`. The task_id identity
-                // for sub→parent messages is set for BOTH sync and async
+                // (parent → sub messages) via `inbox`. The sub-session id is
+                // the identity for sub→parent messages for BOTH sync and async
                 // sub-agents (a sync sub-agent can message its parent, it
                 // just cannot receive messages — no inbox).
                 if let Some(mailbox) = inbox {
                     session.sub_agent_inbox = Some(Arc::new(mailbox));
                 }
-                session.sub_agent_task_id = Some(task_id.clone());
                 session.turn_tool_allowlist = allowed_tools;
             }
             let allowlist_clone = {
@@ -677,22 +675,11 @@ impl DelegationCoordinator {
             {
                 tracing::warn!(sub_session = %sub_session_id, err = %e, "persist sub-agent delegation args failed");
             }
-            // P1-1: persist the task FQID so restart recovery
-            // (`scan_unfinished_subagents`) can emit terminal events keyed by
-            // the same id the parent's suspension recorded — without this the
-            // sub-agent's hex session id can never match `pending` (FQID).
-            if let Err(e) = self
-                .session_manager
-                .backend()
-                .save_task_id(&sub_session_id, &task_id)
-            {
-                tracing::warn!(sub_session = %sub_session_id, task_id = %task_id, err = %e, "persist sub-agent task_id failed");
-            }
 
-            // Durable delegation checkpoint: persists task identity so the
-            // daemon can resume (not mark Failed) on restart.
+            // Durable delegation checkpoint: persists the sub-session identity
+            // (keyed by sub_session_id) so the daemon can resume (not mark
+            // Failed) on restart.
             let checkpoint = crate::storage::DelegationCheckpoint {
-                task_id: task_id.clone(),
                 parent_session_id: parent_session_id.to_string(),
                 sub_session_id: sub_session_id.clone(),
                 agent_name: agent_name.to_string(),
@@ -707,7 +694,7 @@ impl DelegationCoordinator {
                 .backend()
                 .save_delegation_checkpoint(&checkpoint)
             {
-                tracing::warn!(task_id = %task_id, err = %e, "persist delegation checkpoint failed");
+                tracing::warn!(sub_session_id = %sub_session_id, err = %e, "persist delegation checkpoint failed");
             }
 
             // Snapshot the runtime; for worktree isolation, overlay the
@@ -721,7 +708,7 @@ impl DelegationCoordinator {
             // channel — sub-agent output is returned to the parent's tool call
             // via the TurnResult text.
             let synthetic = crate::channels::ChannelInboundMessage {
-                id: format!("delegation:{}", task_id),
+                id: format!("delegation:{}", sub_session_id),
                 sender: crate::channels::MessageSender::new(format!("agent:{}", config.name)),
                 receiver: crate::channels::MessageReceiver::new(String::new()),
                 content: crate::channels::ChannelMessageContent::text(task.to_string()),
@@ -828,9 +815,9 @@ impl DelegationCoordinator {
                                         if let Err(e) = self
                                             .session_manager
                                             .backend()
-                                            .delete_delegation_checkpoint(&task_id)
+                                            .delete_delegation_checkpoint(&sub_session_id)
                                         {
-                                            tracing::warn!(task_id = %task_id, err = %e, "delete delegation checkpoint failed");
+                                            tracing::warn!(sub_session_id = %sub_session_id, err = %e, "delete delegation checkpoint failed");
                                         }
                                     }
                                     return Err(anyhow::anyhow!(
@@ -907,7 +894,7 @@ impl DelegationCoordinator {
                         Ok(text)
                     } else {
                         tracing::warn!(
-                            task_id = %task_id,
+                            sub_session_id = %sub_session_id,
                             count = undelivered.len(),
                             "sub-agent finished with unread parent messages; attaching to result"
                         );
@@ -954,9 +941,9 @@ impl DelegationCoordinator {
                 if let Err(e) = self
                     .session_manager
                     .backend()
-                    .delete_delegation_checkpoint(&task_id)
+                    .delete_delegation_checkpoint(&sub_session_id)
                 {
-                    tracing::warn!(task_id = %task_id, err = %e, "delete delegation checkpoint failed");
+                    tracing::warn!(sub_session_id = %sub_session_id, err = %e, "delete delegation checkpoint failed");
                 }
             }
 
@@ -972,7 +959,6 @@ impl DelegationCoordinator {
         agent_name: &str,
         task: &str,
         parent_session_id: &str,
-        reply_target: &str,
         timeout_secs: u64,
         allowed_tools: Option<Vec<String>>,
     ) -> anyhow::Result<String> {
@@ -986,14 +972,21 @@ impl DelegationCoordinator {
         })?;
         let config = &agent.config;
 
-        let task_id = Fqid::new(&self.namespace, TYPE_TASK).to_string();
-
         // Recursion depth guard (RFC §6): reject synchronously at the tool
         // layer BEFORE registering the pending task — a rejected delegation
         // must not leave a hanging pending task / suspension behind. The
         // same check inside `delegate_with_parent` (async task body) is a
         // redundant backstop.
         self.check_depth(parent_session_id)?;
+
+        // Create the sub-session FIRST so the sub-agent's identity (its
+        // session FQID) exists before anything is registered — it is the
+        // addressing key for agent_list / agent_kill / send_message /
+        // pending-task matching / checkpoints. The returned id is what the
+        // parent tool call (`agent_delegate` async mode) receives.
+        let (sub_ctx, sub_session_id) = self
+            .session_manager
+            .create_sub_session_context(parent_session_id, &config.name)?;
 
         // 方案 C (docs/turn-suspension-rfc.md): register the task against the
         // parent's registered SessionContext so the running turn knows to
@@ -1004,12 +997,12 @@ impl DelegationCoordinator {
             .session_manager
             .registered_context_by_session_id(parent_session_id)
         {
-            parent_ctx.add_pending_task(task_id.clone());
+            parent_ctx.add_pending_task(sub_session_id.clone());
         }
 
         tracing::info!(
             agent = %config.name,
-            task_id = %task_id,
+            sub_session_id = %sub_session_id,
             task_len = task.len(),
             timeout_secs,
             "spawning sub-agent in background"
@@ -1018,23 +1011,21 @@ impl DelegationCoordinator {
         let sub_delegator = self.clone();
         let task_owned = task.to_string();
         let parent_session_id_owned = parent_session_id.to_string();
-        let session_key_owned = parent_session_id.to_string();
-        let reply_target_owned = reply_target.to_string();
         let event_tx = self.event_sender();
-        let task_id_clone = task_id.clone();
+        let sub_session_id_clone = sub_session_id.clone();
         let agent_name_owned = agent_name.to_string();
         let running = Arc::clone(&self.running);
-        let running_task_id = task_id.clone();
+        let running_sub_session_id = sub_session_id.clone();
 
         // RFC agent-messaging §3: register the sub-agent's inbox so the
-        // parent's `send_message(recipient=task_id)` can reach it. The
-        // sender is dropped when the map entry is removed at completion.
+        // parent's `send_message(recipient=sub_session_id)` can reach it.
+        // The sender is dropped when the map entry is removed at completion.
         let (mail_tx, mail_rx) = mpsc::channel(SUB_AGENT_INBOX_CAPACITY);
         let mailbox = SubAgentMailbox {
             tx: mail_tx.clone(),
             rx: tokio::sync::Mutex::new(mail_rx),
         };
-        self.mailboxes.insert(task_id.clone(), mail_tx);
+        self.mailboxes.insert(sub_session_id.clone(), mail_tx);
         let mailboxes = Arc::clone(&self.mailboxes);
 
         let handle = tokio::spawn(async move {
@@ -1045,9 +1036,7 @@ impl DelegationCoordinator {
                     &agent_name_owned,
                     &task_owned,
                     &parent_session_id_owned,
-                    Some(&task_id_clone),
-                    Some(&session_key_owned),
-                    Some(&reply_target_owned),
+                    sub_ctx,
                     timeout_secs,
                     Some(mailbox),
                     allowed_tools,
@@ -1065,23 +1054,23 @@ impl DelegationCoordinator {
                 .and_then(|e| e.downcast_ref::<DelegationTimeout>())
                 .map(|t| t.secs);
 
-            let session_id = parent_session_id_owned.clone();
+            let parent_session_id_final = parent_session_id_owned.clone();
             // Count of sub → parent messages delivered while running. The
             // parent session has already received them as `DelegationEvent::
             // Message`, so a non-zero count lets `wake` skip the summary in
             // the completion note (de-duplication, ④).
             let sent_message_count = running
-                .get(&running_task_id)
+                .get(&running_sub_session_id)
                 .map(|e| e.messages_sent.load(std::sync::atomic::Ordering::Relaxed))
                 .unwrap_or(0);
             if let Some(tx) = event_tx {
                 match (&result, timed_out_secs) {
                     (Ok(summary), _) => {
-                        tracing::info!(task_id = %task_id_clone, duration_secs, sent_message_count, "sub-agent completed successfully");
+                        tracing::info!(sub_session_id = %sub_session_id_clone, duration_secs, sent_message_count, "sub-agent completed successfully");
                         let _ = tx
                             .send(DelegationEvent::Completed {
-                                task_id: task_id_clone.clone(),
-                                session_id,
+                                sub_session_id: sub_session_id_clone.clone(),
+                                parent_session_id: parent_session_id_final,
                                 summary: summary.clone(),
                                 duration_secs,
                                 sent_message_count,
@@ -1089,22 +1078,22 @@ impl DelegationCoordinator {
                             .await;
                     }
                     (Err(_), Some(secs)) => {
-                        tracing::warn!(task_id = %task_id_clone, timeout_secs = secs, duration_secs, "sub-agent timed out");
+                        tracing::warn!(sub_session_id = %sub_session_id_clone, timeout_secs = secs, duration_secs, "sub-agent timed out");
                         let _ = tx
                             .send(DelegationEvent::TimedOut {
-                                task_id: task_id_clone.clone(),
-                                session_id,
+                                sub_session_id: sub_session_id_clone.clone(),
+                                parent_session_id: parent_session_id_final,
                                 timeout_secs: secs,
                                 duration_secs,
                             })
                             .await;
                     }
                     (Err(e), None) => {
-                        tracing::warn!(task_id = %task_id_clone, duration_secs, err = %e, "sub-agent failed");
+                        tracing::warn!(sub_session_id = %sub_session_id_clone, duration_secs, err = %e, "sub-agent failed");
                         let _ = tx
                             .send(DelegationEvent::Failed {
-                                task_id: task_id_clone.clone(),
-                                session_id,
+                                sub_session_id: sub_session_id_clone.clone(),
+                                parent_session_id: parent_session_id_final,
                                 error: e.to_string(),
                             })
                             .await;
@@ -1121,44 +1110,44 @@ impl DelegationCoordinator {
             } else {
                 DelegationStatus::Failed
             };
-            if let Some(entry) = running.get(&running_task_id) {
+            if let Some(entry) = running.get(&running_sub_session_id) {
                 if let Ok(mut status) = entry.status.write() {
                     *status = terminal;
                 }
             }
-            running.remove(&running_task_id);
+            running.remove(&running_sub_session_id);
             // Drop the mailbox sender: the sub-agent is gone, so
-            // `send_message(recipient=task_id)` will now report the task_id
-            // as unknown instead of queueing into a dead channel.
-            mailboxes.remove(&running_task_id);
+            // `send_message(recipient=sub_session_id)` will now report the
+            // session id as unknown instead of queueing into a dead channel.
+            mailboxes.remove(&running_sub_session_id);
             // Delete the durable checkpoint — the task reached a terminal
             // state, so there's nothing to resume on restart.
             if let Err(e) = sub_delegator
                 .session_manager
                 .backend()
-                .delete_delegation_checkpoint(&running_task_id)
+                .delete_delegation_checkpoint(&running_sub_session_id)
             {
-                tracing::warn!(task_id = %running_task_id, err = %e, "delete delegation checkpoint failed");
+                tracing::warn!(sub_session_id = %running_sub_session_id, err = %e, "delete delegation checkpoint failed");
             }
         });
 
         self.running.insert(
-            task_id.clone(),
+            sub_session_id.clone(),
             RunningEntry {
                 handle,
                 status: std::sync::RwLock::new(DelegationStatus::Running),
                 agent_name: agent_name.to_string(),
-                session_id: parent_session_id.to_string(),
+                parent_session_id: parent_session_id.to_string(),
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
             },
         );
-        Ok(task_id)
+        Ok(sub_session_id)
     }
 
     pub fn recover_async(
         &self,
-        task_id: String,
+        sub_session_id: String,
         agent_name: String,
         parent_session_id: String,
         sub_ctx: Arc<SessionContext>,
@@ -1170,14 +1159,14 @@ impl DelegationCoordinator {
             tx: mail_tx.clone(),
             rx: tokio::sync::Mutex::new(mail_rx),
         };
-        self.mailboxes.insert(task_id.clone(), mail_tx);
+        self.mailboxes.insert(sub_session_id.clone(), mail_tx);
         let mailboxes = Arc::clone(&self.mailboxes);
 
         let running = Arc::clone(&self.running);
         let event_tx = self.event_sender();
-        let running_task_id = task_id.clone();
-        let task_id_clone = task_id.clone();
-        let session_id = parent_session_id.clone();
+        let running_sub_session_id = sub_session_id.clone();
+        let sub_session_id_clone = sub_session_id.clone();
+        let parent_session_id_final = parent_session_id.clone();
         let backend = Arc::clone(self.session_manager.backend());
 
         let runtime = match self.runtime() {
@@ -1215,42 +1204,42 @@ impl DelegationCoordinator {
 
             let duration_secs = start_time.elapsed().as_secs();
             let timed_out_secs = result.as_ref().err().and_then(|e| e.downcast_ref::<DelegationTimeout>()).map(|t| t.secs);
-            let sent_message_count = running.get(&running_task_id).map(|e| e.messages_sent.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(0);
+            let sent_message_count = running.get(&running_sub_session_id).map(|e| e.messages_sent.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(0);
 
             if let Some(tx) = event_tx {
                 match (&result, timed_out_secs) {
                     (Ok(summary), _) => {
-                        let _ = tx.send(DelegationEvent::Completed { task_id: task_id_clone, session_id, summary: summary.clone(), duration_secs, sent_message_count }).await;
+                        let _ = tx.send(DelegationEvent::Completed { sub_session_id: sub_session_id_clone, parent_session_id: parent_session_id_final, summary: summary.clone(), duration_secs, sent_message_count }).await;
                     }
                     (Err(_), Some(secs)) => {
-                        let _ = tx.send(DelegationEvent::TimedOut { task_id: task_id_clone, session_id, timeout_secs: secs, duration_secs }).await;
+                        let _ = tx.send(DelegationEvent::TimedOut { sub_session_id: sub_session_id_clone, parent_session_id: parent_session_id_final, timeout_secs: secs, duration_secs }).await;
                     }
                     (Err(e), None) => {
-                        let _ = tx.send(DelegationEvent::Failed { task_id: task_id_clone, session_id, error: e.to_string() }).await;
+                        let _ = tx.send(DelegationEvent::Failed { sub_session_id: sub_session_id_clone, parent_session_id: parent_session_id_final, error: e.to_string() }).await;
                     }
                 }
             }
 
             let terminal = if timed_out_secs.is_some() { DelegationStatus::TimedOut } else if result.is_ok() { DelegationStatus::Completed } else { DelegationStatus::Failed };
-            if let Some(entry) = running.get(&running_task_id) {
+            if let Some(entry) = running.get(&running_sub_session_id) {
                 if let Ok(mut status) = entry.status.write() { *status = terminal; }
             }
-            running.remove(&running_task_id);
-            mailboxes.remove(&running_task_id);
+            running.remove(&running_sub_session_id);
+            mailboxes.remove(&running_sub_session_id);
             // Delete the durable checkpoint — the recovered task reached a
             // terminal state.
-            if let Err(e) = backend.delete_delegation_checkpoint(&running_task_id) {
-                tracing::warn!(task_id = %running_task_id, err = %e, "delete delegation checkpoint failed");
+            if let Err(e) = backend.delete_delegation_checkpoint(&running_sub_session_id) {
+                tracing::warn!(sub_session_id = %running_sub_session_id, err = %e, "delete delegation checkpoint failed");
             }
         });
 
         self.running.insert(
-            task_id,
+            sub_session_id,
             RunningEntry {
                 handle,
                 status: std::sync::RwLock::new(DelegationStatus::Running),
                 agent_name,
-                session_id: parent_session_id,
+                parent_session_id,
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
             },
@@ -1273,18 +1262,21 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         timeout: Option<u64>,
         allowed_tools: Option<Vec<String>>,
     ) -> anyhow::Result<String> {
-        let reply_target = parent_session.reply_target().map(|s| s.to_string());
         let config_timeout = self
             .find_agent(agent_name)
             .and_then(|a| a.config.timeout);
         let timeout_secs = resolve_timeout(timeout, config_timeout);
+        // Create the sub-session context up front — the sub-session id is
+        // the agent's identity, created before the delegation starts (same
+        // unified path as the async `spawn_delegate_async`).
+        let (sub_ctx, _sub_session_id) = self
+            .session_manager
+            .create_sub_session_context(&parent_session.id, agent_name)?;
         self.delegate_with_parent(
             agent_name,
             task,
             &parent_session.id,
-            None,
-            None,
-            reply_target.as_deref(),
+            sub_ctx,
             timeout_secs,
             None,
             allowed_tools,
@@ -1300,15 +1292,11 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         timeout: Option<u64>,
         allowed_tools: Option<Vec<String>>,
     ) -> anyhow::Result<String> {
-        let reply_target = parent_session
-            .reply_target()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
         let config_timeout = self
             .find_agent(agent_name)
             .and_then(|a| a.config.timeout);
         let timeout_secs = resolve_timeout(timeout, config_timeout);
-        self.spawn_delegate_async(agent_name, task, &parent_session.id, &reply_target, timeout_secs, allowed_tools)
+        self.spawn_delegate_async(agent_name, task, &parent_session.id, timeout_secs, allowed_tools)
     }
 
     fn list_available(&self) -> Vec<(String, Option<String>)> {
@@ -1328,14 +1316,14 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
 /// completion event (queued behind the turn lock — never preempting).
 #[async_trait::async_trait]
 impl crate::agents::AgentMessenger for DelegationCoordinator {
-    fn send_to_sub_agent(&self, task_id: &str, mail: AgentMail) -> Result<(), String> {
-        match self.mailboxes.get(task_id) {
+    fn send_to_sub_agent(&self, sub_session_id: &str, mail: AgentMail) -> Result<(), String> {
+        match self.mailboxes.get(sub_session_id) {
             Some(tx) => tx
                 .try_send(mail)
                 .map_err(|e| format!("消息投递失败（子代理收件箱已满或已关闭）：{}", e)),
             None => Err(format!(
-                "task_id '{}' 不存在或子代理已结束（仅 async 子代理可接收消息）",
-                task_id
+                "sub_session_id '{}' 不存在或子代理已结束（仅 async 子代理可接收消息）",
+                sub_session_id
             )),
         }
     }
@@ -1343,12 +1331,12 @@ impl crate::agents::AgentMessenger for DelegationCoordinator {
     async fn send_to_parent(&self, event: AgentMessage) -> bool {
         match self.event_sender() {
             Some(tx) => {
-                let task_id = event.task_id.clone();
+                let sub_session_id = event.sub_session_id.clone();
                 let delivered = tx.send(DelegationEvent::Message(event)).await.is_ok();
                 if delivered {
                     // Bump the per-task message counter so the completion
                     // wrapper can de-duplicate the summary (④).
-                    if let Some(entry) = self.running.get(&task_id) {
+                    if let Some(entry) = self.running.get(&sub_session_id) {
                         entry
                             .messages_sent
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1358,7 +1346,7 @@ impl crate::agents::AgentMessenger for DelegationCoordinator {
             }
             None => {
                 tracing::warn!(
-                    task_id = %event.task_id,
+                    sub_session_id = %event.sub_session_id,
                     "cannot deliver sub-agent message: delegation event channel not wired"
                 );
                 false
@@ -1458,17 +1446,20 @@ mod tests {
         let (dc, manager) = coordinator(3);
         let parent = manager.get_or_create_context("mock:default:u1");
         let parent_id = parent.session_id.clone();
-        let task_id = dc
+        let sub_session_id = dc
             .spawn_delegate_async("coder", "do the thing", &parent_id, "", 60, None)
             .unwrap();
-        assert!(task_id.contains("/t/"), "task_id should be an FQID: {task_id}");
+        assert!(
+            sub_session_id.contains("/s/"),
+            "sub_session_id should be a session FQID: {sub_session_id}"
+        );
         // current_thread runtime: the spawned body has not been polled yet, so
         // both tables are deterministically populated. The test body never
         // awaits, so the background task is cancelled at runtime drop.
-        assert_eq!(dc.running_snapshot(), vec![task_id.clone()]);
+        assert_eq!(dc.running_snapshot(), vec![sub_session_id.clone()]);
         assert_eq!(dc.running_count(), 1);
         let snap = parent.suspension_snapshot().unwrap();
-        assert_eq!(snap.pending, vec![task_id]);
+        assert_eq!(snap.pending, vec![sub_session_id]);
     }
 
     #[tokio::test]
@@ -1503,28 +1494,28 @@ mod tests {
 
         // Hand-instrument a running entry so the test doesn't depend on the
         // background spawn path.
-        let task_id = Fqid::new("test", TYPE_TASK).to_string();
+        let sub_session_id = "test/s/sub".to_string();
         dc.running.insert(
-            task_id.clone(),
+            sub_session_id.clone(),
             RunningEntry {
                 handle: tokio::spawn(async {}),
                 status: std::sync::RwLock::new(DelegationStatus::Running),
                 agent_name: "coder".to_string(),
-                session_id: parent.session_id.clone(),
+                parent_session_id: parent.session_id.clone(),
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
             },
         );
 
-        assert!(dc.cancel(&task_id).await);
+        assert!(dc.cancel(&sub_session_id).await);
         let ev = rx.recv().await.unwrap();
         match ev {
             DelegationEvent::Failed {
-                task_id: t,
-                session_id: s,
+                sub_session_id: t,
+                parent_session_id: s,
                 error,
             } => {
-                assert_eq!(t, task_id);
+                assert_eq!(t, sub_session_id);
                 assert_eq!(s, parent.session_id);
                 assert_eq!(error, "cancelled");
             }
@@ -1534,9 +1525,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_unknown_task_returns_false() {
+    async fn cancel_unknown_sub_session_returns_false() {
         let (dc, _m) = coordinator(3);
-        assert!(!dc.cancel("no-such-task").await);
+        assert!(!dc.cancel("no-such-session").await);
     }
 
     #[test]
@@ -1545,7 +1536,6 @@ mod tests {
         let _ = dc; // not needed — we test the backend directly
         let backend = manager.backend();
         let cp = crate::storage::DelegationCheckpoint {
-            task_id: "test/t/abc".to_string(),
             parent_session_id: "test/s/parent".to_string(),
             sub_session_id: "test/s/sub".to_string(),
             agent_name: "coder".to_string(),
@@ -1559,11 +1549,11 @@ mod tests {
 
         let loaded = backend.load_delegation_checkpoints();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].task_id, "test/t/abc");
+        assert_eq!(loaded[0].sub_session_id, "test/s/sub");
         assert_eq!(loaded[0].agent_name, "coder");
         assert_eq!(loaded[0].timeout_secs, 300);
 
-        backend.delete_delegation_checkpoint("test/t/abc").unwrap();
+        backend.delete_delegation_checkpoint("test/s/sub").unwrap();
         assert!(backend.load_delegation_checkpoints().is_empty());
     }
 
@@ -1573,14 +1563,14 @@ mod tests {
         let backend = manager.backend();
 
         // Insert a hand-crafted running entry.
-        let task_id = Fqid::new("test", TYPE_TASK).to_string();
+        let sub_session_id = "test/s/sub".to_string();
         dc.running.insert(
-            task_id.clone(),
+            sub_session_id.clone(),
             RunningEntry {
                 handle: tokio::spawn(async {}),
                 status: std::sync::RwLock::new(DelegationStatus::Running),
                 agent_name: "coder".to_string(),
-                session_id: "parent".to_string(),
+                parent_session_id: "parent".to_string(),
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
             },
@@ -1595,7 +1585,7 @@ mod tests {
         let loaded = backend.load_delegation_checkpoints();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].status, "checkpointed");
-        assert_eq!(loaded[0].task_id, task_id);
+        assert_eq!(loaded[0].sub_session_id, sub_session_id);
     }
 
     #[test]
@@ -1603,7 +1593,6 @@ mod tests {
         let (dc, manager) = coordinator(3);
         let backend = manager.backend();
         let cp = crate::storage::DelegationCheckpoint {
-            task_id: "test/t/xyz".to_string(),
             parent_session_id: "parent".to_string(),
             sub_session_id: "sub".to_string(),
             agent_name: "coder".to_string(),
@@ -1617,7 +1606,7 @@ mod tests {
 
         let loaded = dc.load_checkpoints();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].task_id, "test/t/xyz");
+        assert_eq!(loaded[0].sub_session_id, "sub");
         assert_eq!(loaded[0].status, "checkpointed");
     }
 }

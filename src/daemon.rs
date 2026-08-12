@@ -1132,7 +1132,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         delegator_arc.cleanup_stale_worktrees();
 
         // RFC agent-messaging §3: wire the agent-to-agent bus into
-        // send_message (main → sub via task_id, sub → parent via the
+        // send_message (main → sub via sub_session_id, sub → parent via the
         // DelegationEvent channel). Set-once; single-agent mode never
         // calls this, so `recipient` targeting errors there.
         send_message_tool.set_messenger(Arc::clone(&delegator_arc) as Arc<dyn AgentMessenger>);
@@ -1212,19 +1212,20 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Correlate: unfinished sub-agents that have a matching checkpoint are
     // confirmed resumable (clean shutdown). Those WITHOUT a checkpoint are
     // crash remnants — log them at warn level so operators can distinguish.
-    let checkpoint_task_ids: std::collections::HashSet<&str> =
-        checkpoints.iter().map(|c| c.task_id.as_str()).collect();
+    // Both sides key on the sub-session id (the checkpoint primary key).
+    let checkpoint_sub_session_ids: std::collections::HashSet<&str> =
+        checkpoints.iter().map(|c| c.sub_session_id.as_str()).collect();
     for sa in &unfinished_subagents {
-        if checkpoint_task_ids.contains(sa.task_id.as_str()) {
+        if checkpoint_sub_session_ids.contains(sa.sub_session_id.as_str()) {
             tracing::info!(
                 agent = %sa.agent_name,
-                task_id = %sa.task_id,
+                session_id = %sa.sub_session_id,
                 "resumable sub-agent (checkpointed — clean shutdown)"
             );
         } else {
             tracing::warn!(
                 agent = %sa.agent_name,
-                task_id = %sa.task_id,
+                session_id = %sa.sub_session_id,
                 "unfinished sub-agent without checkpoint (crash remnant)"
             );
         }

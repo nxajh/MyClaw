@@ -24,7 +24,7 @@ use crate::agents::{
 enum CompletionSink {
     /// Sub-agent session: emit `DelegationEvent::Completed` to wake the parent.
     Delegate {
-        task_id: String,
+        sub_session_id: String,
         parent_session_id: String,
         #[allow(dead_code)]
         reply_target: String,
@@ -36,7 +36,7 @@ impl CompletionSink {
     #[allow(dead_code)]
     async fn deliver(self, text: String) {
         let CompletionSink::Delegate {
-            task_id,
+            sub_session_id,
             parent_session_id,
             reply_target: _,
             delegator,
@@ -45,8 +45,8 @@ impl CompletionSink {
             if let Some(tx) = dm.event_sender() {
                 let _ = tx
                     .send(DelegationEvent::Completed {
-                        task_id,
-                        session_id: parent_session_id,
+                        sub_session_id,
+                        parent_session_id,
                         summary: text,
                         duration_secs: 0,
                         sent_message_count: 0,
@@ -60,7 +60,7 @@ impl CompletionSink {
     /// recovery turn itself errors.
     async fn fail(self, error: String) {
         let CompletionSink::Delegate {
-            task_id,
+            sub_session_id,
             parent_session_id,
             delegator,
             ..
@@ -69,8 +69,8 @@ impl CompletionSink {
             if let Some(tx) = dm.event_sender() {
                 let _ = tx
                     .send(DelegationEvent::Failed {
-                        task_id,
-                        session_id: parent_session_id,
+                        sub_session_id,
+                        parent_session_id,
                         error,
                     })
                     .await;
@@ -169,11 +169,11 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
         .map(|info| info.id)
         .collect();
 
-    // Task ids (FQID) the sub-agent recovery loop below will complete: their
-    // terminal events arrive through the normal wake path, so
+    // Sub-session ids (FQID) the sub-agent recovery loop below will complete:
+    // their terminal events arrive through the normal wake path, so
     // `recover_suspension` must not fail them.
     let covered: std::collections::HashSet<String> =
-        unfinished.iter().map(|sa| sa.task_id.clone()).collect();
+        unfinished.iter().map(|sa| sa.sub_session_id.clone()).collect();
 
     // Recover only the active session for each routing key. Inactive sessions
     // resume when the user switches back and sends a normal message.
@@ -225,15 +225,15 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
 
     for sa in unfinished {
         if sa.sub_session_id.is_empty() || sa.parent_session_id.is_empty() {
-            tracing::debug!(task_id = %sa.task_id, "sub-agent recovery: skipping (no sub_session_id or parent_session_id)");
+            tracing::debug!(session_id = %sa.sub_session_id, "sub-agent recovery: skipping (no sub_session_id or parent_session_id)");
             continue;
         }
 
         // Build the completion sink up front so both branches (recover /
         // fail) can use it.
         let sink = CompletionSink::Delegate {
-            task_id: sa.task_id.clone(),
-            // The event's `session_id` must be the parent's SESSION ID
+            sub_session_id: sa.sub_session_id.clone(),
+            // The event's `parent_session_id` must be the parent's SESSION ID
             // (wake / route_notice index by session id, not routing
             // key). E29 switched the other senders to session ids but
             // missed this one — it still passed the routing key
@@ -269,7 +269,7 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
                 Some(_) => "daemon 重启，子代理任务已完成".to_string(),
             };
             tracing::info!(
-                task_id = %sa.task_id,
+                session_id = %sa.sub_session_id,
                 agent = %sa.agent_name,
                 reason = %reason,
                 "sub-agent startup recovery: no incomplete turn, emitting Failed terminal event"
@@ -280,7 +280,7 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
             continue;
         }
 
-        tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn, spawning background task");
+        tracing::info!(session_id = %sa.sub_session_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn, spawning background task");
         let session_ctx = sessions
             .load_context_by_session_id(&sa.sub_session_id)
             .unwrap_or_else(|| {
@@ -291,7 +291,7 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
             });
         if let Some(ref delegator) = delegator {
             delegator.recover_async(
-                sa.task_id.clone(),
+                sa.sub_session_id.clone(),
                 sa.agent_name.clone(),
                 sa.parent_session_id.clone(),
                 session_ctx,
@@ -332,11 +332,11 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
 
 /// P1-1 (RFC §5): recover one persisted suspension after a daemon restart.
 ///
-/// Pending tasks NOT covered by the sub-agent recovery loop (whose terminal
-/// events arrive through the normal `wake` path) are failed with a
+/// Pending sub-sessions NOT covered by the sub-agent recovery loop (whose
+/// terminal events arrive through the normal `wake` path) are failed with a
 /// "daemon 重启，子代理中断" note — mirroring wake's terminal-event handling
 /// (progress folding). The merged notice then routes one resume turn; once the
-/// covered tasks' terminal events land, `pending` is empty and the final
+/// covered sub-sessions' terminal events land, `pending` is empty and the final
 /// resume turn is loud (RFC §3.4).
 async fn recover_suspension(
     ctx: &Arc<OrchestratorCtx>,
@@ -348,20 +348,20 @@ async fn recover_suspension(
         None => return,
     };
 
-    // Fail every pending task the sub-agent recovery loop won't cover.
+    // Fail every pending sub-session the sub-agent recovery loop won't cover.
     let mut failed: Vec<String> = Vec::new();
-    for task_id in snapshot.pending.iter() {
-        if covered.contains(task_id) {
+    for sub_session_id in snapshot.pending.iter() {
+        if covered.contains(sub_session_id) {
             continue;
         }
         let progress = snapshot
-            .progress_by_task
-            .get(task_id)
+            .progress_by_sub_session
+            .get(sub_session_id)
             .cloned()
             .unwrap_or_default();
         let mut content = format!(
-            "[系统通知] 子代理后台任务中断 (task_id: {}): daemon 重启，子代理进程已终止。请重新委托该任务。",
-            task_id
+            "[系统通知] 子代理后台任务中断 (session_id: {}): daemon 重启，子代理进程已终止。请重新委托该任务。",
+            sub_session_id
         );
         if !progress.is_empty() {
             content.push_str("\n\n任务过程记录：\n");
@@ -369,12 +369,12 @@ async fn recover_suspension(
                 content.push_str(&format!("- {}\n", line));
             }
         }
-        session_ctx.record_terminal(task_id.clone(), SubStatus::Failed, content.clone(), 0);
+        session_ctx.record_terminal(sub_session_id.clone(), SubStatus::Failed, content.clone(), 0);
         failed.push(content);
     }
 
-    // All pending tasks are covered by the sub-agent recovery loop — their
-    // terminal events arrive naturally; nothing to synthesize here.
+    // All pending sub-sessions are covered by the sub-agent recovery loop —
+    // their terminal events arrive naturally; nothing to synthesize here.
     if failed.is_empty() {
         return;
     }
@@ -447,9 +447,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         dm.set_event_sender(tx);
         let sink = CompletionSink::Delegate {
-            task_id: "task-1".to_string(),
-            // E29: the event's session_id must be the parent SESSION id so
-            // wake / route_notice can index it.
+            sub_session_id: "sub-session-1".to_string(),
+            // E29: the event's parent_session_id must be the parent SESSION id
+            // so wake / route_notice can index it.
             parent_session_id: "parent-session-1".to_string(),
             reply_target: String::new(),
             delegator: Some(dm),
@@ -458,14 +458,14 @@ mod tests {
         let ev = rx.recv().await.unwrap();
         match ev {
             DelegationEvent::Completed {
-                task_id,
-                session_id,
+                sub_session_id,
+                parent_session_id,
                 summary,
                 duration_secs,
                 sent_message_count,
             } => {
-                assert_eq!(task_id, "task-1");
-                assert_eq!(session_id, "parent-session-1");
+                assert_eq!(sub_session_id, "sub-session-1");
+                assert_eq!(parent_session_id, "parent-session-1");
                 assert_eq!(summary, "recovered text");
                 assert_eq!(duration_secs, 0);
                 assert_eq!(sent_message_count, 0);
@@ -480,7 +480,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         dm.set_event_sender(tx);
         let sink = CompletionSink::Delegate {
-            task_id: "task-1".to_string(),
+            sub_session_id: "sub-session-1".to_string(),
             parent_session_id: "parent-session-1".to_string(),
             reply_target: String::new(),
             delegator: Some(dm),
@@ -489,12 +489,12 @@ mod tests {
         let ev = rx.recv().await.unwrap();
         match ev {
             DelegationEvent::Failed {
-                task_id,
-                session_id,
+                sub_session_id,
+                parent_session_id,
                 error,
             } => {
-                assert_eq!(task_id, "task-1");
-                assert_eq!(session_id, "parent-session-1");
+                assert_eq!(sub_session_id, "sub-session-1");
+                assert_eq!(parent_session_id, "parent-session-1");
                 assert_eq!(error, "recovery turn failed");
             }
             other => panic!("expected Failed, got {other:?}"),
@@ -505,30 +505,30 @@ mod tests {
     async fn recover_suspension_fails_uncovered_tasks() {
         let ctx = Arc::new(test_ctx(vec![]));
         let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
-        sctx.add_pending_task("t1".to_string());
-        sctx.add_pending_task("t2".to_string());
-        sctx.add_progress("t1", "halfway report");
-        let covered: HashSet<String> = ["t2".to_string()].into_iter().collect();
+        sctx.add_pending_task("s1".to_string());
+        sctx.add_pending_task("s2".to_string());
+        sctx.add_progress("s1", "halfway report");
+        let covered: HashSet<String> = ["s2".to_string()].into_iter().collect();
         recover_suspension(&ctx, sctx.clone(), &covered).await;
 
         let snap = sctx.suspension_snapshot().unwrap();
         assert_eq!(snap.results.len(), 1);
         let r = &snap.results[0];
-        assert_eq!(r.task_id, "t1");
+        assert_eq!(r.sub_session_id, "s1");
         assert_eq!(r.status, SubStatus::Failed);
         assert!(r.content.contains("daemon 重启"), "content: {}", r.content);
         assert!(r.content.contains("halfway report"));
-        // the covered task is untouched — its terminal event arrives via wake
-        assert_eq!(snap.pending, vec!["t2".to_string()]);
+        // the covered sub-session is untouched — its terminal event arrives via wake
+        assert_eq!(snap.pending, vec!["s2".to_string()]);
     }
 
     #[tokio::test]
     async fn recover_suspension_all_covered_is_noop() {
         let ctx = Arc::new(test_ctx(vec![]));
         let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
-        sctx.add_pending_task("t1".to_string());
-        sctx.add_pending_task("t2".to_string());
-        let covered: HashSet<String> = ["t1".to_string(), "t2".to_string()].into_iter().collect();
+        sctx.add_pending_task("s1".to_string());
+        sctx.add_pending_task("s2".to_string());
+        let covered: HashSet<String> = ["s1".to_string(), "s2".to_string()].into_iter().collect();
         recover_suspension(&ctx, sctx.clone(), &covered).await;
         let snap = sctx.suspension_snapshot().unwrap();
         assert!(snap.results.is_empty());

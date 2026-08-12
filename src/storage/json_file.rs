@@ -109,10 +109,6 @@ struct SessionMeta {
     /// Parent session ID for sub-sessions. None for top-level user sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent_session_id: Option<String>,
-    /// Sub-agent task FQID (`<ns>/t/<uuidv7>`) for sub-sessions (P1-1:
-    /// restart recovery needs the same id the parent's suspension recorded).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     delegation_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,9 +180,10 @@ impl JsonFileBackend {
         self.session_dir(session_id).join("suspension.json")
     }
 
-    /// Durable delegation checkpoint file: `delegations/<task_id>.json`.
-    fn delegation_checkpoint_path(&self, task_id: &str) -> PathBuf {
-        self.root.join("delegations").join(format!("{}.json", dir_name(task_id)))
+    /// Durable delegation checkpoint file: `delegations/<sub_session_id>.json`
+    /// (the sub-session FQID is the agent identity and checkpoint key).
+    fn delegation_checkpoint_path(&self, sub_session_id: &str) -> PathBuf {
+        self.root.join("delegations").join(format!("{}.json", dir_name(sub_session_id)))
     }
 
     // ── Atomic write helpers ──────────────────────────────────────────────────
@@ -651,7 +648,6 @@ impl SessionBackend for JsonFileBackend {
             summary: None,
             agent_name: None,
             parent_session_id: None,
-            task_id: None,
             delegation_timeout_secs: None,
             delegation_allowed_tools: None,
             segments: vec![SegmentRecord {
@@ -1165,22 +1161,6 @@ impl SessionBackend for JsonFileBackend {
         self.read_meta(session_id)?.parent_session_id
     }
 
-    fn save_task_id(&self, session_id: &str, task_id: &str) -> std::io::Result<()> {
-        if let Some(mut meta) = self.read_meta(session_id) {
-            meta.task_id = if task_id.is_empty() {
-                None
-            } else {
-                Some(task_id.to_string())
-            };
-            self.write_meta(&meta)?;
-        }
-        Ok(())
-    }
-
-    fn load_task_id(&self, session_id: &str) -> Option<String> {
-        self.read_meta(session_id)?.task_id
-    }
-
     fn save_delegation_args(
         &self,
         session_id: &str,
@@ -1208,13 +1188,13 @@ impl SessionBackend for JsonFileBackend {
         &self,
         checkpoint: &crate::storage::DelegationCheckpoint,
     ) -> std::io::Result<()> {
-        let path = self.delegation_checkpoint_path(&checkpoint.task_id);
+        let path = self.delegation_checkpoint_path(&checkpoint.sub_session_id);
         fs::create_dir_all(path.parent().unwrap_or(&self.root))?;
         Self::write_json_atomic(&path, checkpoint)
     }
 
-    fn delete_delegation_checkpoint(&self, task_id: &str) -> std::io::Result<()> {
-        let path = self.delegation_checkpoint_path(task_id);
+    fn delete_delegation_checkpoint(&self, sub_session_id: &str) -> std::io::Result<()> {
+        let path = self.delegation_checkpoint_path(sub_session_id);
         if path.exists() {
             fs::remove_file(&path)?;
         }
@@ -1333,9 +1313,8 @@ mod tests {
     fn delegation_checkpoint_roundtrip() {
         let (_dir, backend, _sid) = backend_with_session();
         let cp = crate::storage::DelegationCheckpoint {
-            task_id: "test/t/abc123".to_string(),
             parent_session_id: "parent".to_string(),
-            sub_session_id: "sub".to_string(),
+            sub_session_id: "test/s/sub".to_string(),
             agent_name: "coder".to_string(),
             status: "checkpointed".to_string(),
             started_at: chrono::Utc::now(),
@@ -1347,7 +1326,7 @@ mod tests {
 
         let loaded = backend.load_delegation_checkpoints();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].task_id, "test/t/abc123");
+        assert_eq!(loaded[0].sub_session_id, "test/s/sub");
         assert_eq!(loaded[0].status, "checkpointed");
         assert_eq!(loaded[0].timeout_secs, 600);
         assert_eq!(
@@ -1356,7 +1335,7 @@ mod tests {
         );
 
         // Delete works.
-        backend.delete_delegation_checkpoint("test/t/abc123").unwrap();
+        backend.delete_delegation_checkpoint("test/s/sub").unwrap();
         assert!(backend.load_delegation_checkpoints().is_empty());
     }
 
@@ -1366,9 +1345,8 @@ mod tests {
 
         for i in 0..3 {
             let cp = crate::storage::DelegationCheckpoint {
-                task_id: format!("test/t/task-{i}"),
                 parent_session_id: format!("parent-{i}"),
-                sub_session_id: format!("sub-{i}"),
+                sub_session_id: format!("test/s/sub-{i}"),
                 agent_name: "coder".to_string(),
                 status: "running".to_string(),
                 started_at: chrono::Utc::now(),

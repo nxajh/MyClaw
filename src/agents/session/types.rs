@@ -98,10 +98,6 @@ pub struct Session {
     /// §3.7: batches over the per-round budget keep only the newest
     /// complete messages; the older remainder is re-queued via `tx`.
     pub sub_agent_inbox: Option<Arc<SubAgentMailbox>>,
-    /// The sub-agent's own task_id (identity for sub→parent messages).
-    /// `None` for top-level sessions only — both sync and async sub-agents
-    /// carry it (async ones additionally get an inbox).
-    pub sub_agent_task_id: Option<String>,
     /// Per-turn injected context (RFC §3.5/§4.3): rendered reminders for
     /// the user-level mailbox (cross-user messages, 注入即消费) and pending
     /// friend requests. Stashed by `dispatch_turn` (the only place with the
@@ -151,7 +147,6 @@ impl Clone for Session {
             channel: self.channel.clone(),
             turn_stream: None,
             sub_agent_inbox: self.sub_agent_inbox.clone(),
-            sub_agent_task_id: self.sub_agent_task_id.clone(),
             turn_injections: self.turn_injections.clone(),
             turn_silenced: self.turn_silenced,
             turn_tool_allowlist: self.turn_tool_allowlist.clone(),
@@ -177,7 +172,6 @@ impl std::fmt::Debug for Session {
             .field("has_channel", &self.channel.is_some())
             .field("has_turn_stream", &self.turn_stream.is_some())
             .field("has_sub_agent_inbox", &self.sub_agent_inbox.is_some())
-            .field("sub_agent_task_id", &self.sub_agent_task_id)
             .field("turn_silenced", &self.turn_silenced)
             .field("turn_tool_allowlist", &self.turn_tool_allowlist)
             .finish()
@@ -204,7 +198,6 @@ impl Session {
             channel: None,
             turn_stream: None,
             sub_agent_inbox: None,
-            sub_agent_task_id: None,
             turn_injections: Vec::new(),
             turn_silenced: false,
             turn_tool_allowlist: None,

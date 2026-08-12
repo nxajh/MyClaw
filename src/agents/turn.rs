@@ -39,8 +39,8 @@ pub enum SubStatus {
 /// in completion order. Injected into the parent's context on resume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubResult {
-    /// The sub-agent's task id (`<ns>/t/<uuidv7>`).
-    pub task_id: String,
+    /// The sub-agent's own session id (`<ns>/s/<uuidv7>`).
+    pub sub_session_id: String,
     pub status: SubStatus,
     /// Terminal message content (summary / error / timeout notice).
     pub content: String,
@@ -100,14 +100,15 @@ pub struct TurnSuspension {
     pub origin_turn_seq: u64,
     /// Suspension start as unix seconds (recovery reports the gap).
     pub suspended_at: u64,
-    /// Task ids of sub-agents still running.
+    /// Session ids of sub-agents still running.
     pub pending: Vec<String>,
     /// Collected outcomes, in completion order.
     pub results: Vec<SubResult>,
-    /// Suppressed progress reports (task_id → texts) accumulated while the
-    /// task runs; folded into `SubResult.progress` at terminal collection
+    /// Suppressed progress reports (sub_session_id → texts) accumulated while
+    /// the task runs; folded into `SubResult.progress` at terminal collection
     /// (RFC §2.2/§2.3 — Progress never enters the parent context).
-    pub progress_by_task: HashMap<String, Vec<String>>,
+    #[serde(default, alias = "progress_by_task")]
+    pub progress_by_sub_session: HashMap<String, Vec<String>>,
     /// 单 preview (2026-08-12): streaming preview message identity + last
     /// body for cross-turn takeover. `None` until an origin turn streams;
     /// resume turns reuse it; cleared with the suspension.
@@ -116,24 +117,24 @@ pub struct TurnSuspension {
 }
 
 impl TurnSuspension {
-    pub fn new(task_id: String) -> Self {
+    pub fn new(sub_session_id: String) -> Self {
         Self {
             origin_turn_seq: 0,
             suspended_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
-            pending: vec![task_id],
+            pending: vec![sub_session_id],
             results: Vec::new(),
-            progress_by_task: HashMap::new(),
+            progress_by_sub_session: HashMap::new(),
             preview: None,
         }
     }
 
-    /// Append a pending task (idempotent per task_id).
-    pub fn add_pending(&mut self, task_id: String) {
-        if !self.pending.contains(&task_id) {
-            self.pending.push(task_id);
+    /// Append a pending sub-session (idempotent per sub_session_id).
+    pub fn add_pending(&mut self, sub_session_id: String) {
+        if !self.pending.contains(&sub_session_id) {
+            self.pending.push(sub_session_id);
         }
     }
 }

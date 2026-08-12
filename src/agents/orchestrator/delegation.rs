@@ -57,18 +57,18 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
         if msg.kind == MessageKind::Progress {
             match ctx
                 .sessions
-                .registered_context_by_session_id(&msg.session_id)
+                .registered_context_by_session_id(&msg.parent_session_id)
             {
                 Some(registered) => {
-                    registered.add_progress(&msg.task_id, &msg.text);
+                    registered.add_progress(&msg.sub_session_id, &msg.text);
                     tracing::debug!(
-                        task_id = %msg.task_id,
+                        sub_session_id = %msg.sub_session_id,
                         "progress report suppressed into suspension"
                     );
                 }
                 None => {
                     tracing::debug!(
-                        task_id = %msg.task_id,
+                        sub_session_id = %msg.sub_session_id,
                         "progress report dropped (parent session not suspended)"
                     );
                 }
@@ -77,45 +77,45 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
         }
     }
 
-    // Resolve the event into (task, session, optional terminal status,
-    // sent_message_count, synthesized content, unique synthetic id).
-    // `status` is Some for terminal events (Completed/Failed/TimedOut) and
-    // None for `Message{Final}` — only terminals enter the suspension's
-    // `results` list.
+    // Resolve the event into (sub_session_id, parent_session_id, optional
+    // terminal status, sent_message_count, synthesized content, unique
+    // synthetic id). `status` is Some for terminal events
+    // (Completed/Failed/TimedOut) and None for `Message{Final}` — only
+    // terminals enter the suspension's `results` list.
     let (
-        task_id,
-        session_id,
+        sub_session_id,
+        parent_session_id,
         status,
         sent_message_count,
         mut content,
         synthetic_id,
     ) = match event {
         DelegationEvent::Completed {
-            task_id,
-            session_id,
+            sub_session_id,
+            parent_session_id,
             summary,
             duration_secs,
             sent_message_count,
         } => {
-            tracing::info!(task_id = %task_id, duration_secs, sent_message_count, "delegation completed, waking main agent");
+            tracing::info!(sub_session_id = %sub_session_id, duration_secs, sent_message_count, "delegation completed, waking main agent");
             // If the sub-agent already streamed its result to the parent via
             // `Message` events, the summary would duplicate what the parent
             // has seen — degrade the note to pure metadata (④).
             let content = if sent_message_count > 0 {
                 format!(
-                    "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)。结果已通过子代理消息实时同步。",
-                    task_id, duration_secs
+                    "[系统通知] 子代理已完成后台任务 (session_id: {}, 耗时: {}s)。结果已通过子代理消息实时同步。",
+                    sub_session_id, duration_secs
                 )
             } else {
                 format!(
-                    "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
-                    task_id, duration_secs, summary
+                    "[系统通知] 子代理已完成后台任务 (session_id: {}, 耗时: {}s)，结果如下：\n{}",
+                    sub_session_id, duration_secs, summary
                 )
             };
-            let synthetic_id = format!("delegation:{}", task_id);
+            let synthetic_id = format!("delegation:{}", sub_session_id);
             (
-                task_id.clone(),
-                session_id,
+                sub_session_id.clone(),
+                parent_session_id,
                 Some(SubStatus::Completed),
                 sent_message_count,
                 content,
@@ -123,19 +123,19 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             )
         }
         DelegationEvent::Failed {
-            task_id,
-            session_id,
+            sub_session_id,
+            parent_session_id,
             error,
         } => {
-            tracing::warn!(task_id = %task_id, "delegation failed, waking main agent");
+            tracing::warn!(sub_session_id = %sub_session_id, "delegation failed, waking main agent");
             let content = format!(
-                "[系统通知] 子代理后台任务失败 (task_id: {})，错误：\n{}",
-                task_id, error
+                "[系统通知] 子代理后台任务失败 (session_id: {})，错误：\n{}",
+                sub_session_id, error
             );
-            let synthetic_id = format!("delegation:{}", task_id);
+            let synthetic_id = format!("delegation:{}", sub_session_id);
             (
-                task_id.clone(),
-                session_id,
+                sub_session_id.clone(),
+                parent_session_id,
                 Some(SubStatus::Failed),
                 0,
                 content,
@@ -143,26 +143,26 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             )
         }
         DelegationEvent::TimedOut {
-            task_id,
-            session_id,
+            sub_session_id,
+            parent_session_id,
             timeout_secs,
             duration_secs,
         } => {
             tracing::warn!(
-                task_id = %task_id,
+                sub_session_id = %sub_session_id,
                 timeout_secs,
                 duration_secs,
                 "delegation timed out, waking main agent"
             );
             let content = format!(
-                "[系统通知] 子代理后台任务超时 (task_id: {}, 超时上限: {}s, 已运行: {}s)，任务已中止。\
+                "[系统通知] 子代理后台任务超时 (session_id: {}, 超时上限: {}s, 已运行: {}s)，任务已中止。\
                  如需重试请重新委托，或先用 agent_list 确认无残留任务。",
-                task_id, timeout_secs, duration_secs
+                sub_session_id, timeout_secs, duration_secs
             );
-            let synthetic_id = format!("delegation:{}", task_id);
+            let synthetic_id = format!("delegation:{}", sub_session_id);
             (
-                task_id.clone(),
-                session_id,
+                sub_session_id.clone(),
+                parent_session_id,
                 Some(SubStatus::TimedOut),
                 0,
                 content,
@@ -170,22 +170,22 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             )
         }
         // RFC agent-messaging §3.4: a sub-agent messaged its parent while
-        // running in background. `task_id` is the sub-agent's own id
-        // (identity — lets the parent reply via `recipient`), `session_id`
-        // is the parent session to wake. Routed exactly like Completed /
-        // Failed: queued behind the turn lock, never preempting. Not a
-        // terminal event — never enters the suspension's results.
+        // running in background. `sub_session_id` is the sub-agent's own id
+        // (identity — lets the parent reply via `recipient`),
+        // `parent_session_id` is the session to wake. Routed exactly like
+        // Completed / Failed: queued behind the turn lock, never preempting.
+        // Not a terminal event — never enters the suspension's results.
         DelegationEvent::Message(msg) => {
-            tracing::info!(task_id = %msg.task_id, sender = %msg.sender_name, "sub-agent message, waking main agent");
+            tracing::info!(sub_session_id = %msg.sub_session_id, sender = %msg.sender_name, "sub-agent message, waking main agent");
             let content = format!(
-                "[子代理消息] 来自子代理 '{}' (task_id: {}):\n{}",
-                msg.sender_name, msg.task_id, msg.text
+                "[子代理消息] 来自子代理 '{}' (session_id: {}):\n{}",
+                msg.sender_name, msg.sub_session_id, msg.text
             );
             // Unique synthetic id per message (a task may emit many messages).
             let synthetic_id = format!("delegation-msg:{}", msg.msg_id);
             (
-                msg.task_id,
-                msg.session_id,
+                msg.sub_session_id,
+                msg.parent_session_id,
                 None,
                 0,
                 content,
@@ -195,22 +195,23 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     };
 
     // 方案 C (§3.2): terminal events update the suspension BEFORE routing —
-    // move the task out of `pending` and append its `SubResult` (with folded
-    // progress). Lookup is TWO-tier (P1-1): the registered context first
-    // (active sessions), falling back to a temporary context for
+    // move the sub-session out of `pending` and append its `SubResult` (with
+    // folded progress). Lookup is TWO-tier (P1-1): the registered context
+    // first (active sessions), falling back to a temporary context for
     // switched-away sessions. A switched-away suspended session leaves
     // `suspension.json` on disk; the temp context restores it at load
     // (`SessionContext::new` → `restore_suspension`), collects the terminal
     // event and writes the updated state back — without this the pending
-    // task would linger forever (no registered context exists to collect on).
+    // sub-session would linger forever (no registered context exists to
+    // collect on).
     if let Some(status) = status {
         let sctx = ctx
             .sessions
-            .registered_context_by_session_id(&session_id)
-            .or_else(|| ctx.sessions.load_context_by_session_id(&session_id));
+            .registered_context_by_session_id(&parent_session_id)
+            .or_else(|| ctx.sessions.load_context_by_session_id(&parent_session_id));
         if let Some(sctx) = sctx {
             if let Some(snap) = sctx.record_terminal(
-                task_id.clone(),
+                sub_session_id.clone(),
                 status,
                 content.clone(),
                 sent_message_count,
@@ -223,7 +224,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                     .results
                     .iter()
                     .rev()
-                    .find(|r| r.task_id == task_id)
+                    .find(|r| r.sub_session_id == sub_session_id)
                     .map(|r| r.progress.as_slice())
                     .filter(|p| !p.is_empty())
                 {
@@ -235,7 +236,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                     content = enriched;
                 }
                 tracing::info!(
-                    task_id = %task_id,
+                    sub_session_id = %sub_session_id,
                     pending = snap.pending.len(),
                     collected = snap.results.len(),
                     "suspension updated on terminal event"
@@ -245,7 +246,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     }
 
     // Route the synthesized notice (terminal or message) into the session.
-    route_notice(ctx, &session_id, content, synthetic_id).await;
+    route_notice(ctx, &parent_session_id, content, synthetic_id).await;
 }
 
 /// Route a synthesized system notice into the parent session:
@@ -430,8 +431,8 @@ mod tests {
         wake(
             &ctx,
             DelegationEvent::Completed {
-                task_id: "t1".to_string(),
-                session_id: sid,
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
                 summary: "the final summary".to_string(),
                 duration_secs: 7,
                 sent_message_count: 0,
@@ -455,8 +456,8 @@ mod tests {
         wake(
             &ctx,
             DelegationEvent::Completed {
-                task_id: "t1".to_string(),
-                session_id: sid,
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
                 summary: "duplicate summary".to_string(),
                 duration_secs: 3,
                 sent_message_count: 3,
@@ -478,8 +479,8 @@ mod tests {
         wake(
             &ctx,
             DelegationEvent::Failed {
-                task_id: "t1".to_string(),
-                session_id: sid,
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
                 error: "provider exploded".to_string(),
             },
         )
@@ -498,8 +499,8 @@ mod tests {
         wake(
             &ctx,
             DelegationEvent::TimedOut {
-                task_id: "t1".to_string(),
-                session_id: sid,
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
                 timeout_secs: 600,
                 duration_secs: 600,
             },
@@ -521,8 +522,8 @@ mod tests {
             DelegationEvent::Message(AgentMessage {
                 msg_id: "m1".to_string(),
                 sender_name: "coder".to_string(),
-                task_id: "t1".to_string(),
-                session_id: sid,
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
                 text: "working on it".to_string(),
                 kind: MessageKind::Progress,
             }),
@@ -532,7 +533,7 @@ mod tests {
         assert!(snap.results.is_empty());
         assert_eq!(snap.pending, vec!["t1".to_string()]);
         assert_eq!(
-            snap.progress_by_task.get("t1").unwrap(),
+            snap.progress_by_sub_session.get("t1").unwrap(),
             &vec!["working on it".to_string()]
         );
     }
@@ -547,8 +548,8 @@ mod tests {
             DelegationEvent::Message(AgentMessage {
                 msg_id: "m1".to_string(),
                 sender_name: "coder".to_string(),
-                task_id: "t1".to_string(),
-                session_id: sid.clone(),
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid.clone(),
                 text: "working on it".to_string(),
                 kind: MessageKind::Progress,
             }),
@@ -557,8 +558,8 @@ mod tests {
         wake(
             &ctx,
             DelegationEvent::Completed {
-                task_id: "t1".to_string(),
-                session_id: sid,
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
                 summary: "done".to_string(),
                 duration_secs: 5,
                 sent_message_count: 0,
@@ -578,8 +579,8 @@ mod tests {
         wake(
             &ctx,
             DelegationEvent::Completed {
-                task_id: "ghost".to_string(),
-                session_id: "no-such-session".to_string(),
+                sub_session_id: "ghost".to_string(),
+                parent_session_id: "no-such-session".to_string(),
                 summary: "x".to_string(),
                 duration_secs: 0,
                 sent_message_count: 0,
@@ -589,8 +590,8 @@ mod tests {
         wake(
             &ctx,
             DelegationEvent::Failed {
-                task_id: "ghost".to_string(),
-                session_id: "no-such-session".to_string(),
+                sub_session_id: "ghost".to_string(),
+                parent_session_id: "no-such-session".to_string(),
                 error: "x".to_string(),
             },
         )
@@ -604,7 +605,7 @@ mod tests {
         let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
         sctx.add_pending_task("t1".to_string());
         sctx.add_pending_task("t2".to_string());
-        let mut content = "[系统通知] 子代理已完成后台任务 (task_id: t1)".to_string();
+        let mut content = "[系统通知] 子代理已完成后台任务 (session_id: t1)".to_string();
         maybe_append_silence_guidance(&sctx, &mut content);
         assert!(content.contains("中间恢复轮"));
         assert!(content.contains("不会终结"));
@@ -634,18 +635,18 @@ mod tests {
             "done".to_string(),
             0,
         );
-        let mut content = "[系统通知] 子代理已完成后台任务 (task_id: t1)".to_string();
+        let mut content = "[系统通知] 子代理已完成后台任务 (session_id: t1)".to_string();
         maybe_append_silence_guidance(&sctx, &mut content);
-        assert_eq!(content, "[系统通知] 子代理已完成后台任务 (task_id: t1)");
+        assert_eq!(content, "[系统通知] 子代理已完成后台任务 (session_id: t1)");
     }
 
     #[tokio::test]
     async fn silence_guidance_omitted_when_not_suspended() {
         let ctx = test_ctx(vec![]);
         let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
-        let mut content = "[系统通知] 子代理已完成后台任务 (task_id: t1)".to_string();
+        let mut content = "[系统通知] 子代理已完成后台任务 (session_id: t1)".to_string();
         maybe_append_silence_guidance(&sctx, &mut content);
-        assert_eq!(content, "[系统通知] 子代理已完成后台任务 (task_id: t1)");
+        assert_eq!(content, "[系统通知] 子代理已完成后台任务 (session_id: t1)");
     }
 
     /// Race fix (E2E 恢复轮1): the silenced intent is captured at

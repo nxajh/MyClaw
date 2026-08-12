@@ -89,7 +89,7 @@ impl SendMessageTool {
     /// - Sub-agent context: the only legal target is the parent main agent
     ///   (`recipient` omitted or "parent"); any other value errors (§3.3 —
     ///   the sub-agent sees no other address).
-    /// - Main context: `recipient` must be the task_id of a running async
+    /// - Main context: `recipient` must be the session id of a running async
     ///   sub-agent; delivery goes through the coordinator's mailbox.
     ///
     /// Agent messages are text-only (P0 scope — no file transfer).
@@ -142,13 +142,9 @@ impl SendMessageTool {
                     });
                 }
             }
-            let Some(task_id) = session.sub_agent_task_id.clone() else {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some("sub-agent identity missing — cannot message parent".to_string()),
-                });
-            };
+            // §3.3: the sub-agent's identity is its own session id — always
+            // present, so no Option dance (unlike the parent link, which a
+            // malformed session could lack).
             let Some(parent_session_id) = session.parent_session_id.clone() else {
                 return Ok(ToolResult {
                     success: false,
@@ -159,8 +155,8 @@ impl SendMessageTool {
             let event = AgentMessage {
                 msg_id: Fqid::new(&self.namespace, TYPE_MSG).to_string(),
                 sender_name: session.agent_name.clone(),
-                task_id,
-                session_id: parent_session_id,
+                sub_session_id: session.id.clone(),
+                parent_session_id,
                 text: text.to_string(),
                 kind: match args.kind.as_deref() {
                     Some("progress") => MessageKind::Progress,
@@ -181,15 +177,15 @@ impl SendMessageTool {
             };
         }
 
-        // Main agent context: `recipient` = sub-agent task_id.
-        let task_id = match args.recipient.as_deref() {
+        // Main agent context: `recipient` = sub-agent session id.
+        let sub_session_id = match args.recipient.as_deref() {
             Some(t) if !t.trim().is_empty() => t.to_string(),
             _ => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
                     error: Some(
-                        "recipient required in the main agent context (a sub-agent task_id)"
+                        "recipient required in the main agent context (a sub-agent session id)"
                             .to_string(),
                     ),
                 });
@@ -201,7 +197,7 @@ impl SendMessageTool {
             text: text.to_string(),
             timestamp: chrono::Utc::now().timestamp() as u64,
         };
-        match messenger.send_to_sub_agent(&task_id, mail) {
+        match messenger.send_to_sub_agent(&sub_session_id, mail) {
             Ok(()) => Ok(ToolResult {
                 success: true,
                 output: "message sent to sub-agent".to_string(),
@@ -338,7 +334,7 @@ struct SendMessageArgs {
     text: Option<String>,
     #[serde(default)]
     files: Vec<SendMessageFileArg>,
-    /// Optional agent-to-agent target. Parent context: a sub-agent task_id.
+    /// Optional agent-to-agent target. Parent context: a sub-agent session id.
     /// Sub-agent context: omitted or "parent".
     #[serde(default)]
     recipient: Option<String>,
@@ -369,7 +365,7 @@ impl Tool for SendMessageTool {
     fn description(&self) -> &str {
         "Send a message to the current user, to a friend, or to another agent. Supports plain text, text with local files, or multiple local files. \
          File parameters only accept local paths (not URLs); paths are resolved by the tool and not exposed to the channel. \
-         Optional `recipient`: a friend's user id (u/uid) or email to send a cross-user message; in the main agent context also a sub-agent task_id (from agent_delegate mode=async) to message that sub-agent; \
+         Optional `recipient`: a friend's user id (u/uid) or email to send a cross-user message; in the main agent context also a sub-agent session id (from agent_delegate mode=async) to message that sub-agent; \
          in a sub-agent context, omit it or use \"parent\" to message the main agent. Agent-to-agent and cross-user messages are text-only (32K chars max)."
     }
 
@@ -405,7 +401,7 @@ impl Tool for SendMessageTool {
                 },
                 "recipient": {
                     "type": "string",
-                    "description": "Optional target. Cross-user (main agent context): a friend's user id (u/uid) or email. Agent-to-agent: main agent context passes a sub-agent task_id (from agent_delegate mode=async); sub-agent context omits it or uses \"parent\" to send to the main agent."
+                    "description": "Optional target. Cross-user (main agent context): a friend's user id (u/uid) or email. Agent-to-agent: main agent context passes a sub-agent session id (from agent_delegate mode=async); sub-agent context omits it or uses \"parent\" to send to the main agent."
                 },
                 "kind": {
                     "type": "string",
@@ -460,7 +456,7 @@ impl Tool for SendMessageTool {
 
         // RFC agent-messaging §3.1/§3.3: agent-to-agent path. A sub-agent's
         // only legal target is its parent ("parent" or omitted); the main
-        // agent targets a running async sub-agent by task_id.
+        // agent targets a running async sub-agent by session id.
         let is_sub_agent = session.parent_session_id.is_some();
         // RFC §3.5: cross-user path first — `recipient=u/uid`/邮箱（`@昵称`
         // 第二波）in the main agent context targets another user through the
@@ -625,8 +621,11 @@ mod tests {
 
     #[async_trait]
     impl AgentMessenger for MockMessenger {
-        fn send_to_sub_agent(&self, task_id: &str, mail: AgentMail) -> Result<(), String> {
-            self.to_sub.lock().unwrap().push((task_id.to_string(), mail));
+        fn send_to_sub_agent(&self, sub_session_id: &str, mail: AgentMail) -> Result<(), String> {
+            self.to_sub
+                .lock()
+                .unwrap()
+                .push((sub_session_id.to_string(), mail));
             Ok(())
         }
 
@@ -649,20 +648,19 @@ mod tests {
     fn sub_agent_session() -> Session {
         let mut session = Session::new("sub_session".into());
         session.parent_session_id = Some("parent_session".into());
-        session.sub_agent_task_id = Some("myclaw/t/mock-1".into());
         session.agent_name = "coder".into();
         session
     }
 
     #[tokio::test]
-    async fn main_sends_to_sub_agent_by_task_id() {
+    async fn main_sends_to_sub_agent_by_session_id() {
         let mock = Arc::new(MockMessenger::default());
         let tool = tool_with_messenger(&mock);
         let session = Session::new("main".into());
 
         let r = tool
             .execute(
-                serde_json::json!({"text": "继续调研", "recipient": "myclaw/t/mock-123"}),
+                serde_json::json!({"text": "继续调研", "recipient": "myclaw/s/mock-123"}),
                 &session,
             )
             .await
@@ -671,7 +669,7 @@ mod tests {
 
         let delivered = mock.to_sub.lock().unwrap();
         assert_eq!(delivered.len(), 1);
-        assert_eq!(delivered[0].0, "myclaw/t/mock-123");
+        assert_eq!(delivered[0].0, "myclaw/s/mock-123");
         assert_eq!(delivered[0].1.text, "继续调研");
         assert_eq!(delivered[0].1.sender_name, "主 agent");
     }
@@ -699,8 +697,8 @@ mod tests {
         let sent = mock.to_parent.lock().unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].sender_name, "coder");
-        assert_eq!(sent[0].task_id, "myclaw/t/mock-1");
-        assert_eq!(sent[0].session_id, "parent_session");
+        assert_eq!(sent[0].sub_session_id, "sub_session");
+        assert_eq!(sent[0].parent_session_id, "parent_session");
         assert_eq!(sent[0].text, "搞定了");
         assert_eq!(sent[1].text, "再问一下");
     }
@@ -713,7 +711,7 @@ mod tests {
 
         let r = tool
             .execute(
-                serde_json::json!({"text": "hi", "recipient": "myclaw/t/mock-999"}),
+                serde_json::json!({"text": "hi", "recipient": "myclaw/s/mock-999"}),
                 &session,
             )
             .await
