@@ -266,7 +266,31 @@ Only memories with `inject: "always"` are injected into every conversation's sys
 Tags are optional but recommended for searchability (e.g. ["rust","qqbot","bug"]).
 When applicable, add a `## See Also` section with 1-3 related memories. Canonical link format:
 - [Related: other_memory_name](other_memory_name.md)
-Logical name has no .md; the href MUST be `<name>.md` (never bare name, never path prefix)."#;
+Logical name has no .md; the href MUST be `<name>.md` (never bare name, never path prefix).
+
+### Provenance Annotation
+
+Annotate the source of each fact in memory content using the provenance marker format:
+
+> 📌 provenance:`<session_id>#<msg_seq>` <YYYY-MM-DD>
+
+- `<session_id>`: the session FQID shown in the `## Session` section above (e.g. `myclaw/s/019fe564-...`).
+- `<msg_seq>`: 1-based index of the user message in that session that provided this information.
+- `<YYYY-MM-DD>`: date the memory was written.
+
+Place the marker immediately after the paragraph or fact it sources. A memory aggregating facts from multiple conversations can have multiple markers. Example:
+
+```
+User prefers concise responses and dislikes verbose explanations.
+
+> 📌 provenance:`myclaw/s/019fe564-15ed-7881-ac8d-4b694ea8a408#3` 2026-08-12
+
+They use Rust for backend development.
+
+> 📌 provenance:`myclaw/s/019fe3f2-9299-74f3-97f0-7e897bbdd4c4#15` 2026-08-05
+```
+
+Omit the marker for self-derived knowledge (e.g. tool output analysis) where no single user message is the source."#;
 
 const SECTION_READ_BEFORE_EDIT: &str = "## Read Before Edit\n\nDo not propose changes to code you haven't read. If asked about or modifying a file, read it first.";
 
