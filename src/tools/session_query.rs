@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::agents::session::Session;
-use crate::agents::user_resolver::UserResolver;
+use crate::agents::user_profile::UserResolver;
 use crate::providers::{Tool, ToolResult};
 use crate::storage::SessionBackend;
 
