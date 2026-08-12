@@ -137,6 +137,37 @@ impl SessionBackend for InMemoryBackend {
             .collect()
     }
 
+    fn list_sessions_for_owner(&self, owner: &str) -> Vec<SessionInfo> {
+        let mut sessions: Vec<SessionInfo> = self.sessions
+            .read()
+            .iter()
+            .filter(|(_, meta)| meta.owner.starts_with(owner))
+            .map(|(id, meta)| {
+                let msgs = self.messages.read().get(id).map(|v| v.len()).unwrap_or(0);
+                SessionInfo {
+                    id: id.clone(),
+                    owner: meta.owner.clone(),
+                    display_name: meta.display_name.clone(),
+                    created_at: meta.created_at,
+                    last_activity: meta.last_activity,
+                    message_count: msgs,
+                }
+            })
+            .collect();
+        sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        sessions
+    }
+
+    fn query_message(&self, session_id: &str, message_id: i64) -> Option<(String, String)> {
+        let msgs = self.messages.read();
+        let session_msgs = msgs.get(session_id)?;
+        if message_id <= 0 { return None; }
+        let idx = (message_id - 1) as usize;
+        let msg = session_msgs.get(idx)?;
+        let preview: String = msg.text_content().chars().take(200).collect();
+        Some((msg.role.clone(), preview))
+    }
+
     fn list_all_sessions(&self) -> Vec<SessionInfo> {
         self.sessions
             .read()
