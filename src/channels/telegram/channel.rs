@@ -3076,12 +3076,15 @@ mod tests {
         let body = s.collapse_summary_body("最终答案");
         assert!(body.starts_with("🧠 4 thoughts · 💬 3 notes · 🛠️ 4 tool calls · ⏱️ "));
         assert!(body.ends_with("\n\n💬 最终答案"));
-        // Empty / whitespace answer → summary line only.
+        // Empty / whitespace answer → summary line only. Note: the summary
+        // line itself contains "💬 n notes" (commentary count), so assert on
+        // the absence of the appended answer part (`\n\n💬 `), not on "💬".
         assert_eq!(
             s.collapse_summary_body("   "),
             s.collapse_summary_body(""),
         );
-        assert!(!s.collapse_summary_body("").contains("💬"));
+        assert!(!s.collapse_summary_body("").contains("\n\n💬 "));
+        assert!(s.collapse_summary_body("").starts_with("🧠 4 thoughts"));
     }
 
     /// 单 preview (2026-08-12): `done_note` prefers the streamed commentary
