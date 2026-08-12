@@ -240,6 +240,27 @@ impl SessionBackend for InMemoryBackend {
         Ok(0)
     }
 
+    fn list_sessions_for_owner(&self, owner: &str) -> Vec<SessionInfo> {
+        SessionBackend::list_sessions(self, owner)
+    }
+
+    fn query_message(&self, session_id: &str, message_id: i64) -> Option<(String, String)> {
+        let guard = self.messages.read();
+        let msgs = guard.get(session_id)?;
+        if message_id < 1 {
+            return None;
+        }
+        let idx = (message_id - 1) as usize;
+        let msg = msgs.get(idx)?;
+        let text = msg.text_content();
+        let preview: String = if text.chars().count() > 200 {
+            text.chars().take(200).collect()
+        } else {
+            text
+        };
+        Some((msg.role.clone(), preview))
+    }
+
     fn save_session_file(
         &self,
         session_id: &str,

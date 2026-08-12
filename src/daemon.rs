@@ -702,6 +702,11 @@ fn build_session_backend(
     ) {
         Ok(backend) => {
             tracing::info!(path = %sessions_dir.display(), "session storage opened");
+            match backend.migrate_global_message_ids() {
+                Ok(n) if n > 0 => tracing::info!(migrated = n, "session storage migrated to global message IDs"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "session storage migration failed"),
+            }
             Arc::new(backend)
         }
         Err(e) => {

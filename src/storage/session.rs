@@ -430,6 +430,21 @@ pub trait SessionBackend: Send + Sync {
 
     /// Clean up sessions older than ttl_hours.
     fn cleanup_stale(&self, ttl_hours: u32) -> std::io::Result<usize>;
+
+    // ── Global message ID queries ────────────────────────────────────────
+
+    /// List sessions owned by a specific user (owner prefix match).
+    /// Default delegates to [`SessionBackend::list_sessions`].
+    fn list_sessions_for_owner(&self, owner: &str) -> Vec<SessionInfo> {
+        self.list_sessions(owner)
+    }
+
+    /// Read a specific message by global ID.
+    /// Returns `(role, text_preview)` — preview truncated to ~200 chars.
+    /// Default: not supported (returns `None`).
+    fn query_message(&self, _session_id: &str, _message_id: i64) -> Option<(String, String)> {
+        None
+    }
 }
 
 #[cfg(test)]

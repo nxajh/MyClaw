@@ -308,9 +308,6 @@ impl ContextEngine {
                         .map(|(&id, msg)| (id, msg.clone()))
                         .collect();
                     hook.rotate_history(&session.id, &surviving);
-                    for (i, id) in session.message_ids.iter_mut().enumerate() {
-                        *id = (i + 1) as i64;
-                    }
                 }
                 let messages = self.rebuild_messages(system_prompt, &session.history, tool_specs);
                 tracing::info!(
@@ -468,9 +465,6 @@ impl ContextEngine {
                         .map(|(&id, msg)| (id, msg.clone()))
                         .collect();
                     hook.rotate_history(&session.id, &surviving);
-                    for (i, id) in session.message_ids.iter_mut().enumerate() {
-                        *id = (i + 1) as i64;
-                    }
                 }
                 let messages = self.rebuild_messages(system_prompt, &session.history, tool_specs);
                 latest = Some(messages);

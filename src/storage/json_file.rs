@@ -14,13 +14,10 @@
 //!       ...
 //! ```
 //!
-//! Message IDs are 1-based line numbers within the active `history.jsonl`.
-//! Line numbers reset to 1 on each rotation.  `load_incremental(0)` therefore
-//! always returns the full active segment, which is already post-compaction.
-//!
-//! Compaction state (version, token estimate) lives in `meta.json`; there is
-//! no separate `compaction.json`.  The summary message text is stored as a
-//! regular line in `history.jsonl` and does not need to be reconstructed.
+//! Message IDs are globally monotonically increasing across all segments.
+//! The active segment's `start_id` (stored in `meta.segments`) is the base
+//! for line→ID mapping.  Compaction summaries are stored in the segment
+//! record rather than as lines in the file.
 //!
 //! ## Session files (multimodal)
 //!
@@ -91,6 +88,38 @@ struct SessionMeta {
     delegation_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     delegation_allowed_tools: Option<Vec<String>>,
+    /// Global segment index for message ID → file lookup.
+    /// Empty for legacy sessions (pre-migration); populated on first rotate or migration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    segments: Vec<SegmentRecord>,
+}
+
+/// A compaction summary that replaced a range of messages, stored in meta
+/// rather than as a line in history.jsonl.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CompactionEntry {
+    /// Position (0-based) among real messages where the summary should be
+    /// inserted when reconstructing the in-memory history.
+    position: usize,
+    /// The full summary text (including the `[CONTEXT COMPACTION...]` prefix).
+    text: String,
+    /// Compaction version number.
+    version: u32,
+}
+
+/// Index entry mapping a segment file to its global message ID range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SegmentRecord {
+    /// Segment number (matches archive filename: history.{segment:04}.jsonl).
+    /// The active segment uses `meta.segment`.
+    segment: u32,
+    /// Global ID of the first real message in this segment.
+    start_id: i64,
+    /// Number of real messages (excluding compaction entries) in this segment.
+    count: usize,
+    /// Compaction summaries within this segment. Usually 0 or 1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    compactions: Vec<CompactionEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -206,29 +235,59 @@ impl JsonFileBackend {
 
     // ── JSONL helpers ─────────────────────────────────────────────────────────
 
-    /// Read all (line_number, ChatMessage) pairs from the active history.jsonl.
-    /// Line numbers are 1-based and reset to 1 after each rotation.
+    /// Read all (id, ChatMessage) pairs from the active history.jsonl.
+    /// IDs are globally monotonic across all segments (segment.start_id + offset).
     ///
-    /// Every message is returned path-only; no inline media hydration is performed.
+    /// Compaction summaries (stored in the segment record, not in the file) are
+    /// inserted at their recorded positions with id=0.
     fn read_history_with_ids(&self, session_id: &str) -> Vec<(i64, ChatMessage)> {
+        let meta = match self.read_meta(session_id) {
+            Some(m) => m,
+            None => return vec![],
+        };
+
+        // Find the active segment record for global ID base.
+        let active_seg = meta.segments.iter().find(|s| s.segment == meta.segment);
+        let start_id = active_seg.map(|s| s.start_id).unwrap_or(1);
+
         let path = self.history_path(session_id);
         let Ok(f) = fs::File::open(&path) else {
-            return vec![];
-        };
-        BufReader::new(f)
-            .lines()
-            .enumerate()
-            .filter_map(|(i, line)| {
-                let line = line.ok()?;
-                let line = line.trim();
-                if line.is_empty() {
-                    return None;
+            // File missing — still insert compaction entries if any.
+            let mut result: Vec<(i64, ChatMessage)> = vec![];
+            if let Some(seg) = active_seg {
+                for comp in &seg.compactions {
+                    if comp.position <= result.len() {
+                        let summary_msg = ChatMessage::user_text(comp.text.clone());
+                        result.insert(comp.position, (0, summary_msg));
+                    }
                 }
-                let msg: ChatMessage = serde_json::from_str(line).ok()?;
-                let msg = self.hydrate(session_id, &msg);
-                Some(((i + 1) as i64, msg))
+            }
+            return result;
+        };
+
+        let mut result: Vec<(i64, ChatMessage)> = BufReader::new(f)
+            .lines()
+            .filter_map(|line| line.ok())
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| {
+                let msg: ChatMessage = serde_json::from_str(&line).ok()?;
+                Some(self.hydrate(session_id, &msg))
             })
-            .collect()
+            .enumerate()
+            .map(|(i, msg)| (start_id + i as i64, msg))
+            .collect();
+
+        // Insert compaction summaries at their recorded positions.
+        if let Some(seg) = active_seg {
+            for comp in &seg.compactions {
+                if comp.position <= result.len() {
+                    let summary_msg = ChatMessage::user_text(comp.text.clone());
+                    result.insert(comp.position, (0, summary_msg));
+                }
+            }
+        }
+
+        result
     }
 
     fn meta_to_info(meta: &SessionMeta) -> SessionInfo {
@@ -255,24 +314,75 @@ impl JsonFileBackend {
             None => return Ok(()),
         };
 
+        let current_segment = meta.segment;
+
+        // Count real lines in the current file before archiving.
+        let archived_count = if history_path.exists() {
+            fs::read_to_string(&history_path)
+                .map(|c| c.lines().filter(|l| !l.is_empty()).count())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Compute the archived segment's start_id from existing records.
+        let archived_start_id = meta
+            .segments
+            .iter()
+            .find(|s| s.segment == current_segment)
+            .map(|s| s.start_id)
+            .unwrap_or_else(|| {
+                let mut id = 1i64;
+                for rec in meta.segments.iter().filter(|s| s.segment < current_segment) {
+                    id = rec.start_id + rec.count as i64;
+                }
+                id
+            });
+
         // Archive the current active segment.
         if history_path.exists() {
             let archive_dir = self.archive_dir(session_id);
             fs::create_dir_all(&archive_dir)?;
-            let archive_name = format!("history.{:04}.jsonl", meta.segment);
+            let archive_name = format!("history.{:04}.jsonl", current_segment);
             fs::rename(&history_path, archive_dir.join(archive_name))?;
         }
 
-        // Write surviving messages to the new active segment and track any live
-        // legacy blob hashes for the sweep.
+        // Build archived segment record.
+        let archived_record = SegmentRecord {
+            segment: current_segment,
+            start_id: archived_start_id,
+            count: archived_count,
+            compactions: Vec::new(),
+        };
+
+        // Write only real messages (id != 0) to the new active segment, and
+        // collect compaction summaries (id == 0) into the new segment record.
         let mut live_hashes: HashSet<String> = HashSet::new();
+        let mut real_count = 0usize;
+        let mut new_compactions: Vec<CompactionEntry> = Vec::new();
+        let mut new_start_id = archived_start_id + archived_count as i64;
+
         if !surviving.is_empty() {
             let mut f = fs::File::create(&history_path)?;
-            for (_, msg) in surviving {
-                let msg = self.externalize(session_id, msg)?;
-                collect_blob_hashes(&msg, &mut live_hashes);
-                let json = serde_json::to_string(&msg).map_err(std::io::Error::other)?;
-                writeln!(f, "{json}")?;
+            for &(id, ref msg) in surviving {
+                if id == 0 {
+                    // Compaction summary — record its position, don't write to file.
+                    new_compactions.push(CompactionEntry {
+                        position: real_count,
+                        text: msg.text_content(),
+                        version: meta.compact_version,
+                    });
+                } else {
+                    let externalized = self.externalize(session_id, msg)?;
+                    collect_blob_hashes(&externalized, &mut live_hashes);
+                    let json =
+                        serde_json::to_string(&externalized).map_err(std::io::Error::other)?;
+                    writeln!(f, "{json}")?;
+                    if real_count == 0 {
+                        new_start_id = id;
+                    }
+                    real_count += 1;
+                }
             }
             f.flush()?;
             f.sync_all()?;
@@ -283,9 +393,23 @@ impl JsonFileBackend {
         // Mark-and-sweep: drop any blob not referenced by a live message.
         self.sweep_blobs(session_id, &live_hashes);
 
-        // Line numbers restart at 1; update the counter to match the new file.
-        meta.message_count = surviving.len();
-        meta.segment += 1;
+        // Build the new active segment record.
+        let new_segment = current_segment + 1;
+        let new_active_record = SegmentRecord {
+            segment: new_segment,
+            start_id: new_start_id,
+            count: real_count,
+            compactions: new_compactions,
+        };
+
+        // Update segments: remove stale records for the affected segment numbers.
+        meta.segments
+            .retain(|s| s.segment != current_segment && s.segment != new_segment);
+        meta.segments.push(archived_record);
+        meta.segments.push(new_active_record);
+
+        // message_count stays global — do NOT reset to surviving.len().
+        meta.segment = new_segment;
         self.write_meta(&meta)?;
         Ok(())
     }
@@ -352,6 +476,143 @@ impl JsonFileBackend {
             }
         }
     }
+
+    /// Process a single segment file for migration.
+    /// Reads lines, identifies compaction summaries, rewrites the file without them,
+    /// and returns a SegmentRecord + the next global ID.
+    fn migrate_segment_file(
+        &self,
+        path: &Path,
+        segment: u32,
+        start_id: i64,
+    ) -> std::io::Result<(SegmentRecord, i64)> {
+        let content = fs::read_to_string(path)?;
+        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+
+        let mut real_messages: Vec<String> = Vec::new();
+        let mut compactions: Vec<CompactionEntry> = Vec::new();
+        let mut real_idx: usize = 0;
+
+        for line in &lines {
+            if let Ok(msg) = serde_json::from_str::<ChatMessage>(line) {
+                let text = msg.text_content();
+                if msg.role == "user" && text.starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]") {
+                    compactions.push(CompactionEntry {
+                        position: real_idx,
+                        text,
+                        version: 0,
+                    });
+                    continue; // Don't write to file
+                }
+            }
+            real_messages.push((*line).to_string());
+            real_idx += 1;
+        }
+
+        // Rewrite file without compaction lines.
+        if real_messages.is_empty() {
+            fs::write(path, "")?;
+        } else {
+            let new_content = real_messages.join("\n") + "\n";
+            fs::write(path, new_content)?;
+        }
+
+        let count = real_messages.len();
+        let next_id = start_id + count as i64;
+
+        Ok((SegmentRecord {
+            segment,
+            start_id,
+            count,
+            compactions,
+        }, next_id))
+    }
+
+    /// One-time migration: convert legacy per-segment IDs to global IDs.
+    /// Idempotent — skips sessions that already have a non-empty `segments` field.
+    pub fn migrate_global_message_ids(&self) -> std::io::Result<usize> {
+        let mut migrated = 0;
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return Ok(0);
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let meta_path = path.join("meta.json");
+            if !meta_path.exists() {
+                continue;
+            }
+
+            let Ok(bytes) = fs::read(&meta_path) else {
+                continue;
+            };
+            let mut meta: SessionMeta = match serde_json::from_slice(&bytes) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            // Skip if already migrated.
+            if !meta.segments.is_empty() {
+                continue;
+            }
+
+            let dir_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            let session_id = id_from_dir(dir_name);
+
+            // Walk segments: archive 0000, 0001, ..., then active.
+            let mut segments: Vec<SegmentRecord> = Vec::new();
+            let mut global_id: i64 = 1;
+
+            let archive_dir = path.join("archive");
+            if archive_dir.exists() {
+                let mut archive_files: Vec<(u32, PathBuf)> = fs::read_dir(&archive_dir)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter_map(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        // Parse "history.NNNN.jsonl"
+                        if name.starts_with("history.") && name.ends_with(".jsonl") {
+                            let num_str = &name[8..name.len() - 6];
+                            num_str.parse::<u32>().ok().map(|n| (n, e.path()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                archive_files.sort_by_key(|(n, _)| *n);
+
+                for (seg_num, file_path) in archive_files {
+                    let (seg_record, next_id) =
+                        self.migrate_segment_file(&file_path, seg_num, global_id)?;
+                    global_id = next_id;
+                    segments.push(seg_record);
+                }
+            }
+
+            // Active segment.
+            let active_path = path.join("history.jsonl");
+            if active_path.exists() {
+                let (seg_record, next_id) =
+                    self.migrate_segment_file(&active_path, meta.segment, global_id)?;
+                global_id = next_id;
+                segments.push(seg_record);
+            }
+
+            meta.segments = segments;
+            meta.message_count = (global_id - 1).max(0) as usize;
+
+            Self::write_json_atomic(&meta_path, &meta)?;
+            migrated += 1;
+        }
+        Ok(migrated)
+    }
 }
 
 /// Path-only history has no inline media blobs to track.
@@ -386,6 +647,12 @@ impl SessionBackend for JsonFileBackend {
             task_id: None,
             delegation_timeout_secs: None,
             delegation_allowed_tools: None,
+            segments: vec![SegmentRecord {
+                segment: 0,
+                start_id: 1,
+                count: 0,
+                compactions: Vec::new(),
+            }],
         };
         self.write_meta(&meta)?;
 
@@ -515,6 +782,10 @@ impl SessionBackend for JsonFileBackend {
 
         meta.message_count = new_id as usize;
         meta.last_activity = Utc::now();
+        // Update active segment count.
+        if let Some(seg) = meta.segments.iter_mut().find(|s| s.segment == meta.segment) {
+            seg.count += 1;
+        }
         let _ = self.write_meta(&meta);
 
         Ok(new_id)
@@ -544,6 +815,11 @@ impl SessionBackend for JsonFileBackend {
 
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.last_activity = Utc::now();
+            // Decrement active segment count and global message_count.
+            if let Some(seg) = meta.segments.iter_mut().find(|s| s.segment == meta.segment) {
+                seg.count = seg.count.saturating_sub(1);
+            }
+            meta.message_count = meta.message_count.saturating_sub(1);
             let _ = self.write_meta(&meta);
         }
 
@@ -556,13 +832,23 @@ impl SessionBackend for JsonFileBackend {
             return Ok(false);
         };
 
+        // Compute the line index relative to the active segment's start_id.
+        let meta = self.read_meta(session_id);
+        let active_seg = meta
+            .as_ref()
+            .and_then(|m| m.segments.iter().find(|s| s.segment == m.segment));
+        let start_id = active_seg.map(|s| s.start_id).unwrap_or(1);
+
         let mut lines: Vec<&str> = content.split('\n').collect();
         // Remove trailing empty line if present
         if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
             lines.pop();
         }
-        // message_id is 1-based line number
-        let idx = (message_id - 1) as usize;
+        // message_id is a global ID; convert to segment-relative line index.
+        if message_id < start_id {
+            return Ok(false);
+        }
+        let idx = (message_id - start_id) as usize;
         if idx >= lines.len() {
             return Ok(false);
         }
@@ -577,6 +863,10 @@ impl SessionBackend for JsonFileBackend {
 
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.last_activity = Utc::now();
+            // Decrement active segment count.
+            if let Some(seg) = meta.segments.iter_mut().find(|s| s.segment == meta.segment) {
+                seg.count = seg.count.saturating_sub(1);
+            }
             let _ = self.write_meta(&meta);
         }
 
@@ -594,8 +884,18 @@ impl SessionBackend for JsonFileBackend {
             return Ok(false);
         };
 
+        // Compute the line index relative to the active segment's start_id.
+        let meta = self.read_meta(session_id);
+        let active_seg = meta
+            .as_ref()
+            .and_then(|m| m.segments.iter().find(|s| s.segment == m.segment));
+        let start_id = active_seg.map(|s| s.start_id).unwrap_or(1);
+
         let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-        let idx = (message_id - 1) as usize;
+        if message_id < start_id {
+            return Ok(false);
+        }
+        let idx = (message_id - start_id) as usize;
         if idx >= lines.len() {
             return Ok(false);
         }
@@ -615,8 +915,10 @@ impl SessionBackend for JsonFileBackend {
 
     fn truncate_messages(&self, session_id: &str, keep_count: usize) -> std::io::Result<()> {
         let path = self.history_path(session_id);
-        let content = fs::read_to_string(&path)?;
-        let lines: Vec<&str> = content.lines().collect();
+        let Ok(content) = fs::read_to_string(&path) else {
+            return Ok(());
+        };
+        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
         if keep_count >= lines.len() {
             return Ok(()); // nothing to truncate
         }
@@ -643,8 +945,19 @@ impl SessionBackend for JsonFileBackend {
         self.sweep_blobs(session_id, &live_hashes);
 
         if let Some(mut meta) = self.read_meta(session_id) {
-            meta.message_count = keep_count;
             meta.last_activity = Utc::now();
+            // Update active segment count.
+            if let Some(seg) = meta.segments.iter_mut().find(|s| s.segment == meta.segment) {
+                seg.count = keep_count;
+            }
+            // Adjust global message_count: archived segments' total + keep_count.
+            let archived_total: usize = meta
+                .segments
+                .iter()
+                .filter(|s| s.segment != meta.segment)
+                .map(|s| s.count)
+                .sum();
+            meta.message_count = archived_total + keep_count;
             let _ = self.write_meta(&meta);
         }
         Ok(())
@@ -664,10 +977,16 @@ impl SessionBackend for JsonFileBackend {
         if meta.compact_version == 0 {
             return None;
         }
+        // Pull the actual summary text from the active segment's compaction entry.
+        let active_seg = meta.segments.iter().find(|s| s.segment == meta.segment);
+        let summary_text = active_seg
+            .and_then(|s| s.compactions.last())
+            .map(|c| c.text.clone())
+            .unwrap_or_default();
         Some(SummaryRecord {
             id: 0,
             version: meta.compact_version,
-            summary: String::new(),
+            summary: summary_text,
             up_to_message: 0,
             token_estimate: meta.compact_token_estimate,
             created_at: meta.last_activity,
@@ -917,6 +1236,45 @@ impl SessionBackend for JsonFileBackend {
             }
         }
         out
+    }
+
+    fn list_sessions_for_owner(&self, owner: &str) -> Vec<SessionInfo> {
+        // Delegate to the existing owner-filtered list_sessions implementation.
+        SessionBackend::list_sessions(self, owner)
+    }
+
+    fn query_message(&self, session_id: &str, message_id: i64) -> Option<(String, String)> {
+        let meta = self.read_meta(session_id)?;
+
+        // Find the segment containing this global message ID.
+        let seg = meta.segments.iter().find(|s| {
+            message_id >= s.start_id && message_id < s.start_id + s.count as i64
+        })?;
+
+        // Determine the file path for this segment.
+        let file_path = if seg.segment == meta.segment {
+            self.history_path(session_id)
+        } else {
+            self.archive_dir(session_id)
+                .join(format!("history.{:04}.jsonl", seg.segment))
+        };
+
+        // Read the specific line by segment-relative index.
+        let line_idx = (message_id - seg.start_id) as usize;
+        let content = fs::read_to_string(&file_path).ok()?;
+        let line = content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .nth(line_idx)?;
+
+        let msg: ChatMessage = serde_json::from_str(line).ok()?;
+        let text = msg.text_content();
+        let preview: String = if text.chars().count() > 200 {
+            text.chars().take(200).collect()
+        } else {
+            text
+        };
+        Some((msg.role, preview))
     }
 }
 
