@@ -2480,17 +2480,24 @@ impl TelegramTurnStream {
     /// Build the preview text for the current mode.
     fn preview_text(&self) -> String {
         if self.is_progress() {
-            let mut lines = Vec::new();
-
-            // 单 preview: inherited body (from the origin turn) stays as the
-            // leading block — prior progress lines are never wiped, new lines
-            // append below (保留历史行追加).
-            if let Some(inh) = &self.inherited_preview {
-                let text = clip_detail(inh.trim());
-                if !text.is_empty() {
-                    lines.push(text);
-                }
-            }
+            // 单 preview: inherited body (from the origin turn) becomes the
+            // leading lines — prior progress is kept VERBATIM (no clip), new
+            // lines append below (保留历史行追加). Under STREAM_PREVIEW_LIMIT
+            // the OLDEST lines (inherited first, then this turn's tool lines)
+            // are dropped with a "… N earlier" marker so the newest content
+            // always wins. The previous 300-char clip of the WHOLE body wiped
+            // most of the origin's progress on takeover ("origin progress 被
+            // 恢复轮覆盖", user-confirmed).
+            let mut body: Vec<String> = self
+                .inherited_preview
+                .as_deref()
+                .map(|inh| {
+                    inh.trim()
+                        .split("\n\n")
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
 
             // Headline: pending commentary shown as bold when no steps yet.
             if !self.pending_commentary.trim().is_empty()
@@ -2498,7 +2505,7 @@ impl TelegramTurnStream {
                 && !self.thinking_active
             {
                 let text = clip_detail(self.pending_commentary.trim());
-                lines.push(format!("**{}**", text));
+                body.push(format!("**{}**", text));
             }
 
             // Tail: pending commentary (💬) and live thinking (🧠).
@@ -2515,13 +2522,14 @@ impl TelegramTurnStream {
                 ));
             }
 
-            // Truncate oldest tool lines so total preview stays under
+            // Truncate oldest lines so total preview stays under
             // STREAM_PREVIEW_LIMIT (Telegram editMessageText 4096-char cap).
-            let total = self.tool_lines.len();
+            // The tail always survives; skipping starts at the inherited head.
+            let all: Vec<&String> = body.iter().chain(self.tool_lines.iter()).collect();
+            let total = all.len();
             let mut skip = total;
             for s in 0..total {
-                let mut test = lines.clone();
-                test.extend(self.tool_lines[s..].iter().cloned());
+                let mut test: Vec<String> = all[s..].iter().map(|x| (*x).clone()).collect();
                 test.extend(tail.clone());
                 if test.join("\n\n").chars().count() <= STREAM_PREVIEW_LIMIT {
                     skip = s;
@@ -2529,10 +2537,11 @@ impl TelegramTurnStream {
                 }
             }
 
+            let mut lines = Vec::new();
             if skip > 0 && skip < total {
                 lines.push(format!("… {} earlier", skip));
             }
-            lines.extend(self.tool_lines[skip..].iter().cloned());
+            lines.extend(all[skip..].iter().map(|x| (*x).clone()));
             lines.extend(tail);
 
             lines.join("\n\n")
@@ -3049,6 +3058,46 @@ mod tests {
             delivery: StreamDelivery::Pending,
             finished: false,
         }
+    }
+
+    /// 单 preview (2026-08-12): the inherited origin body is kept VERBATIM
+    /// in the resumed preview — the old 300-char clip of the whole body used
+    /// to wipe most of the origin's progress on takeover ("origin progress
+    /// 被恢复轮覆盖", user-confirmed).
+    #[test]
+    fn preview_text_keeps_inherited_body_verbatim() {
+        let mut s = make_stream();
+        s.mode = crate::config::channel::StreamingMode::Progress;
+        let long_body = (0..20)
+            .map(|i| format!("line {i}: {}", "x".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(long_body.chars().count() > 300);
+        s.inherited_preview = Some(long_body.clone());
+        let out = s.preview_text();
+        assert!(out.contains("line 0:"));
+        assert!(out.contains("line 19:"));
+        // No clip: the whole body survives (plus separator joins).
+        assert!(out.chars().count() >= long_body.chars().count());
+    }
+
+    /// 单 preview (2026-08-12): under STREAM_PREVIEW_LIMIT the OLDEST lines
+    /// (inherited head first) are dropped with the "… N earlier" marker —
+    /// newest content (this turn's tool lines) always survives.
+    #[test]
+    fn preview_text_truncates_oldest_lines_under_cap() {
+        let mut s = make_stream();
+        s.mode = crate::config::channel::StreamingMode::Progress;
+        let big_body = (0..80)
+            .map(|i| format!("row {i}: {}", "y".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        s.inherited_preview = Some(big_body);
+        s.tool_lines = vec!["🔧 newest-tool".to_string()];
+        let out = s.preview_text();
+        assert!(out.contains("newest-tool"));
+        assert!(out.contains("earlier"));
+        assert!(out.chars().count() <= STREAM_PREVIEW_LIMIT);
     }
 
     /// 单 preview (2026-08-12): `TurnStream::final_takeover` marks the stream
