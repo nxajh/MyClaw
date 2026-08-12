@@ -123,34 +123,6 @@ struct SessionMeta {
     segments: Vec<SegmentRecord>,
 }
 
-/// A compaction summary that replaced a range of messages, stored in meta
-/// rather than as a line in history.jsonl.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CompactionEntry {
-    /// Position (0-based) among real messages where the summary should be
-    /// inserted when reconstructing the in-memory history.
-    position: usize,
-    /// The full summary text (including the `[CONTEXT COMPACTION...]` prefix).
-    text: String,
-    /// Compaction version number.
-    version: u32,
-}
-
-/// Index entry mapping a segment file to its global message ID range.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SegmentRecord {
-    /// Segment number (matches archive filename: history.{segment:04}.jsonl).
-    /// The active segment uses `meta.segment`.
-    segment: u32,
-    /// Global ID of the first real message in this segment.
-    start_id: i64,
-    /// Number of real messages (excluding compaction entries) in this segment.
-    count: usize,
-    /// Compaction summaries within this segment. Usually 0 or 1.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    compactions: Vec<CompactionEntry>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ActiveMap {
     #[serde(flatten)]

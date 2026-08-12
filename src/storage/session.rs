@@ -216,13 +216,6 @@ pub trait SessionBackend: Send + Sync {
     /// List ALL sessions across all owners (for startup recovery).
     fn list_all_sessions(&self) -> Vec<SessionInfo>;
 
-    /// List sessions owned by a specific user (owner prefix match).
-    fn list_sessions_for_owner(&self, owner: &str) -> Vec<SessionInfo>;
-
-    /// Read a specific message by global ID from any session (owned by the caller).
-    /// Returns (role, text_preview) — preview is truncated to ~200 chars.
-    fn query_message(&self, session_id: &str, message_id: i64) -> Option<(String, String)>;
-
     // ── Active session ────────────────────────────────────────────────────
 
     /// Get the active session ID for a user.
