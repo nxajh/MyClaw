@@ -496,7 +496,6 @@ fn lint_memory_content(name: &str, content: &str, files: &[MemoryFile]) -> Vec<S
 }
 
 /// Build frontmatter string.
-#[allow(clippy::too_many_arguments)]
 fn build_frontmatter(
     name: &str,
     description: &str,
