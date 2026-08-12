@@ -2598,6 +2598,54 @@ impl TelegramTurnStream {
         self.delete_preview().await;
     }
 
+    /// FINAL shape of the single evolving message ("最终才 summary"):
+    /// the OpenClaw-style collapse line followed by the final answer as
+    /// the last 💬 line. Pure (testable without network).
+    fn collapse_summary_body(&self, note: &str) -> String {
+        let summary = self.collapse_summary();
+        if note.trim().is_empty() {
+            summary
+        } else {
+            format!("{summary}\n\n💬 {}", note.trim())
+        }
+    }
+
+    /// Edit the preview into `summary + final answer` — used by
+    /// `final_takeover` so the whole async-delegation flow ends on ONE
+    /// message: no collapse-to-summary + separate `send_message` fallback.
+    /// On edit failure (message deleted server-side) the body is resent as
+    /// a fresh message; the caller reports `FinalDelivered` only when this
+    /// reached the platform (otherwise `process_turn`'s fallback send
+    /// still delivers).
+    async fn collapse_to_summary_with_answer(&mut self, note: &str) {
+        let body = self.collapse_summary_body(note);
+        if let Some(mid) = self.msg_id {
+            if self
+                .channel
+                .edit_message_rich(self.chat_id, mid, &body)
+                .await
+                .is_ok()
+            {
+                self.delivery = StreamDelivery::Visible;
+                return;
+            }
+            // Edit failed — drop the stale id and retry as a fresh send.
+            self.msg_id = None;
+        }
+        if let Ok(Some(id)) = self
+            .channel
+            .send_rich_message_simple(
+                &self.chat_id.to_string(),
+                &body,
+                self.thread_id.as_deref(),
+            )
+            .await
+        {
+            self.msg_id = Some(id);
+            self.delivery = StreamDelivery::Visible;
+        }
+    }
+
     /// Remove this target from the streaming tracker.
     fn untrack(&self) {
         self.channel
@@ -2691,11 +2739,18 @@ impl TurnStream for TelegramTurnStream {
                 }
                 TurnEvent::Done { text } => {
                     if self.defer_collapse {
-                        // 单 preview (silenced resume turn): the turn's model
-                        // output is intermediate progress — append it as a 💬
-                        // line and KEEP the preview (no collapse). The final
-                        // resume turn collapses. `pending_commentary` carries
-                        // the streamed text; `text` is the fallback for
+                        // 单 preview (2026-08-12): KEEP the preview in
+                        // progress form — two callers:
+                        //   • silenced resume turn: the model output is
+                        //     intermediate progress, appended as a 💬 line;
+                        //   • the ORIGIN turn that spawned async delegations
+                        //     (set in Agent::run): its preview must survive
+                        //     for the notice turns to take over — collapsing
+                        //     here would surface the summary too early
+                        //     ("先 summary 再 progress", user-confirmed).
+                        // The FINAL resume turn collapses (final_takeover →
+                        // summary + answer). `pending_commentary` carries the
+                        // streamed text; `text` is the fallback for
                         // non-streaming providers.
                         let note = self.done_note(text);
                         if !note.trim().is_empty() {
@@ -2706,23 +2761,24 @@ impl TurnStream for TelegramTurnStream {
                         self.flush_preview().await;
                         self.finished = true;
                     } else if self.final_takeover {
-                        // 单 preview (2026-08-12): FINAL loud resume turn that
-                        // took over the origin's preview — append the final
-                        // answer as the last 💬 line and keep the SAME message
-                        // (edit in place, no collapse). Report FinalDelivered
-                        // when the flush actually reached the platform so
-                        // `process_turn` skips the `send_message` fallback —
-                        // otherwise the user would see a SECOND standalone
-                        // message next to the evolving preview. On transport
-                        // failure (flush did not deliver) the delivery stays
-                        // non-final and the fallback still reaches the user.
+                        // 单 preview (2026-08-12): FINAL loud resume turn —
+                        // collapse the taken-over preview into the summary
+                        // line and keep the final answer on the SAME message
+                        // ("最终才 summary": summary + 💬 answer, never a
+                        // collapse + separate fallback send). Report
+                        // FinalDelivered when the flush actually reached the
+                        // platform so `process_turn` skips the `send_message`
+                        // fallback — otherwise the user would see a SECOND
+                        // standalone message next to the preview. On
+                        // transport failure the delivery stays non-final and
+                        // the fallback still reaches the user.
                         let note = self.done_note(text);
                         if !note.trim().is_empty() {
                             self.commentary_notes += 1;
                             self.tool_lines
                                 .push(format!("💬 {}", clip_detail(note.trim())));
                         }
-                        self.flush_preview().await;
+                        self.collapse_to_summary_with_answer(&note).await;
                         if self.delivery == StreamDelivery::Visible {
                             self.delivery = StreamDelivery::FinalDelivered;
                         }
@@ -2996,14 +3052,36 @@ mod tests {
     }
 
     /// 单 preview (2026-08-12): `TurnStream::final_takeover` marks the stream
-    /// so the FINAL loud resume turn keeps its answer inside the taken-over
-    /// preview (no collapse, no fallback send).
+    /// so the FINAL loud resume turn collapses the taken-over preview into
+    /// `summary + final answer` on the SAME message (no collapse + separate
+    /// fallback send).
     #[test]
     fn final_takeover_marks_stream() {
         let mut s = make_stream();
         assert!(!s.final_takeover);
         s.final_takeover();
         assert!(s.final_takeover);
+    }
+
+    /// 单 preview (2026-08-12): the FINAL shape of the single message is the
+    /// collapse line + the final answer as a 💬 line — pure rendering, so it
+    /// is testable without network.
+    #[test]
+    fn collapse_summary_body_formats_summary_plus_answer() {
+        let mut s = make_stream();
+        s.thinking_steps = 4;
+        s.commentary_notes = 3;
+        s.tool_count = 4;
+        // With an answer → summary line, blank line, 💬 answer.
+        let body = s.collapse_summary_body("最终答案");
+        assert!(body.starts_with("🧠 4 thoughts · 💬 3 notes · 🛠️ 4 tool calls · ⏱️ "));
+        assert!(body.ends_with("\n\n💬 最终答案"));
+        // Empty / whitespace answer → summary line only.
+        assert_eq!(
+            s.collapse_summary_body("   "),
+            s.collapse_summary_body(""),
+        );
+        assert!(!s.collapse_summary_body("").contains("💬"));
     }
 
     /// 单 preview (2026-08-12): `done_note` prefers the streamed commentary

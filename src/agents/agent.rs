@@ -524,6 +524,24 @@ impl Agent {
                     continue;
                 }
                 // Emit Done before persisting so streaming UI gets final text.
+                // 单 preview (2026-08-12): the ORIGIN turn that spawned async
+                // delegations must keep its preview in progress form — with
+                // ordinary-turn semantics `Done` collapses it into the one-line
+                // summary right away, and the suspension's notice turns would
+                // then take over a collapsed summary instead of the live
+                // progress ("先 summary 再 progress", user-confirmed). Marking
+                // the stream `defer_collapse` appends this turn's final
+                // commentary as a 💬 line and KEEPS the preview; only the
+                // FINAL resume turn collapses it (final_takeover → summary +
+                // answer, still one message). Silenced resume turns already
+                // get `defer_collapse` from `process_turn`; the final loud
+                // resume turn has `async_delegation_spawned == false`, so
+                // neither flag applies there.
+                if async_delegation_spawned && !session.turn_silenced {
+                    if let Some(stream) = session.turn_stream.as_mut() {
+                        stream.defer_collapse();
+                    }
+                }
                 push_or_drop(
                     &mut session.turn_stream,
                     TurnEvent::Done {
