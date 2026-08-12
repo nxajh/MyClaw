@@ -11,8 +11,15 @@
 
 use crate::providers::{
     SearchProvider, SearchRequest, SearchResult, SearchResults, SharedApiKey,
+    http::build_reqwest_client,
 };
 use reqwest::Client;
+use std::time::Duration;
+
+/// Connect + send timeout for each MCP round-trip.
+const SEND_TIMEOUT: Duration = Duration::from_secs(15);
+/// Response body read timeout (search results can be large).
+const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct GlmMcpSearchProvider {
     client: Client,
@@ -24,7 +31,7 @@ pub struct GlmMcpSearchProvider {
 impl GlmMcpSearchProvider {
     pub fn new(api_key: impl Into<SharedApiKey>, url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: build_reqwest_client(),
             api_key: api_key.into(),
             url: url.into(),
             user_agent: None,
@@ -95,7 +102,9 @@ impl SearchProvider for GlmMcpSearchProvider {
                     }
                 });
 
-                let init_resp = self.client.post(&url).headers(init_headers).json(&init_body).send().await?;
+                let init_resp = tokio::time::timeout(SEND_TIMEOUT, self.client.post(&url).headers(init_headers).json(&init_body).send())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("GLM MCP search: init request timed out after {}s", SEND_TIMEOUT.as_secs()))??;
                 let status = init_resp.status();
                 if !status.is_success() {
                     let body = init_resp.text().await.unwrap_or_default();
@@ -108,7 +117,9 @@ impl SearchProvider for GlmMcpSearchProvider {
                     .get("mcp-session-id")
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string());
-                let init_text = init_resp.text().await?;
+                let init_text = tokio::time::timeout(BODY_TIMEOUT, init_resp.text())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("GLM MCP search: init body read timed out after {}s", BODY_TIMEOUT.as_secs()))??;
 
                 // Verify init succeeded.
                 if let Some(data) = parse_sse_data(&init_text) {
@@ -150,12 +161,12 @@ impl SearchProvider for GlmMcpSearchProvider {
                         "method": "notifications/initialized"
                     });
 
-                    let _ = self
+                    let _ = tokio::time::timeout(SEND_TIMEOUT, self
                         .client
                         .post(&url)
                         .headers(notif_headers)
                         .json(&notif_body)
-                        .send()
+                        .send())
                         .await;
                 }
 
@@ -191,13 +202,18 @@ impl SearchProvider for GlmMcpSearchProvider {
                     }
                 });
 
-                let call_resp = self.client.post(&url).headers(call_headers).json(&call_body).send().await?;
+                let call_resp = tokio::time::timeout(SEND_TIMEOUT, self.client.post(&url).headers(call_headers).json(&call_body).send())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("GLM MCP search: call request timed out after {}s", SEND_TIMEOUT.as_secs()))??;
                 let status = call_resp.status();
                 if !status.is_success() {
                     let body = call_resp.text().await.unwrap_or_default();
                     anyhow::bail!("GLM MCP search HTTP {}: {}", status, body);
                 }
-                call_resp.text().await.map_err(|e| anyhow::anyhow!(e.to_string()))
+                tokio::time::timeout(BODY_TIMEOUT, call_resp.text())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("GLM MCP search: call body read timed out after {}s", BODY_TIMEOUT.as_secs()))?
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
             })
         })?;
 
