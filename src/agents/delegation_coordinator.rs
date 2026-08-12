@@ -1447,7 +1447,7 @@ mod tests {
         let parent = manager.get_or_create_context("mock:default:u1");
         let parent_id = parent.session_id.clone();
         let sub_session_id = dc
-            .spawn_delegate_async("coder", "do the thing", &parent_id, "", 60, None)
+            .spawn_delegate_async("coder", "do the thing", &parent_id, 60, None)
             .unwrap();
         assert!(
             sub_session_id.contains("/s/"),
@@ -1467,7 +1467,7 @@ mod tests {
         let (dc, manager) = coordinator(1);
         let parent = manager.get_or_create_context("mock:default:u1");
         let err = dc
-            .spawn_delegate_async("coder", "task", &parent.session_id, "", 60, None)
+            .spawn_delegate_async("coder", "task", &parent.session_id, 60, None)
             .unwrap_err();
         assert!(err.to_string().contains("maximum delegation depth exceeded"));
         assert!(parent.suspension_snapshot().is_none());
@@ -1479,7 +1479,7 @@ mod tests {
         let (dc, manager) = coordinator(3);
         let parent = manager.get_or_create_context("mock:default:u1");
         let err = dc
-            .spawn_delegate_async("nope", "task", &parent.session_id, "", 60, None)
+            .spawn_delegate_async("nope", "task", &parent.session_id, 60, None)
             .unwrap_err();
         assert!(err.to_string().contains("Unknown sub-agent"));
         assert!(dc.running_snapshot().is_empty());
