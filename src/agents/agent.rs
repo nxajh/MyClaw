@@ -532,8 +532,10 @@ impl Agent {
                 // progress ("先 summary 再 progress", user-confirmed). Marking
                 // the stream `defer_collapse` appends this turn's final
                 // commentary as a 💬 line and KEEPS the preview; only the
-                // FINAL resume turn collapses it (final_takeover → summary +
-                // answer, still one message). Silenced resume turns already
+                // FINAL resume turn collapses it (final_takeover → summary
+                // line; the final answer is delivered as a separate message
+                // by the fallback — user-confirmed shape: 2 messages).
+                // Silenced resume turns already
                 // get `defer_collapse` from `process_turn`; the final loud
                 // resume turn has `async_delegation_spawned == false`, so
                 // neither flag applies there.

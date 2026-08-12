@@ -2598,54 +2598,6 @@ impl TelegramTurnStream {
         self.delete_preview().await;
     }
 
-    /// FINAL shape of the single evolving message ("最终才 summary"):
-    /// the OpenClaw-style collapse line followed by the final answer as
-    /// the last 💬 line. Pure (testable without network).
-    fn collapse_summary_body(&self, note: &str) -> String {
-        let summary = self.collapse_summary();
-        if note.trim().is_empty() {
-            summary
-        } else {
-            format!("{summary}\n\n💬 {}", note.trim())
-        }
-    }
-
-    /// Edit the preview into `summary + final answer` — used by
-    /// `final_takeover` so the whole async-delegation flow ends on ONE
-    /// message: no collapse-to-summary + separate `send_message` fallback.
-    /// On edit failure (message deleted server-side) the body is resent as
-    /// a fresh message; the caller reports `FinalDelivered` only when this
-    /// reached the platform (otherwise `process_turn`'s fallback send
-    /// still delivers).
-    async fn collapse_to_summary_with_answer(&mut self, note: &str) {
-        let body = self.collapse_summary_body(note);
-        if let Some(mid) = self.msg_id {
-            if self
-                .channel
-                .edit_message_rich(self.chat_id, mid, &body)
-                .await
-                .is_ok()
-            {
-                self.delivery = StreamDelivery::Visible;
-                return;
-            }
-            // Edit failed — drop the stale id and retry as a fresh send.
-            self.msg_id = None;
-        }
-        if let Ok(Some(id)) = self
-            .channel
-            .send_rich_message_simple(
-                &self.chat_id.to_string(),
-                &body,
-                self.thread_id.as_deref(),
-            )
-            .await
-        {
-            self.msg_id = Some(id);
-            self.delivery = StreamDelivery::Visible;
-        }
-    }
-
     /// Remove this target from the streaming tracker.
     fn untrack(&self) {
         self.channel
@@ -2749,7 +2701,8 @@ impl TurnStream for TelegramTurnStream {
                         //     here would surface the summary too early
                         //     ("先 summary 再 progress", user-confirmed).
                         // The FINAL resume turn collapses (final_takeover →
-                        // summary + answer). `pending_commentary` carries the
+                        // summary; the answer is delivered as a separate
+                        // message). `pending_commentary` carries the
                         // streamed text; `text` is the fallback for
                         // non-streaming providers.
                         let note = self.done_note(text);
@@ -2762,26 +2715,17 @@ impl TurnStream for TelegramTurnStream {
                         self.finished = true;
                     } else if self.final_takeover {
                         // 单 preview (2026-08-12): FINAL loud resume turn —
-                        // collapse the taken-over preview into the summary
-                        // line and keep the final answer on the SAME message
-                        // ("最终才 summary": summary + 💬 answer, never a
-                        // collapse + separate fallback send). Report
-                        // FinalDelivered when the flush actually reached the
-                        // platform so `process_turn` skips the `send_message`
-                        // fallback — otherwise the user would see a SECOND
-                        // standalone message next to the preview. On
-                        // transport failure the delivery stays non-final and
-                        // the fallback still reaches the user.
-                        let note = self.done_note(text);
-                        if !note.trim().is_empty() {
-                            self.commentary_notes += 1;
-                            self.tool_lines
-                                .push(format!("💬 {}", clip_detail(note.trim())));
-                        }
-                        self.collapse_to_summary_with_answer(&note).await;
-                        if self.delivery == StreamDelivery::Visible {
-                            self.delivery = StreamDelivery::FinalDelivered;
-                        }
+                        // collapse the taken-over preview into the one-line
+                        // summary (the origin's progress message ENDS as the
+                        // summary — "最终才 summary"). The final answer is NOT
+                        // merged into this message: `process_turn`'s fallback
+                        // (`suspended_turn == false` on the loud final wheel)
+                        // delivers `turn_result.text` as a SEPARATE message
+                        // right after — user-confirmed final shape is TWO
+                        // messages: summary + standalone answer. Do NOT report
+                        // FinalDelivered here — that would suppress the
+                        // fallback and lose the answer.
+                        self.collapse_to_summary().await;
                         self.finished = true;
                     } else {
                         // Collapse preview into a one-line summary; the final
@@ -3053,38 +2997,14 @@ mod tests {
 
     /// 单 preview (2026-08-12): `TurnStream::final_takeover` marks the stream
     /// so the FINAL loud resume turn collapses the taken-over preview into
-    /// `summary + final answer` on the SAME message (no collapse + separate
-    /// fallback send).
+    /// the summary line; the final answer is delivered by `process_turn`'s
+    /// fallback as a SEPARATE message (user-confirmed shape: 2 messages).
     #[test]
     fn final_takeover_marks_stream() {
         let mut s = make_stream();
         assert!(!s.final_takeover);
         s.final_takeover();
         assert!(s.final_takeover);
-    }
-
-    /// 单 preview (2026-08-12): the FINAL shape of the single message is the
-    /// collapse line + the final answer as a 💬 line — pure rendering, so it
-    /// is testable without network.
-    #[test]
-    fn collapse_summary_body_formats_summary_plus_answer() {
-        let mut s = make_stream();
-        s.thinking_steps = 4;
-        s.commentary_notes = 3;
-        s.tool_count = 4;
-        // With an answer → summary line, blank line, 💬 answer.
-        let body = s.collapse_summary_body("最终答案");
-        assert!(body.starts_with("🧠 4 thoughts · 💬 3 notes · 🛠️ 4 tool calls · ⏱️ "));
-        assert!(body.ends_with("\n\n💬 最终答案"));
-        // Empty / whitespace answer → summary line only. Note: the summary
-        // line itself contains "💬 n notes" (commentary count), so assert on
-        // the absence of the appended answer part (`\n\n💬 `), not on "💬".
-        assert_eq!(
-            s.collapse_summary_body("   "),
-            s.collapse_summary_body(""),
-        );
-        assert!(!s.collapse_summary_body("").contains("\n\n💬 "));
-        assert!(s.collapse_summary_body("").starts_with("🧠 4 thoughts"));
     }
 
     /// 单 preview (2026-08-12): `done_note` prefers the streamed commentary

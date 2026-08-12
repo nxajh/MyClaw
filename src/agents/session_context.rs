@@ -609,9 +609,10 @@ impl SessionContext {
             None
         };
         // 单 preview (2026-08-12): the FINAL loud notice turn (fold takeover,
-        // NOT silenced) must keep the final answer inside the SAME evolving
-        // preview — `final_takeover` makes `Done` append the answer as a 💬
-        // line and report FinalDelivered (no collapse, no fallback send).
+        // NOT silenced) takes over the origin's preview and collapses it into
+        // the one-line summary on `Done` (`final_takeover`); the final answer
+        // is then delivered by the `send_message` fallback as a SEPARATE
+        // message — user-confirmed shape: 2 messages (summary + answer).
         // Ordinary turns and silenced resume turns are unaffected.
         let fold_takeover = fold.is_some();
         session.turn_stream = channel
