@@ -640,6 +640,12 @@ impl DelegationCoordinator {
                 session.id.clone()
             };
 
+            // Capture whether this is an async delegation BEFORE `inbox` is
+            // moved below — the completion branch uses it to decide who owns
+            // checkpoint cleanup (async spawn task bodies delete the
+            // checkpoint after broadcasting the terminal event; sync
+            // delegations clean up here).
+            let is_async_delegation = inbox.is_some();
             {
                 let mut session = sub_ctx.session.lock().await;
                 session.session_override.run_mode = Some(crate::config::agent::RunMode::Background);
@@ -813,6 +819,20 @@ impl DelegationCoordinator {
                                     } else {
                                         format!("\nConflicted files:\n{}", conflict_files)
                                     };
+                                    // Terminal state reached (merge conflict
+                                    // aborts the delegation): sync delegations
+                                    // must clean up their checkpoint here,
+                                    // since the completion branch below is
+                                    // skipped by this early return.
+                                    if !is_async_delegation {
+                                        if let Err(e) = self
+                                            .session_manager
+                                            .backend()
+                                            .delete_delegation_checkpoint(&task_id)
+                                        {
+                                            tracing::warn!(task_id = %task_id, err = %e, "delete delegation checkpoint failed");
+                                        }
+                                    }
                                     return Err(anyhow::anyhow!(
                                         "sub-agent '{}' completed but merge failed (conflict). Worktree preserved at {}.{}",
                                         config.name,
@@ -919,6 +939,24 @@ impl DelegationCoordinator {
             if result.is_ok() {
                 if let Err(e) = self.session_manager.backend().delete_session(&sub_session_id) {
                     tracing::debug!(sub_session = %sub_session_id, err = %e, "failed to GC sub-session");
+                }
+            }
+
+            // Sync delegations (no inbox): delete the durable checkpoint here.
+            // The task has reached a terminal state (Ok or Err — both are
+            // terminal), so there is nothing to resume on restart. The async
+            // path keeps its checkpoint until the spawn task body has
+            // broadcast the terminal event (`spawn_delegate_async` deletes it
+            // there); deleting a missing key is idempotent, so the redundant
+            // async re-delete is harmless. A crash mid-run still leaves the
+            // checkpoint intact for `scan_unfinished_subagents`.
+            if !is_async_delegation {
+                if let Err(e) = self
+                    .session_manager
+                    .backend()
+                    .delete_delegation_checkpoint(&task_id)
+                {
+                    tracing::warn!(task_id = %task_id, err = %e, "delete delegation checkpoint failed");
                 }
             }
 
