@@ -1391,10 +1391,10 @@ mod tests {
     fn rotate_uses_computed_start_id_not_survivor_in_memory_id() {
         let (_dir, backend, sid) = backend_with_session();
         backend
-            .append_message(&sid, &ChatMessage::user_text("m1".into()))
+            .append_message(&sid, &ChatMessage::user_text("m1"))
             .unwrap();
         backend
-            .append_message(&sid, &ChatMessage::user_text("m2".into()))
+            .append_message(&sid, &ChatMessage::user_text("m2"))
             .unwrap();
 
         // Simulate a session whose meta.json was rebuilt externally: segment 0
@@ -1410,8 +1410,11 @@ mod tests {
         backend.write_meta(&meta).unwrap();
 
         let surviving = vec![
-            (0i64, ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY]".into())),
-            (100i64, ChatMessage::user_text("m2".into())),
+            (
+                0i64,
+                ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY]"),
+            ),
+            (100i64, ChatMessage::user_text("m2")),
         ];
         backend.rotate_history_impl(&sid, &surviving).unwrap();
 
