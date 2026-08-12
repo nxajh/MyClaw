@@ -93,4 +93,15 @@ pub trait TurnStream: Send + Sync {
     /// no collapse) so the whole flow stays one evolving message — the
     /// final collapse happens on the last resume turn. Default: no-op.
     fn defer_collapse(&mut self) {}
+
+    /// 单 preview (2026-08-12): mark this stream as the FINAL (loud) resume
+    /// turn of an async-delegation suspension that took over the origin's
+    /// preview message. Its `Done` must append the final answer INTO the
+    /// same preview message (edit in place, no collapse) and report
+    /// `FinalDelivered` so the caller skips the `send_message` fallback —
+    /// otherwise the collapse + fallback would open a SECOND message next
+    /// to the evolving preview (multi-message spam). On transport failure
+    /// the delivery stays non-final so the fallback still reaches the user.
+    /// Default: no-op (ordinary turns keep collapse + fallback semantics).
+    fn final_takeover(&mut self) {}
 }

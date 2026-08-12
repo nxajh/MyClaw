@@ -2223,6 +2223,7 @@ impl Channel for TelegramChannel {
             pending_commentary: String::new(),
             inherited_preview: inherited,
             defer_collapse: false,
+            final_takeover: false,
             start: std::time::Instant::now(),
             last_edit: std::time::Instant::now() - STREAM_THROTTLE,
             delivery: StreamDelivery::Pending,
@@ -2399,6 +2400,13 @@ struct TelegramTurnStream {
     /// keeps the preview lines (no collapse); the final resume turn
     /// collapses. Set via `TurnStream::defer_collapse`.
     defer_collapse: bool,
+    /// 单 preview (2026-08-12): FINAL (loud) resume turn of an
+    /// async-delegation suspension that took over the origin's preview —
+    /// `Done` appends the final answer into the same preview message
+    /// (no collapse) and reports `FinalDelivered` (no fallback send), so
+    /// the whole flow stays ONE evolving message. Set via
+    /// `TurnStream::final_takeover`.
+    final_takeover: bool,
     /// Turn start time (progress mode, for collapse summary).
     start: std::time::Instant,
     last_edit: std::time::Instant,
@@ -2409,6 +2417,17 @@ struct TelegramTurnStream {
 impl TelegramTurnStream {
     fn is_progress(&self) -> bool {
         self.mode == crate::config::channel::StreamingMode::Progress
+    }
+
+    /// 单 preview (2026-08-12): the Done-event text for a resume turn —
+    /// streamed commentary wins when present, else the provider's final
+    /// `text` (non-streaming fallback). Pure so tests can pin it.
+    fn done_note(&mut self, text: String) -> String {
+        if !self.pending_commentary.trim().is_empty() {
+            std::mem::take(&mut self.pending_commentary)
+        } else {
+            text
+        }
     }
 
     /// Flush the current thinking round into the step list as a retained line.
@@ -2678,17 +2697,35 @@ impl TurnStream for TelegramTurnStream {
                         // resume turn collapses. `pending_commentary` carries
                         // the streamed text; `text` is the fallback for
                         // non-streaming providers.
-                        let note = if !self.pending_commentary.trim().is_empty() {
-                            std::mem::take(&mut self.pending_commentary)
-                        } else {
-                            text
-                        };
+                        let note = self.done_note(text);
                         if !note.trim().is_empty() {
                             self.commentary_notes += 1;
                             self.tool_lines
                                 .push(format!("💬 {}", clip_detail(note.trim())));
                         }
                         self.flush_preview().await;
+                        self.finished = true;
+                    } else if self.final_takeover {
+                        // 单 preview (2026-08-12): FINAL loud resume turn that
+                        // took over the origin's preview — append the final
+                        // answer as the last 💬 line and keep the SAME message
+                        // (edit in place, no collapse). Report FinalDelivered
+                        // when the flush actually reached the platform so
+                        // `process_turn` skips the `send_message` fallback —
+                        // otherwise the user would see a SECOND standalone
+                        // message next to the evolving preview. On transport
+                        // failure (flush did not deliver) the delivery stays
+                        // non-final and the fallback still reaches the user.
+                        let note = self.done_note(text);
+                        if !note.trim().is_empty() {
+                            self.commentary_notes += 1;
+                            self.tool_lines
+                                .push(format!("💬 {}", clip_detail(note.trim())));
+                        }
+                        self.flush_preview().await;
+                        if self.delivery == StreamDelivery::Visible {
+                            self.delivery = StreamDelivery::FinalDelivered;
+                        }
                         self.finished = true;
                     } else {
                         // Collapse preview into a one-line summary; the final
@@ -2773,6 +2810,10 @@ impl TurnStream for TelegramTurnStream {
 
     fn defer_collapse(&mut self) {
         self.defer_collapse = true;
+    }
+
+    fn final_takeover(&mut self) {
+        self.final_takeover = true;
     }
 
     async fn finish(self: Box<Self>) -> StreamDelivery {
@@ -2913,6 +2954,7 @@ mod tests {
             pending_commentary: String::new(),
             inherited_preview: None,
             defer_collapse: false,
+            final_takeover: false,
             start: std::time::Instant::now(),
             last_edit: std::time::Instant::now(),
             delivery: StreamDelivery::FinalDelivered,
@@ -2924,6 +2966,63 @@ mod tests {
         // No flushed message (deleted / never sent) → None.
         s.msg_id = None;
         assert!(s.fold_candidate().is_none());
+    }
+
+    /// Test helper: a fresh stream in the default (Pending, unfinished) state.
+    fn make_stream() -> TelegramTurnStream {
+        TelegramTurnStream {
+            channel: TelegramChannel::new(make_config()),
+            chat_id: 42,
+            thread_id: None,
+            reply_target: "t".to_string(),
+            mode: crate::config::channel::StreamingMode::Partial,
+            msg_id: None,
+            accumulated: String::new(),
+            tool_lines: vec![],
+            tool_count: 0,
+            thinking_steps: 0,
+            commentary_notes: 0,
+            thinking_tokens: 0,
+            thinking_active: false,
+            pending_commentary: String::new(),
+            inherited_preview: None,
+            defer_collapse: false,
+            final_takeover: false,
+            start: std::time::Instant::now(),
+            last_edit: std::time::Instant::now(),
+            delivery: StreamDelivery::Pending,
+            finished: false,
+        }
+    }
+
+    /// 单 preview (2026-08-12): `TurnStream::final_takeover` marks the stream
+    /// so the FINAL loud resume turn keeps its answer inside the taken-over
+    /// preview (no collapse, no fallback send).
+    #[test]
+    fn final_takeover_marks_stream() {
+        let mut s = make_stream();
+        assert!(!s.final_takeover);
+        s.final_takeover();
+        assert!(s.final_takeover);
+    }
+
+    /// 单 preview (2026-08-12): `done_note` prefers the streamed commentary
+    /// (draining it) over the provider's final `text` — the non-streaming
+    /// fallback. Pure, so it is testable without network.
+    #[test]
+    fn done_note_uses_pending_commentary_over_text() {
+        let mut s = make_stream();
+        s.pending_commentary = "  streamed line  ".to_string();
+        let note = s.done_note("provider final text".to_string());
+        assert_eq!(note, "  streamed line  ");
+        assert!(s.pending_commentary.is_empty());
+
+        // No streamed commentary → provider text wins.
+        let mut s2 = make_stream();
+        assert_eq!(
+            s2.done_note("provider final text".to_string()),
+            "provider final text"
+        );
     }
 
     #[test]

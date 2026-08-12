@@ -608,12 +608,23 @@ impl SessionContext {
         } else {
             None
         };
+        // 单 preview (2026-08-12): the FINAL loud notice turn (fold takeover,
+        // NOT silenced) must keep the final answer inside the SAME evolving
+        // preview — `final_takeover` makes `Done` append the answer as a 💬
+        // line and report FinalDelivered (no collapse, no fallback send).
+        // Ordinary turns and silenced resume turns are unaffected.
+        let fold_takeover = fold.is_some();
         session.turn_stream = channel
             .as_ref()
             .and_then(|ch| ch.create_stream_folding(&reply_target, fold));
         if silenced {
             if let Some(stream) = session.turn_stream.as_mut() {
                 stream.defer_collapse();
+            }
+        }
+        if fold_takeover && !silenced {
+            if let Some(stream) = session.turn_stream.as_mut() {
+                stream.final_takeover();
             }
         }
         session.channel = channel;
