@@ -505,7 +505,6 @@ fn build_frontmatter(
     inject: &str,
     created_at: &str,
     updated_at: Option<&str>,
-    source_session: Option<&str>,
 ) -> String {
     let mut fm = format!(
         "---
@@ -525,13 +524,6 @@ created_at: {}",
             "
 updated_at: {}",
             yaml_scalar(ua)
-        ));
-    }
-    if let Some(ss) = source_session {
-        fm.push_str(&format!(
-            "
-source_session: {}",
-            yaml_scalar(ss)
         ));
     }
     if !tags.is_empty() {
@@ -733,9 +725,6 @@ impl Tool for MemoryViewTool {
                     "links": outgoing,
                     "backlinks": file_backlinks,
                 });
-                if let Some(ref ss) = mf.source_session {
-                    output["source_session"] = json!(ss);
-                }
                 if !mf.tags.is_empty() {
                     output["tags"] = json!(mf.tags);
                 }
@@ -1107,7 +1096,7 @@ impl MemoryManageTool {
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
         let warnings = lint_memory_content(name, content, &files);
-        let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &inject, &now, None, Some(&session.id));
+        let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &inject, &now, None);
         let file_content = format!("{}{}", frontmatter, content);
 
         let target = scope_memory_dir(&self.workspace_dir, scope, user_id).join(&filename);
@@ -1208,7 +1197,6 @@ impl MemoryManageTool {
             &inject,
             &existing.created_at,
             Some(&now),
-            Some(&session.id),
         );
         let file_content = format!("{}{}", frontmatter, content);
 

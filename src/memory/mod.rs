@@ -53,9 +53,6 @@ pub struct MemoryFile {
     pub tags: Vec<String>,
     pub created_at: String,
     pub updated_at: Option<String>,
-    /// Provenance: which session and agent path wrote this memory.
-    /// `None` for legacy files predating the field.
-    pub source_session: Option<String>,
     pub links: Vec<LinkRef>,
     pub content: String,
     pub path: std::path::PathBuf,
@@ -165,7 +162,6 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     let mut inject: Option<String> = None;
     let mut created_at = None;
     let mut updated_at: Option<String> = None;
-    let mut source_session: Option<String> = None;
 
     for line in frontmatter_text.lines() {
         let line = line.trim();
@@ -182,7 +178,6 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
                 "inject" => inject = Some(value.to_string()),
                 "created_at" => created_at = Some(value.to_string()),
                 "updated_at" => updated_at = Some(value.to_string()),
-                "source_session" => source_session = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -202,7 +197,6 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
         tags,
         created_at: created_at.unwrap_or_default(),
         updated_at,
-        source_session,
         links,
         content,
         path: path.to_path_buf(),
@@ -631,7 +625,6 @@ mod tests {
                 tags: vec![],
                 created_at: String::new(),
                 updated_at: None,
-                source_session: None,
                 links: vec![
                     LinkRef {
                         target: "beta".into(),
@@ -653,7 +646,6 @@ mod tests {
                 tags: vec![],
                 created_at: String::new(),
                 updated_at: None,
-                source_session: None,
                 links: vec![LinkRef {
                     target: "gamma".into(),
                     label: "depends on".into(),
