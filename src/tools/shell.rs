@@ -21,6 +21,12 @@ use tokio::time::{Duration, timeout};
 
 const MAX_OUTPUT_INLINE: usize = 30_000;
 
+/// Cap on the checkpoint output file. A leftover journal that is never
+/// cleared causes every subsequent multi-segment call to append to the same
+/// file with the same stale marker_id — the file grows unboundedly and can
+/// exceed this cap. Past the cap the journal+output pair is discarded.
+const MAX_JOURNAL_OUTPUT: usize = 64 * 1024 * 1024; // 64 MiB
+
 struct TruncatedOutput {
     text: String,
     full_output_path: Option<String>,
@@ -79,6 +85,19 @@ fn safe_char_boundary(s: &str, max_bytes: usize) -> usize {
         idx -= 1;
     }
     idx
+}
+
+/// Read a file as lossy UTF-8. Checkpoint output files can accumulate bytes
+/// from commands that truncate mid-multibyte-character (e.g. `cut -c`), which
+/// makes the whole file invalid UTF-8 — `read_to_string` would fail outright
+/// and the tool would report every segment as "Not Executed".
+fn read_lossy(path: &std::path::Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Some(s),
+        Err(_) => std::fs::read(path)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .ok(),
+    }
 }
 
 // ── Segment splitting ──────────────────────────────────────────────────────
@@ -395,7 +414,7 @@ impl ShellJournal {
         let data = std::fs::read_to_string(Self::journal_path(dir, session_id)).ok()?;
         let journal: Self = serde_json::from_str(&data).ok()?;
         let output =
-            std::fs::read_to_string(Self::output_path(dir, session_id)).unwrap_or_default();
+            read_lossy(&Self::output_path(dir, session_id)).unwrap_or_default();
         Some((journal, output))
     }
 
@@ -418,6 +437,25 @@ impl ShellJournal {
             .map(|dir| Self::journal_path(dir, session_id).exists())
             .unwrap_or(false)
     }
+}
+
+/// Whether a journal describes exactly the same command (segments + separators)
+/// as the one about to run. A journal left behind by an interrupted *different*
+/// command must be discarded, otherwise the stale marker_id keeps being reused
+/// against an ever-growing output file.
+fn journal_matches_command(journal: &ShellJournal, segments: &[Segment]) -> bool {
+    journal.segments.len() == segments.len()
+        && journal
+            .segments
+            .iter()
+            .zip(segments.iter())
+            .all(|(jc, s)| jc == &s.command)
+        && journal.seps.len() == segments.len()
+        && journal
+            .seps
+            .iter()
+            .zip(segments.iter())
+            .all(|(js, s)| js == sep_to_str(s.prev_sep))
 }
 
 pub struct BgProcEntry {
@@ -666,8 +704,28 @@ impl ShellTool {
         session_id: &str,
     ) -> anyhow::Result<ToolResult> {
         let sessions_dir = self.sessions_dir.as_deref().unwrap();
-        
-        let (start_idx, prev_exit_code, marker_id) = 
+
+        // Stale-journal guard. The journal is only cleared on a clean,
+        // fully-completed run; an interrupted or daemon-crashed run leaves it
+        // behind. A leftover journal from a *different* command poisons every
+        // subsequent multi-segment call: the stale marker_id is reused to
+        // append into an ever-growing output file, and the recovery parser
+        // then matches against historical markers. Verify the journal matches
+        // the current command and the output file is within the size cap;
+        // otherwise discard both and start fresh.
+        if let Some((journal, output)) = ShellJournal::load(Some(sessions_dir), session_id) {
+            let matches = journal_matches_command(&journal, segments);
+            if !matches || output.len() > MAX_JOURNAL_OUTPUT {
+                tracing::warn!(
+                    matched = matches,
+                    output_bytes = output.len(),
+                    "discarding stale shell checkpoint journal"
+                );
+                ShellJournal::clear(Some(sessions_dir), session_id);
+            }
+        }
+
+        let (start_idx, prev_exit_code, marker_id) =
             match ShellJournal::load(Some(sessions_dir), session_id) {
                 Some((journal, output)) => {
                     let parsed = parse_segment_range(&output, &journal.marker_id, 0, journal.segments.len());
@@ -763,7 +821,7 @@ impl ShellTool {
         let _ = std::fs::remove_file(&script_path);
 
         // Read the combined output
-        let raw_output = std::fs::read_to_string(&output_path).unwrap_or_default();
+        let raw_output = read_lossy(&output_path).unwrap_or_default();
         let parsed = parse_segment_range(&raw_output, &marker_id, 0, segments.len());
         
         let mut final_code = child_exit_code.unwrap_or(-1);
@@ -1203,5 +1261,50 @@ mod tests {
         assert!(parsed[1].completed);
         assert_eq!(parsed[1].stdout, "world");
         assert_eq!(parsed[1].exit_code, Some(0));
+    }
+
+    #[test]
+    fn journal_matches_same_command() {
+        let segs = split_shell_command("echo a && echo b");
+        let journal = ShellJournal {
+            marker_id: "m".to_string(),
+            segments: segs.iter().map(|s| s.command.clone()).collect(),
+            seps: segs.iter().map(|s| sep_to_str(s.prev_sep).to_string()).collect(),
+        };
+        assert!(journal_matches_command(&journal, &segs));
+    }
+
+    #[test]
+    fn journal_mismatch_different_command() {
+        let segs = split_shell_command("echo a && echo b");
+        let stale = ShellJournal {
+            marker_id: "old".to_string(),
+            segments: vec!["cd /somewhere".to_string(), "grep x".to_string()],
+            seps: vec!["".to_string(), "&&".to_string()],
+        };
+        assert!(!journal_matches_command(&stale, &segs));
+    }
+
+    #[test]
+    fn journal_mismatch_different_separator() {
+        let segs = split_shell_command("echo a && echo b");
+        let stale = ShellJournal {
+            marker_id: "old".to_string(),
+            segments: vec!["echo a".to_string(), "echo b".to_string()],
+            seps: vec!["".to_string(), ";".to_string()],
+        };
+        assert!(!journal_matches_command(&stale, &segs));
+    }
+
+    #[test]
+    fn read_lossy_tolerates_invalid_utf8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad.bin");
+        // Invalid UTF-8: truncated multibyte char (e.g. from `cut -c` on CJK).
+        let mut bytes = "ab".as_bytes().to_vec();
+        bytes.push(0xe4); // start of a 3-byte char, never completed
+        std::fs::write(&path, &bytes).unwrap();
+        let s = read_lossy(&path).expect("lossy read must succeed");
+        assert!(s.starts_with("ab"));
     }
 }
