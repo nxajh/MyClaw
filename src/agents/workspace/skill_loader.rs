@@ -35,6 +35,8 @@ pub struct SkillDefinition {
     pub arguments: Vec<String>,
     pub user_invocable: bool,
     pub agent_invocable: bool,
+    /// Skill status — "draft" skills are filtered out of normal loading.
+    pub status: Option<String>,
 }
 
 /// 解析 SKILL.md 文件
@@ -62,6 +64,7 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
     let arguments = extract_yaml_list(&front_matter, "arguments");
     let user_invocable = extract_yaml_bool(&front_matter, "user_invocable").unwrap_or(true);
     let agent_invocable = extract_yaml_bool(&front_matter, "agent_invocable").unwrap_or(true);
+    let status = extract_yaml_string(&front_matter, "status");
 
     Ok(SkillDefinition {
         name,
@@ -75,6 +78,7 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
         arguments,
         user_invocable,
         agent_invocable,
+        status,
     })
 }
 
@@ -107,6 +111,12 @@ pub fn load_skills_from_dir(skills_dir: &Path) -> Vec<SkillDefinition> {
 
         match parse_skill_file(&skill_md) {
             Ok(skill) => {
+                // Draft skills (auto-extracted, not yet reviewed) are hidden
+                // from normal loading — they don't appear in the system prompt.
+                if skill.status.as_deref() == Some("draft") {
+                    info!(name = %skill.name, "skill skipped (status: draft)");
+                    continue;
+                }
                 info!(name = %skill.name, path = %skill_md.display(), "skill loaded");
                 skills.push(skill);
             }

@@ -163,6 +163,9 @@ impl Agent {
         // Track whether the main agent called memory_manage this turn —
         // if so, the forked extraction is redundant (mutual exclusion).
         let mut turn_called_memory = false;
+        // Track whether any tool call errored this turn — skill extraction
+        // only fires on clean turns (no errors).
+        let mut turn_had_error = false;
         // Async delegation is a turn boundary: after the entire provider batch
         // has been executed and persisted, return to SessionContext so the
         // origin turn releases its lock before the completion wake is queued.
@@ -602,6 +605,30 @@ impl Agent {
                     });
                 }
 
+                // Fire-and-forget skill extraction fork.
+                // Fires once per session when the turn had enough tool calls
+                // (>= 5) and no errors — indicating a substantive, successful
+                // interaction that may contain reusable procedures.
+                if !turn_had_error
+                    && loop_breaker.total_calls() >= 5
+                    && session.parent_session_id.is_none()
+                {
+                    let mut skill_messages = messages.clone();
+                    skill_messages.push(msg.clone());
+                    let skill_input = crate::agents::skill_extract::SkillExtractInput {
+                        messages: skill_messages,
+                        model_id: model_id.clone(),
+                        provider: Arc::clone(&provider),
+                        tool_specs: tool_specs.clone(),
+                        tool_registry: Arc::clone(&runtime.tools),
+                        session_id: session.id.clone(),
+                        workspace_dir: runtime.defaults.prompt.workspace_dir.clone(),
+                    };
+                    tokio::spawn(async move {
+                        crate::agents::skill_extract::run_skill_extract(skill_input).await;
+                    });
+                }
+
                 return Ok(TurnResult {
                     text: response.text,
                     stop_reason: response.stop_reason,
@@ -720,6 +747,9 @@ impl Agent {
                     }
                     Err(e) => (format!("error: {}", e), true),
                 };
+                if is_error {
+                    turn_had_error = true;
+                }
 
                 match loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
                     LoopBreak::Detected(reason) => {
