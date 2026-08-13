@@ -341,6 +341,24 @@ pub struct PersistedChannelMessage {
     pub interruption_scope_id: Option<String>,
 }
 
+impl PersistedChannelMessage {
+    /// Reverse of `to_persisted`: rebuild a runtime message for inbound-spool
+    /// replay (RFC inbound-spool §6.4). File bodies are gone (never spooled);
+    /// `silenced_override` is `None` — replayed messages are ordinary user
+    /// messages, never synthesized delegation notices.
+    pub fn into_runtime(&self) -> ChannelInboundMessage {
+        ChannelInboundMessage {
+            id: self.id.clone(),
+            sender: MessageSender::new(self.sender_id.clone()),
+            receiver: self.receiver.clone(),
+            content: ChannelMessageContent::text(self.text.clone()),
+            timestamp: self.timestamp,
+            interruption_scope_id: self.interruption_scope_id.clone(),
+            silenced_override: None,
+        }
+    }
+}
+
 /// Result of sending one logical outbound message. Multi-file messages may map
 /// to several platform messages, so ids are returned in send order.
 #[derive(Debug, Clone, Default)]

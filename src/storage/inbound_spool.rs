@@ -22,6 +22,11 @@
 //! 5000 — old-enough re-deliveries are assumed impossible, same trade-off as
 //! the RFC §4.2 threshold).
 //!
+//! Attachment messages are handled by the CALLER (`spawn_listener` bypasses
+//! `append` when `msg.content.files` is non-empty; RFC §6.3) — this module
+//! only ever sees text messages, and `Ok(None)` from `append` unambiguously
+//! means "dedup hit, do not deliver".
+//!
 //! `baseline_seq` (max seq at open) is the replay watermark: `pending()`
 //! returns only entries with `seq <= baseline`. During a hot switch the new
 //! process keeps appending new messages (seq > baseline) while waiting for
@@ -160,23 +165,21 @@ impl InboundSpool {
     }
 
     /// Append a `Pending` entry (fsync'd) and return its assigned seq, or
-    /// `None` when the message is NOT persisted:
-    ///   * dedup: the same `(channel, account, msg.id)` is already known
-    ///     (Pending or Done) — caller must NOT deliver again; or
-    ///   * unsupported: the message carries file attachments (runtime-only
-    ///     bodies, RFC §6.3) — caller delivers normally but without restart
-    ///     durability. Attachment messages are deliberately NOT added to the
-    ///     seen set: a WeChat buf rollback re-delivering the same message must
-    ///     still reach the live path (a seen hit would silently drop it).
+    /// `None` when the same `(channel, account, msg.id)` is already known
+    /// (Pending or Done) — the caller must NOT deliver again.
+    ///
+    /// Attachment messages never reach this method: the caller
+    /// (`spawn_listener`) checks `msg.content.files.is_empty()` and bypasses
+    /// spooling entirely (RFC §6.3 — file bodies are runtime-only), so an
+    /// unsupported message is always delivered live with `seq: 0` and is
+    /// never added to the seen set (a WeChat buf rollback re-delivering it
+    /// must still reach the live path).
     pub fn append(
         &self,
         channel: &str,
         account: &str,
         msg: &ChannelInboundMessage,
     ) -> std::io::Result<Option<u64>> {
-        if !msg.content.files.is_empty() {
-            return Ok(None);
-        }
         let key = dedup_key(channel, account, &msg.id);
         {
             let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
@@ -324,13 +327,8 @@ impl InboundSpool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::channels::{
-        ChannelFile, ChannelFileMeta, ChannelMessageContent, LocalFileBody, MessageReceiver,
-        MessageSender,
-    };
+    use crate::channels::{ChannelMessageContent, MessageReceiver, MessageSender};
 
     fn msg(id: &str) -> ChannelInboundMessage {
         ChannelInboundMessage {
@@ -342,20 +340,6 @@ mod tests {
             interruption_scope_id: None,
             silenced_override: None,
         }
-    }
-
-    fn attachment_msg(id: &str) -> ChannelInboundMessage {
-        let mut m = msg(id);
-        m.content.files = vec![ChannelFile {
-            meta: ChannelFileMeta {
-                file_name: "x.png".to_string(),
-                mime_type: None,
-                size_bytes: None,
-                source_url: None,
-            },
-            body: Arc::new(LocalFileBody::new("/tmp/x.png")),
-        }];
-        m
     }
 
     #[test]
@@ -410,20 +394,6 @@ mod tests {
         assert!(!spool.mark_done(seq).unwrap());
         // Same process: re-append is still deduped.
         assert!(spool.append("telegram", "acc1", &msg("m1")).unwrap().is_none());
-    }
-
-    #[test]
-    fn append_skips_attachments_without_seen() {
-        let dir = tempfile::tempdir().unwrap();
-        let spool = InboundSpool::open(dir.path().join("inbound_spool")).unwrap();
-        // Attachment message: not persisted, and NOT added to seen.
-        assert!(spool.append("wechat", "acc1", &attachment_msg("m1")).unwrap().is_none());
-        assert!(spool.is_empty());
-        assert_eq!(fs::read_dir(dir.path().join("inbound_spool")).unwrap().count(), 0);
-        // Re-delivery of the same attachment (buf rollback) is NOT deduped —
-        // it must still reach the live path.
-        assert!(spool.append("wechat", "acc1", &attachment_msg("m1")).unwrap().is_none());
-        assert!(spool.is_empty());
     }
 
     #[test]

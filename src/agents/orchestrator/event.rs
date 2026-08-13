@@ -19,6 +19,10 @@ pub enum OrchestratorEvent {
         channel_type: String,
         account_id: String,
         message: crate::channels::ChannelInboundMessage,
+        /// Inbound-spool sequence; 0 = not spooled (spool disabled, attachment
+        /// message, or append failure degraded delivery). Non-zero entries are
+        /// marked `Done` after dispatch returns.
+        seq: u64,
     },
 
     /// Scheduler fired — either a heartbeat tick or a cron job. Carried

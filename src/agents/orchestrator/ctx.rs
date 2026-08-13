@@ -171,6 +171,13 @@ pub struct OrchestratorCtx {
     /// restarts). `None` when the storage dir cannot be opened (degraded to
     /// P1 in-memory-only delivery) or in in-memory tests.
     pub completion_queue: Option<Arc<crate::storage::CompletionNoticeStore>>,
+    /// RFC inbound-spool: persistent at-least-once spool for inbound channel
+    /// messages (qqbot / telegram / wechat), written at `spawn_listener`
+    /// before the message enters the event loop and marked `Done` after
+    /// `inbound::dispatch` returns. `None` when the storage dir cannot be
+    /// opened (degraded to in-memory-only delivery, fail-open) or in
+    /// in-memory tests.
+    pub inbound_spool: Option<Arc<crate::storage::InboundSpool>>,
 }
 
 impl OrchestratorCtx {

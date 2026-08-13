@@ -28,6 +28,7 @@ pub(crate) use scheduled::{run_cron_task, run_distill_task, run_heartbeat_task, 
 use crate::agents::DelegationCoordinator;
 use crate::agents::delegation::DelegationEvent;
 use crate::channels::{Channel, ChannelInboundMessage};
+use crate::storage::InboundSpool;
 use anyhow::Context;
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,8 +76,19 @@ pub enum SchedulerEvent {
     Distill,
 }
 
+/// An inbound message handed from a channel listener to the event loop.
+/// `seq` is the inbound-spool sequence (RFC inbound-spool §6.1); 0 means
+/// "not spooled" — spool disabled, attachment message (RFC §6.3), or append
+/// failure degraded delivery.
+pub struct InboundEnvelope {
+    pub seq: u64,
+    pub channel: String,
+    pub account: String,
+    pub msg: ChannelInboundMessage,
+}
+
 /// Type alias for the channel message sender.
-pub type ChannelMsgSender = mpsc::Sender<((String, String), ChannelInboundMessage)>;
+pub type ChannelMsgSender = mpsc::Sender<InboundEnvelope>;
 
 /// Orchestrator — Application Service for message routing and session lifecycle.
 ///
@@ -87,8 +99,7 @@ pub struct Orchestrator {
     /// delegator). Cloned into spawned tasks that must outlive a single turn.
     ctx: Arc<OrchestratorCtx>,
     /// Inbound user-message receiver. Consumed by `run(self)`.
-    #[allow(clippy::type_complexity)]
-    msg_rx: Option<mpsc::Receiver<((String, String), ChannelInboundMessage)>>,
+    msg_rx: Option<mpsc::Receiver<InboundEnvelope>>,
     /// Listener task handles — aborted when `run` returns (it owns `self`).
     listener_handles: Vec<JoinHandle<()>>,
     /// Delegation event receiver (None when sub-agents are disabled).
@@ -274,6 +285,7 @@ impl Orchestrator {
                 account_id.clone(),
                 Arc::clone(channel),
                 Arc::clone(&msg_tx),
+                inbound_spool.clone(),
             );
             channels.insert(
                 (channel_type.clone(), account_id.clone()),
@@ -286,6 +298,36 @@ impl Orchestrator {
         if channels.is_empty() {
             warn!("no channels enabled");
         }
+
+        // RFC inbound-spool: persistent at-least-once spool for inbound
+        // channel messages. Written at spawn_listener before the message
+        // enters the event loop; marked Done after dispatch returns. `None`
+        // degrades to in-memory-only delivery (fail-open, same as tests).
+        let inbound_spool_dir = parts.workspace_dir.join(".state").join("inbound_spool");
+        let inbound_spool = match crate::storage::InboundSpool::open(inbound_spool_dir.clone()) {
+            Ok(spool) => {
+                // Startup tombstone maintenance (RFC §4.2). Best-effort: a
+                // failure only leaves stale tombstones around (dedup keys),
+                // never loses Pending entries.
+                if let Err(e) = spool.compact_if_needed() {
+                    error!(
+                        err = %e,
+                        dir = %inbound_spool_dir.display(),
+                        "inbound spool compact failed; continuing with stale tombstones"
+                    );
+                }
+                info!(dir = %inbound_spool_dir.display(), "inbound spool opened");
+                Some(Arc::new(spool))
+            }
+            Err(e) => {
+                error!(
+                    err = %e,
+                    dir = %inbound_spool_dir.display(),
+                    "inbound spool open failed; degraded to in-memory delivery"
+                );
+                None
+            }
+        };
 
         // P2 (2026-08-13, RFC delegation-notice-queue §5): open the persistent
         // completion-notice delivery queue (at-least-once across restarts).
@@ -323,6 +365,7 @@ impl Orchestrator {
             scheduler: parts.scheduler,
             turn_tracker: Arc::new(ctx::TurnTracker::new()),
             completion_queue,
+            inbound_spool,
         });
 
         let orchestrator = Orchestrator {
@@ -352,6 +395,7 @@ impl Orchestrator {
         account_id: String,
         channel: Arc<dyn Channel>,
         msg_tx: Arc<ChannelMsgSender>,
+        spool: Option<Arc<InboundSpool>>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
@@ -375,8 +419,44 @@ impl Orchestrator {
                     }
                 };
                 while let Some(msg) = rx.recv().await {
+                    // RFC inbound-spool §6.1: persist BEFORE the message enters
+                    // the event loop, so a crash between receive and dispatch
+                    // is recoverable. Attachment messages bypass spooling
+                    // entirely (RFC §6.3 — file bodies are runtime-only);
+                    // dedup hits are dropped; append failures degrade to
+                    // live delivery with seq 0 (fail-open).
+                    let seq = if msg.content.files.is_empty() {
+                        match &spool {
+                            Some(spool) => match spool.append(&channel_type, &account_id, &msg) {
+                                Ok(Some(seq)) => seq,
+                                Ok(None) => {
+                                    // Dedup: same (channel, account, msg.id)
+                                    // already handled (e.g. WeChat buf
+                                    // rollback) — do NOT deliver again.
+                                    continue;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        channel = %channel_type,
+                                        account = %account_id,
+                                        err = %e,
+                                        "inbound spool append failed; delivering without persistence"
+                                    );
+                                    0
+                                }
+                            },
+                            None => 0,
+                        }
+                    } else {
+                        0
+                    };
                     if msg_tx
-                        .send(((channel_type.clone(), account_id.clone()), msg))
+                        .send(InboundEnvelope {
+                            seq,
+                            channel: channel_type.clone(),
+                            account: account_id.clone(),
+                            msg,
+                        })
                         .await
                         .is_err()
                     {
@@ -455,10 +535,11 @@ impl Orchestrator {
         // into a single stream. No adapter tasks / manual fan-in: each source
         // is a Stream<OrchestratorEvent> and `merge` interleaves them.
         let mut events: std::pin::Pin<Box<dyn Stream<Item = OrchestratorEvent> + Send>> = Box::pin(
-            ReceiverStream::new(rx).map(|((ct, ac), msg)| OrchestratorEvent::Inbound {
-                channel_type: ct,
-                account_id: ac,
-                message: msg,
+            ReceiverStream::new(rx).map(|env| OrchestratorEvent::Inbound {
+                channel_type: env.channel,
+                account_id: env.account,
+                message: env.msg,
+                seq: env.seq,
             }),
         );
         if let Some(drx) = self.delegation_rx.take() {
@@ -510,8 +591,23 @@ impl Orchestrator {
                     channel_type,
                     account_id,
                     message: msg,
+                    seq,
                 } => {
-                    inbound::dispatch(&self.ctx, (channel_type, account_id), msg).await;
+                    inbound::dispatch(&self.ctx, (channel_type.clone(), account_id.clone()), msg).await;
+                    // RFC inbound-spool §6.2: mark done AFTER dispatch returns
+                    // (message is in session history). Includes the
+                    // rate-limit/drop paths — replay must not bypass limits.
+                    if seq != 0 {
+                        if let Some(spool) = &self.ctx.inbound_spool {
+                            if let Err(e) = spool.mark_done(seq) {
+                                warn!(
+                                    seq,
+                                    err = %e,
+                                    "inbound spool mark_done failed; entry stays Pending (will replay)"
+                                );
+                            }
+                        }
+                    }
                 }
                 OrchestratorEvent::Delegation(event) => {
                     delegation::wake(&self.ctx, event).await;
