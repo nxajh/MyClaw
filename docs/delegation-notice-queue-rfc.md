@@ -1,6 +1,6 @@
 # RFC: 异步委派完成通知改造 —— yield 工具 + turn 后 drain + 投递队列持久化
 
-- 状态：Draft（待确认后实施）
+- 状态：**已实施**（P0/P1/P2 已合入 master，CI 867 passed；本文档随 P3 定稿，§5 记录 P2 实施偏差，2026-08-13）
 - 日期：2026-08-13
 - 范围：orchestrator delegation wake 路径；`SessionContext` suspension 状态机；agent 工具面；daemon 启动恢复
 - 参考实现：openclaw `sessions_yield`（`src/agents/tools/sessions-yield-tool.ts`）、hermes `completion_queue` + turn 后 drain（`tools/process_registry.py` L172-174/L1312）、openclaw 持久化投递队列（`src/infra/session-delivery-queue-*` + `src/agents/subagent-completion-delivery.ts`）
@@ -217,22 +217,28 @@ pub struct CompletionNoticeEntry {
 pub enum DeliveryState { Pending, Delivered }
 ```
 
-- 每事件一个 JSON 文件（与 spool 同目录，前缀 `completion-`），tmp/rename 原子写、启动扫描目录——与 inbound-spool RFC 同机制，spool 实施时直接复用代码。
+- 每事件一个 JSON 文件，tmp/rename 原子写、启动扫描目录。
 - **决策（2026-08-13 确认）**：JSON 文件。MyClaw 现有全部持久化是 JSON 文件（suspension/users/meta/cron/checkpoint），无 SQLite/嵌入式 DB 依赖（引入 rusqlite = C 编译成本 + 二进制体积 + 供应链面）；完成事件低频、无查询/索引/事务需求。未来若 spool 升级 SQLite，completion 队列跟随——不独立选型。
-- 与 spool 共享 `seq` 生成器（或各自独立单调 seq，前缀区分）。
+- **目录（P2 实施偏差 #1）**：独立目录 `.state/completion_queue/`（**不**与 spool 同目录）。原因：inbound-spool 尚未实施，且其未来 compact 会重写自身目录只保留 Pending——混放时 completion 条目会被 spool compact 误删；`.state/` 已有先例（daemon.rs tasks.json L531）。
+- **seq（P2 实施）**：各自独立单调 seq，**无前缀**——恢复时从**文件名**解析 seq（内容损坏也计入，防 append 复用文件名冲突），损坏条目 warn + 跳过。
+- **实施形态**：`CompletionNoticeStore { dir, seq: AtomicU64, seen: Mutex<HashSet<String>>, pending: Mutex<Vec<Entry>> }`——`open(dir)` 扫描恢复 + 清 Delivered 残留 + seq=文件名 max；`append(entry)` seen 去重（同 id 返回 None）、seq=++、tmp+write+sync_all+rename、入 pending；`mark_delivered(id)` 删文件 + 移出 pending（seen 保留）；`pending()` 供恢复扫描。**fail-open**：`open` Err → error! + `None`（降级 P1 内存投递，daemon 照常运行）；append Err → warn + 继续内存投递。
 
 ### 5.3 写入 / 确认
 
 - **写入**：wake 入队**前**（`msg_tx.send` 之前，同 spool §3 的写入点原则）——落盘成功才入内存队列。fsync 保证。
-- **确认**：`process_turn` **返回 Ok** 后标记 `Delivered`（删除文件或写墓碑）。确认点是"notice 内容已持久化到 session 历史"（`process_turn` L579 "Record inbound and persist"），不是"进入 process_turn"更不是"LLM 处理完"——Err（LLM 调用失败等）时内容未进历史，保持 `Pending`，跨重启重投（投递层 at-least-once；同进程内不重试，见 §9 风险 1）。
+- **落盘链（P2 实施）**：wake 尾部构造 `NoticeMeta { sub_session_id, status: Option<SubStatus>, sent_message_count }` 透传 `route_notice`；**仅活跃分支**（sctx 存在）enqueue 前 append——非活跃走 `process_non_active` 不落盘（无队列可入，窗口小）、`recover_suspension` 的 `recovery:` 合成通知不落盘、channel 缺失回退不落盘。status 存小写字符串（手写 match：completed/failed/timed_out，不依赖 serde 默认变体名）。
+- **确认**：`process_turn` **返回 Ok** 后标记 `Delivered`。确认点是"notice 内容已持久化到 session 历史"（`process_turn` L579 "Record inbound and persist"），不是"进入 process_turn"更不是"LLM 处理完"——Err（LLM 调用失败等）时内容未进历史，保持 `Pending`，跨重启重投（投递层 at-least-once；同进程内不重试，见 §9 风险 1）。
+- **Delivered = 删除文件（P2 实施偏差 #3）**：原稿"删除文件或写墓碑"，实施为**删除文件**（自压缩，无墓碑）。原因：dedup 键 id 每终端事件唯一（synthetic_id），重启后只扫 Pending——墓碑无跨重启去重价值；进程内 seen set 承担同进程去重。
+- **标记点（P2 实施）**：两处——① `dispatch_turn_spawn` 闭包 `process_turn` Ok 后按 msg.id 前缀 `delegation` 判 notice（id 即 dedup 键）mark_delivered；② `process_non_active` 增 `notice_id: Option<String>` 参数，Ok 后 mark（drain 的 non-active 回退传 `Some(notice.id)`，否则已落盘条目永为 Pending 每次重启重投）。`recovery:`/用户消息 id 不匹配前缀，mark 返回 false 无操作。
 
 ### 5.4 重启恢复
 
-daemon 启动（`recovery::run_startup` 扩展或新 hook）：
+daemon 启动（`recovery::run_startup` 扩展，挂接在 suspension 恢复循环**之后**，独立恢复线）：
 
-1. 扫描 `Pending` 条目 → 按 seq 升序 → 重新入队（synthetic_id 去重：若对应 sub_session 已在 suspension results 中，说明历史已含该通知 → 直接标记 Delivered 跳过）
-2. 对每个 parent_session_id：恢复的 session 若 active → drain；non-active → 走现有 `process_non_active` 路径（临时上下文注入历史）
-3. 与 `recover_suspension`（P1-1 现有）的交互：suspension.json 恢复 + completion 队列恢复是两条独立恢复线，`record_terminal` 幂等保证交叉不重复
+1. **全量重入队（P2 实施偏差 #2，弃用原 results-skip）**：扫描全部 `Pending` 条目 → 按 seq 升序 → 逐条重新入队。原稿"若对应 sub_session 已在 suspension results 中 → 直接标记 Delivered 跳过"**弃用**——原因：`record_terminal` 发生在 notice turn **之前**，results 存在 ≠ 通知已投递；按 results 跳过会在 crash-between 窗口（results 已写、通知未注入）丢通知。重入队只会在"Ok 后 mark 前崩溃"微秒窗口产生重复——at-least-once 明确接受。
+2. 对每个 parent_session_id：恢复的 session 若 active → registered_context 入队（materialization 竞争回退 `process_non_active`）+ spawn drain；否则 spawn `process_non_active(Some(notice_id))`（临时上下文注入历史，Ok 后 mark）。
+3. 死信（P2 实施）：`get_by_id` 失败 / owner 解析失败 → 直接 mark Delivered + warn（投递目标已消失，与 §5.5 一致）。
+4. 与 `recover_suspension`（P1-1 现有）的交互：suspension.json 恢复 + completion 队列恢复是两条独立恢复线，`record_terminal` 幂等保证交叉不重复。
 
 ### 5.5 僵尸清理（无硬截止 deadline）
 
@@ -249,7 +255,7 @@ openclaw 有投递硬截止（`deadlineAt` 30min + dead-letter），但其适用
 | 子代理 inbox（parent→sub） | 不动：这是子代理侧收件箱，方向相反 |
 | 用户消息排队（enqueue_user_message） | 不变：suspension/notice in flight 期间排队，恢复轮 drain |
 | `process_non_active` | 不变：drain 时 active 判定沿用 route_notice 现有分流 |
-| inbound-spool RFC | 同构复用存储；两者独立实施，completion 队列依赖 spool 的 seq/文件基础设施（若无则自建最小版） |
+| inbound-spool RFC | 同构 JSON 文件机制；两者独立实施、**独立目录**（completion 队列 `.state/completion_queue/`，§5.2），completion 队列自建最小版存储，不依赖 spool 的 seq/文件基础设施 |
 | agent_kill / 超时 / recovery 广播 | 不变：所有 DelegationEvent 都走 wake 入队路径，覆盖 Completed/Failed/TimedOut |
 
 ## 7. 任务拆分
@@ -274,8 +280,8 @@ openclaw 有投递硬截止（`deadlineAt` 30min + dead-letter），但其适用
 - P2-4: 测试（落盘/确认/重启恢复/与 suspension 恢复交叉幂等）
 
 ### P3: 收尾
-- P3-1: 更新 `docs/turn-suspension-rfc.md` 相关段 + 本 RFC 定稿
-- P3-2: CI 全绿 + `myclaw update` 部署（x86 Micro 禁本地编译，走 CI）
+- P3-1: 更新 `docs/turn-suspension-rfc.md` 相关段 + 本 RFC 定稿（**已完成 2026-08-13**：本文档状态转"已实施"，§5 记录 P2 三处实施偏差——独立目录 / results-skip 弃用 / Delivered 删文件）
+- P3-2: CI 全绿 + `myclaw update` 部署（x86 Micro 禁本地编译，走 CI）（**待部署：需用户明确确认 `myclaw update`**）
 
 ## 8. 验收标准
 
@@ -292,4 +298,5 @@ openclaw 有投递硬截止（`deadlineAt` 30min + dead-letter），但其适用
 - **风险 1：drain 循环内 notice turn 失败**（LLM 调用失败等）→ **决策（2026-08-13 确认）**：投递层 at-least-once，消费层不重试——`process_turn` 返回 Ok（内容已持久化到 session 历史）才标记 `Delivered`；Err 保持 `Pending`，跨重启恢复时重投（§5.4）。**同进程内不重试**：LLM 层已有内部重试（瞬态错误 L389 / 上下文压缩 L441 / 空响应 L479），返回 Err 的必然是重试无效的错误（认证、上下文不可压缩超限），立即重试大概率再失败还占 turn_lock；重启恢复是更干净的重试通道。此语义与 openclaw（`maxRetries=∞` 但只重试投递动作、不追踪 LLM 消费结果）和 hermes（drain 后不 requeue 消费失败）一致。
 - **风险 2：yield 与 loop_breaker 交互**：yield 检查在工具执行后、loop_breaker 检查前（或并列）——yield 优先（模型显式让位不该被截断成 LoopBreak 错误）。
 - **风险 3：`has_notice_turns_in_flight` 语义扩展影响 dispatch_turn 排队**：用户消息在"队列非空"时排队——若队列长期非空（drain 失败），用户消息被卡。缓解：drain 是同步快速路径（取空即处理），失败保持 Pending 但不阻塞队列（下次 drain 或重启重试，见风险 1），队列不会长期非空。
+- **风险 4（P2 实施确认）：重复投递窗口**——"Ok 后 mark 前崩溃"（微秒级）会致重启后重投同一通知。at-least-once 明确接受：重复注入比丢失代价低（父代理看到两次完成通知，可忽略；丢失则父代理永远不知结果）。
 - **回退**：`wake` 保留旧路径（入队失败/队列不存在时直接 dispatch_turn）；功能开关（config `delegation.notice_queue`）可一键回退。
