@@ -35,7 +35,15 @@ use crate::channels::ChannelInboundMessage;
 /// spawning a delegation — the sub-agent completion wakes it with the result
 /// injected, so it must not emit a final conclusion while results are
 /// outstanding.
-const SILENCE_GUIDANCE: &str = "[系统提示] 本轮为中间恢复轮:任务尚未全部完成,本轮对话不会终结;你的本轮输出将作为进度说明展示给用户(流式通道以 💬 注释显示,无流式通道直接发送)。发出委托后你可以继续处理其他任务;子代理完成时会主动唤醒你并注入结果,结果未齐时不得输出最终结论。请输出简洁的中间进展(如已完成哪些子任务、剩余哪些),不要生成最终结论或收尾语,待全部子代理结果到达后,在最终轮输出完整汇总答复。";
+///
+/// 异步委派通知改造 (2026-08-13, docs/delegation-notice-queue-rfc.md §3.3):
+/// deleted the "结果未齐时不得输出最终结论" hard rule — it was the deadlock
+/// root cause (the model never ends the turn, so completion notices queue
+/// behind `turn_lock` forever). Replaced with `sessions_yield` guidance:
+/// the model may legally end the turn (yield or natural EndTurn) and the
+/// completion arrives as the next message. "绝不轮询" borrowed verbatim
+/// from openclaw `system-prompt.ts` L124 ("never poll").
+const SILENCE_GUIDANCE: &str = "[系统提示] 本轮为中间恢复轮：任务尚未全部完成，你的本轮输出将作为进度说明展示给用户。你可以继续处理其他任务；若需要等待子代理结果，请调用 sessions_yield 结束当前轮——子代理完成时会自动唤醒你并把结果作为下一条消息注入。绝不轮询（不要反复查询子代理状态）。";
 
 /// Append the silence guidance when the resume turn is not final — the
 /// session still has pending delegations, so this turn's output is delivered

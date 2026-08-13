@@ -1163,6 +1163,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         ))));
         tracing::debug!("agent_list / agent_kill tools registered (multi-agent mode)");
 
+        // sessions_yield (RFC delegation-notice-queue §3): deterministic turn
+        // hand-off for the parent agent after spawning async sub-agents.
+        parent_tools.register(Arc::new(crate::tools::SessionsYieldTool::new()));
+        tracing::debug!("sessions_yield tool registered (multi-agent mode)");
+
         let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
         parent_tools.register(Arc::new(tool_search));
 

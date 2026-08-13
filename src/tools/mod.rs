@@ -5,7 +5,7 @@
 //! **Core:** ShellTool, ShellPollTool, FileReadTool, FileWriteTool, FileEditTool, GlobSearchTool, ContentSearchTool
 //! **Web:** HttpRequestTool (subsumes web_fetch via `strip_html` param), WebSearchTool
 //! **Utility:** CalculatorTool, AskUserTool
-//! **Multi-Agent:** AgentDelegateTool, AgentListTool, AgentKillTool
+//! **Multi-Agent:** AgentDelegateTool, AgentListTool, AgentKillTool, SessionsYieldTool
 //! **Planning:** TaskCreateTool, TaskListTool, TaskUpdateTool, TaskDeleteTool
 //! **Discovery:** ToolSearchTool, ListDirTool
 
@@ -29,6 +29,7 @@ mod search_cooldown;
 mod send_message;
 pub mod shell;
 mod session_query;
+mod sessions_yield;
 mod skill_manage_tool;
 mod skill_tool;
 mod skills_list_tool;
@@ -59,6 +60,7 @@ pub use search::{ContentSearchTool, GlobSearchTool};
 pub use search_cooldown::SearchProviderCooldown;
 pub use send_message::SendMessageTool;
 pub use session_query::SessionQueryTool;
+pub use sessions_yield::SessionsYieldTool;
 pub use shell::{ShellPollTool, ShellTool};
 pub use skill_manage_tool::SkillManageTool;
 pub use skill_tool::SkillTool;
@@ -77,7 +79,7 @@ use std::sync::Arc;
 /// Create all built-in tools that don't depend on shared state managed by
 /// the daemon (router / channels / scheduler / etc). Tools requiring such
 /// state — `ask_user`, `web_search`, `agent_delegate`, `agent_list`,
-/// `agent_kill`, `tool_search` — are registered by daemon.rs::build_tools.
+/// `agent_kill`, `sessions_yield`, `tool_search` — are registered by daemon.rs::build_tools.
 pub fn builtin_tools(sessions_dir: Option<std::path::PathBuf>) -> Vec<Arc<dyn Tool>> {
     let shell = ShellTool::new(sessions_dir);
     let shell_poll = ShellPollTool::new(shell.bg_registry());

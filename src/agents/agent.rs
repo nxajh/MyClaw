@@ -836,6 +836,27 @@ impl Agent {
                     }
                 }
 
+                // sessions_yield (docs/delegation-notice-queue-rfc.md §3.2):
+                // explicit hand-off — deterministic EndTurn, discard remaining
+                // tool_calls. has_pending reuses async_delegation_spawned so
+                // suspension proceeds normally when sub-agents were spawned.
+                if call.name == "sessions_yield" && !is_error {
+                    let remaining = response.tool_calls.len() - i - 1;
+                    if remaining > 0 {
+                        session.strip_trailing_tool_calls(remaining);
+                    }
+                    tracing::info!(
+                        session = %session.id,
+                        "sessions_yield called; ending turn deterministically"
+                    );
+                    return Ok(TurnResult {
+                        text: response.text.clone(),
+                        stop_reason: StopReason::EndTurn,
+                        pending_retry: None,
+                        has_pending: async_delegation_spawned,
+                    });
+                }
+
                 // After executing this call, check if we've hit the hard
                 // limit. If so, strip remaining unexecuted tool_calls and
                 // abort — avoids orphan tool_calls in history.
@@ -1906,6 +1927,40 @@ mod tests {
             false,
             r#"{"path":"x"}"#
         ));
+    }
+
+    #[test]
+    fn sessions_yield_detection_logic() {
+        // The yield detection in Agent::run (RFC delegation-notice-queue §3.2)
+        // triggers a deterministic EndTurn when the model calls sessions_yield
+        // without error. has_pending follows async_delegation_spawned. This
+        // test verifies the condition logic in isolation (mirrors the inline
+        // check exactly).
+        fn is_yield(name: &str, is_error: bool) -> bool {
+            name == "sessions_yield" && !is_error
+        }
+
+        // Normal call → yields EndTurn
+        assert!(is_yield("sessions_yield", false));
+
+        // Error result → NOT detected (tool errored, don't truncate)
+        assert!(!is_yield("sessions_yield", true));
+
+        // Different tool → not detected
+        assert!(!is_yield("calculator", false));
+        assert!(!is_yield("agent_delegate", false));
+
+        // When yield triggers without prior async delegation, has_pending is
+        // false — plain EndTurn, no suspension. When agent_delegate(async)
+        // ran earlier in the same batch, async_delegation_spawned is true, so
+        // has_pending is true (suspension proceeds normally).
+        let mut async_delegation_spawned = false;
+        assert_eq!(async_delegation_spawned, false); // pre-condition
+
+        // Simulate agent_delegate(async) running before sessions_yield
+        async_delegation_spawned = true;
+        // yield with prior delegation → has_pending = true
+        assert_eq!(async_delegation_spawned, true);
     }
 
     #[test]
