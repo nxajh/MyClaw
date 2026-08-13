@@ -911,8 +911,9 @@ mod tests {
         assert!(!sctx.has_queued_delegation_notices());
         assert_eq!(sctx.notice_turns_in_flight.load(Ordering::SeqCst), 0);
         // Each notice spawned a turn; each failed on NullRegistry and sent
-        // one error message to the channel.
-        assert_eq!(channel.sent.lock().unwrap().len(), 2);
+        // TWO messages: process_turn's MSG_TURN_FAILED + the dispatch task's
+        // user-facing error detail (pre-existing double-send on failure).
+        assert_eq!(channel.sent.lock().unwrap().len(), 4);
     }
 
     #[tokio::test]
@@ -934,8 +935,9 @@ mod tests {
         // drain only awaits take+spawn; the notice turn runs in background.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(!sctx.has_queued_delegation_notices());
-        // Only one notice dispatched (dedup), one error message.
-        assert_eq!(channel.sent.lock().unwrap().len(), 1);
+        // Only one notice dispatched (dedup) — its failed turn sent two
+        // messages (MSG_TURN_FAILED + user-facing detail).
+        assert_eq!(channel.sent.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
