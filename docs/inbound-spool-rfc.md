@@ -329,7 +329,8 @@ daemon 启动 → channels 就绪 → orchestrator run()
 7. ✅ 集成测试（recovery 2 个）+ 全量测试 + clippy——CI run 31716733711 全绿
 8. ✅ PR → CI 绿；**`myclaw update` 部署待授权**（2026-08-13，部署契约：先征求授权）
 9. ✅ **v4（2026-08-14）**：`inbound_spool.rs` `pending_for` API + 2 单测；`inbound.rs` CrashRecovery 拦截器退役 + `replay_chain()`（5 项）+ `replay_one_sync`/`replay_pending_for_key` + DispatchTurn 前置钩子 + 测试更新；`recovery.rs` `recover_active_session`（Phase 1 恢复/Phase 2 重放）+ `recover_inbound_spool` 重写（三元组分 key、active-only）+ 测试改造；`user_messages.rs` 删 MSG_INCOMPLETE_TURN/BTN_RETRY/BTN_ABORT；`turn.rs` TurnContext derive Clone + `agent.rs` `run`/`run_inner` 拆分（T4 兜底）；RFC §6.4/§8 修正（本段）
-10. ⏳ v4 CI 编译验证 + **`myclaw update` 部署授权**（2026-08-14，待）
+10. ✅ v4 CI 编译验证完成（2026-08-14，三轮修复全绿）：① E0728 `session_user_texts` helper 非 async（`.lock().await`）；② 测试 2 断言修正（注册用户放行后每条重放 turn 因 NullRegistry 失败发 1 条 MSG_TURN_FAILED，非空发送）；③ MSG_TURN_FAILED import 移入测试模块（clippy -D warnings 检查 lib 时报 unused）。CI run 31731566331 全绿（Check/Clippy/Test/Build/Upload）
+11. ⏳ **`myclaw update` 部署授权**（2026-08-14，部署契约：先征求授权）
 
 ## 12. 风险与权衡
 
