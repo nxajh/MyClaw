@@ -335,6 +335,46 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
     // AFTER suspension recovery so active-session lookups see the same
     // registrations the suspension loop just materialized.
     recover_completion_queue(ctx);
+
+    // RFC inbound-spool §6.4: replay persisted inbound messages (crash between
+    // receive and dispatch). Runs after completion-queue recovery so session
+    // registrations are settled; the baseline watermark (captured at spool
+    // open) already excludes messages appended by a hot-switch successor.
+    recover_inbound_spool(ctx);
+}
+
+/// RFC inbound-spool §6.4: replay Pending inbound messages persisted before a
+/// crash. `pending()` returns only entries with `seq <= baseline` (open-time
+/// watermark), so a hot-switch successor never replays messages it appended
+/// while waiting for the old process. Each replay runs the FULL dispatch chain
+/// (interceptors, rate-limit, ask routing, dispatch_turn) in its own task —
+/// identical semantics to live delivery — and marks the entry Done after
+/// dispatch returns (a panic inside dispatch leaves it Pending for the next
+/// restart: at-least-once).
+fn recover_inbound_spool(ctx: &Arc<OrchestratorCtx>) {
+    let Some(spool) = ctx.inbound_spool.clone() else {
+        // Degraded (in-memory-only delivery) or tests — nothing to recover.
+        return;
+    };
+    let pending = spool.pending();
+    if pending.is_empty() {
+        return;
+    }
+    tracing::info!(count = pending.len(), "replaying persisted inbound spool entries");
+
+    for entry in pending {
+        let msg = entry.msg.into_runtime();
+        let ctx = Arc::clone(ctx);
+        let spool = Arc::clone(&spool);
+        let seq = entry.seq;
+        let account = (entry.channel, entry.account);
+        tokio::spawn(async move {
+            super::inbound::dispatch(&ctx, account, msg).await;
+            if let Err(e) = spool.mark_done(seq) {
+                tracing::warn!(seq, err = %e, "inbound spool: replay mark_done failed; entry stays Pending");
+            }
+        });
+    }
 }
 
 /// P2 (2026-08-13, RFC delegation-notice-queue §5): re-deliver completion
@@ -790,5 +830,56 @@ mod tests {
             &history,
             true,
         ));
+    }
+
+    /// RFC inbound-spool §6.4: Pending entries persisted by a crashed process
+    /// are replayed through the full dispatch chain and marked Done once
+    /// dispatch returns. Simulates the crash by appending in one store
+    /// instance (dropped without mark_done), reopening as the successor, then
+    /// running recovery.
+    #[tokio::test]
+    async fn replay_persisted_inbound_and_marks_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool_dir = tmp.path().join("inbound_spool");
+        {
+            let spool = crate::storage::InboundSpool::open(spool_dir.clone()).unwrap();
+            spool
+                .append(
+                    "telegram",
+                    "acc1",
+                    &super::super::test_support::inbound_msg("u1", "hi from before crash"),
+                )
+                .unwrap();
+        }
+        let spool = Arc::new(crate::storage::InboundSpool::open(spool_dir).unwrap());
+        assert_eq!(
+            spool.pending().len(),
+            1,
+            "reopened spool must see the pre-crash Pending entry"
+        );
+        let mut ctx = test_ctx(vec![]);
+        ctx.inbound_spool = Some(Arc::clone(&spool));
+        recover_inbound_spool(&Arc::new(ctx));
+        // The replay task runs async — poll until mark_done lands.
+        for _ in 0..100 {
+            if spool.pending().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            spool.pending().is_empty(),
+            "replay must dispatch and mark the entry done"
+        );
+        assert_eq!(spool.len(), 0);
+    }
+
+    /// RFC inbound-spool §6.4: no spool (degraded / tests) → recovery is a
+    /// no-op; nothing to replay.
+    #[tokio::test]
+    async fn replay_noop_without_spool() {
+        let ctx = test_ctx(vec![]);
+        recover_inbound_spool(&Arc::new(ctx));
+        // No panic; nothing to assert beyond completion.
     }
 }

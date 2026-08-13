@@ -276,29 +276,6 @@ impl Orchestrator {
         let (msg_tx, msg_rx) = mpsc::channel(CHANNEL_QUEUE_SIZE);
         let msg_tx = Arc::new(msg_tx);
 
-        let channels = ChannelRegistry::new();
-        let mut listener_handles = Vec::new();
-
-        for (channel_type, account_id, channel) in &parts.channels {
-            let handle = Self::spawn_listener(
-                channel_type.clone(),
-                account_id.clone(),
-                Arc::clone(channel),
-                Arc::clone(&msg_tx),
-                inbound_spool.clone(),
-            );
-            channels.insert(
-                (channel_type.clone(), account_id.clone()),
-                Arc::clone(channel),
-            );
-            listener_handles.push(handle);
-            info!(channel = %channel_type, account = %account_id, "listener started");
-        }
-
-        if channels.is_empty() {
-            warn!("no channels enabled");
-        }
-
         // RFC inbound-spool: persistent at-least-once spool for inbound
         // channel messages. Written at spawn_listener before the message
         // enters the event loop; marked Done after dispatch returns. `None`
@@ -328,6 +305,29 @@ impl Orchestrator {
                 None
             }
         };
+
+        let channels = ChannelRegistry::new();
+        let mut listener_handles = Vec::new();
+
+        for (channel_type, account_id, channel) in &parts.channels {
+            let handle = Self::spawn_listener(
+                channel_type.clone(),
+                account_id.clone(),
+                Arc::clone(channel),
+                Arc::clone(&msg_tx),
+                inbound_spool.clone(),
+            );
+            channels.insert(
+                (channel_type.clone(), account_id.clone()),
+                Arc::clone(channel),
+            );
+            listener_handles.push(handle);
+            info!(channel = %channel_type, account = %account_id, "listener started");
+        }
+
+        if channels.is_empty() {
+            warn!("no channels enabled");
+        }
 
         // P2 (2026-08-13, RFC delegation-notice-queue §5): open the persistent
         // completion-notice delivery queue (at-least-once across restarts).
