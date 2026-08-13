@@ -15,7 +15,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use super::keyboard::*;
-use super::markdown_sanitize::{fallback_qq_markdown_layout, sanitize_qq_markdown};
+use super::markdown_sanitize::sanitize_qq_markdown;
 use super::message::split_message_chunk;
 use super::token::TokenManager;
 use super::types::*;
@@ -1859,9 +1859,7 @@ impl Channel for QQBotChannel {
         // not as a separate text message (RFC §14.5).
         // QQ msg_type=2: escape `$` and pad `**` for CJK before split.
         let chunks = if msg.content.files.is_empty() {
-            let sanitized = sanitize_qq_markdown(&fallback_qq_markdown_layout(
-                &strip_internal_tags(&msg.content.text),
-            ));
+            let sanitized = sanitize_qq_markdown(&strip_internal_tags(&msg.content.text));
             // Pre-split by estimated visual lines to mitigate QQ client-side
             // layout bug, then apply character-limit splitting to each sub-text.
             let pre_chunks =
