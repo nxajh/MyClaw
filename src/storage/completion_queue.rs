@@ -159,12 +159,13 @@ impl CompletionNoticeStore {
         }
         entry.seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         entry.delivery_state = DeliveryState::Pending;
-        Self::write_entry(&self.entry_path(entry.seq), &entry)?;
+        let seq = entry.seq;
+        Self::write_entry(&self.entry_path(seq), &entry)?;
         self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(entry);
-        Ok(Some(entry.seq))
+        Ok(Some(seq))
     }
 
     /// Mark a Pending entry delivered: delete its file and drop it from the
