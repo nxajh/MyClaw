@@ -1072,7 +1072,7 @@ mod tests {
     }
 
     /// The text parts of the session's user messages, in history order.
-    fn session_user_texts(ctx: &OrchestratorCtx, k: &SessionKey) -> Vec<String> {
+    async fn session_user_texts(ctx: &OrchestratorCtx, k: &SessionKey) -> Vec<String> {
         let sc = ctx.sessions.get_or_create_context(&k.to_string());
         let session = sc.session.lock().await;
         session
@@ -1129,7 +1129,7 @@ mod tests {
         // History holds the replayed user texts in spool order (oldest
         // first). process_turn prepends a <system-reminder> to the content,
         // so assert on the content tail, not exact equality.
-        let users = session_user_texts(&ctx, &k);
+        let users = session_user_texts(&ctx, &k).await;
         assert_eq!(users.len(), 3, "all three replays must reach process_turn");
         for (i, expected) in ["first", "second", "third"].iter().enumerate() {
             assert!(
