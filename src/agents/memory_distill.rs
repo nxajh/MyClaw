@@ -323,6 +323,53 @@ fn build_existing_agent_index(workspace_dir: &str) -> String {
     crate::memory::format_full_memory_index(&entries)
 }
 
+/// Snapshot agent-layer memory names and their content hashes.
+/// Used to diff before/after pass 1 to find newly written/modified memories.
+fn snapshot_agent_memories(workspace_dir: &str) -> std::collections::HashMap<String, String> {
+    let memory_dir = std::path::Path::new(workspace_dir).join(crate::memory::MEMORY_DIR_NAME);
+    let files = crate::memory::scan_memory_files(&memory_dir);
+    files
+        .iter()
+        .map(|f| {
+            let hash = std::fs::read_to_string(&f.path)
+                .map(|c| {
+                    crate::providers::capability_chat::sha256_hex(c.as_bytes())
+                        .chars()
+                        .take(16)
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            (f.name.clone(), hash)
+        })
+        .collect()
+}
+
+/// Diff two snapshots and return the (name, content) pairs for new or modified
+/// agent memories. Reads current file content from disk.
+fn diff_agent_memories(
+    before: &std::collections::HashMap<String, String>,
+    after: &std::collections::HashMap<String, String>,
+    workspace_dir: &str,
+) -> Vec<(String, String)> {
+    let memory_dir = std::path::Path::new(workspace_dir).join(crate::memory::MEMORY_DIR_NAME);
+    let mut result = Vec::new();
+
+    for (name, after_hash) in after {
+        let is_new_or_modified = match before.get(name) {
+            None => true, // newly created
+            Some(before_hash) => before_hash != after_hash, // modified
+        };
+        if is_new_or_modified {
+            if let Ok(content) = std::fs::read_to_string(memory_dir.join(format!("{}.md", name))) {
+                // Take up to 2000 chars of content for the pass-2 prompt.
+                let body: String = content.chars().take(2_000).collect();
+                result.push((name.clone(), body));
+            }
+        }
+    }
+    result
+}
+
 fn build_distill_prompt(
     user_count: usize,
     file_count: usize,
@@ -367,6 +414,15 @@ fn build_distill_prompt(
          6. End content with `## See Also` links to closely related agent-level memories when \
          applicable, canonical form: `[Related: other_memory_name](other_memory_name.md)`.\n\
          7. Never call `remove`.\n\
+         8. In this pass, write ONLY `type='reference'` or `type='project'` memories — \
+         facts, scenarios, and reusable experience. Do NOT create `type='rule'` \
+         memories; rules are synthesized in a separate second pass.\n\
+         9. Every memory you write MUST end with a `## Evidence` section listing \
+         the source user-memory names from the input above that informed it:\n\
+         ## Evidence\n\
+         - Distilled from: memory_name_1, memory_name_2\n\
+         Use the logical names (without .md) of the user memories. This enables \
+         traceability back to the source material.\n\
          \n\
          If nothing is cross-user generalizable, respond with exactly: no distillation needed\n\
          \n\
@@ -375,6 +431,60 @@ fn build_distill_prompt(
         user_count = user_count,
         file_count = file_count,
         input_doc = input_doc,
+        existing_index = existing_index,
+    )
+}
+
+/// Build the second-pass prompt for synthesizing behavioral rules from newly
+/// written agent-level memories (output of pass 1).
+fn build_rule_synthesis_prompt(
+    new_memories_doc: &str,
+    existing_index: &str,
+) -> String {
+    format!(
+        "\n\n---\n\
+         You are the agent-level rule synthesis subagent (pass 2). Below are \
+         newly written agent-level memories from the first distillation pass.\n\
+         Your job: synthesize cross-user behavioral rules from these facts and \
+         experiences, and persist them as `type='rule'` agent-level memories.\n\
+         \n\
+         ## Newly extracted agent memories (pass 1 output)\n\
+         {new_memories_doc}\n\
+         \n\
+         ## Existing agent-level memories\n\
+         {existing_index}\n\
+         \n\
+         ## What qualifies for rule synthesis\n\
+         - Behavioral rules that generalize from multiple facts or recurring patterns\n\
+         - Operational procedures or constraints validated through experience\n\
+         - \"What NOT to do and why\" — anti-patterns discovered through failures\n\
+         - Defaults and conventions worth enforcing across all future sessions\n\
+         \n\
+         ## What does NOT qualify\n\
+         - Restating facts already captured in pass 1 — rules are abstractions ABOVE facts\n\
+         - Single-occurrence observations without generalizable lesson\n\
+         - Anything that would duplicate an existing agent memory (check the index)\n\
+         \n\
+         ## Rules\n\
+         1. Check the index above before writing. If an existing rule covers the same \
+         ground, use `memory_manage` action `replace` to merge — never duplicate.\n\
+         2. All memory_manage calls are forced to `scope='agent'` by the runtime.\n\
+         3. De-identification is CRITICAL: no routing keys, user ids, emails, phone \
+         numbers, real names, or organization names.\n\
+         4. Write memories as declarative facts, not instructions.\n\
+         5. Use `memory_type='rule'` for all memories in this pass.\n\
+         6. Every memory MUST end with a `## Evidence` section listing the agent-level \
+         memory names from pass 1 that informed this rule:\n\
+         ## Evidence\n\
+         - Synthesized from: agent_memory_name_1, agent_memory_name_2\n\
+         7. End content with `## See Also` links when applicable.\n\
+         8. Never call `remove`.\n\
+         \n\
+         If no rules can be synthesized, respond with exactly: no rules needed\n\
+         \n\
+         You have a limited turn budget. Be efficient: decide what to write, then write it.\n\
+         Available tools: memory_list, memory_view, memory_search, memory_manage.",
+        new_memories_doc = new_memories_doc,
         existing_index = existing_index,
     )
 }
@@ -407,13 +517,77 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
         });
 
     let existing_index = build_existing_agent_index(&input.workspace_dir);
-    let distill_prompt = build_distill_prompt(user_count, file_count, &input_doc, &existing_index);
-    let mut messages = vec![ChatMessage::user_text(distill_prompt)];
 
-    let provider = input.provider;
-    let model_id = &input.model_id;
-    let tool_specs = &input.tool_specs;
-    let tool_registry = &input.tool_registry;
+    // Snapshot agent memory state before pass 1 so we can diff after.
+    let before = snapshot_agent_memories(&input.workspace_dir);
+
+    // ── Pass 1: extract facts/scenarios/reference from user memories ──
+    tracing::info!("memory_distill: pass 1 (facts/scenarios)");
+    let distill_prompt = build_distill_prompt(user_count, file_count, &input_doc, &existing_index);
+    let messages1 = vec![ChatMessage::user_text(distill_prompt)];
+    let pass1_written = run_distill_rounds(
+        messages1,
+        Arc::clone(&input.provider),
+        &input.model_id,
+        &input.tool_specs,
+        Arc::clone(&input.tool_registry),
+        &session_shell,
+        &thinking,
+        &input.workspace_dir,
+    )
+    .await?;
+
+    let mut total_written = pass1_written;
+
+    // ── Pass 2: synthesize rules from newly written agent memories ──
+    let after = snapshot_agent_memories(&input.workspace_dir);
+    let new_memories = diff_agent_memories(&before, &after, &input.workspace_dir);
+
+    if !new_memories.is_empty() {
+        tracing::info!(
+            new_count = new_memories.len(),
+            "memory_distill: pass 2 (rule synthesis)"
+        );
+        let new_memories_doc = new_memories
+            .iter()
+            .map(|(name, body)| format!("### memory: {}\n{}\n\n", name, body))
+            .collect::<String>();
+
+        // Refresh index to include pass-1 writes.
+        let updated_index = build_existing_agent_index(&input.workspace_dir);
+        let rule_prompt = build_rule_synthesis_prompt(&new_memories_doc, &updated_index);
+        let messages2 = vec![ChatMessage::user_text(rule_prompt)];
+        let pass2_written = run_distill_rounds(
+            messages2,
+            Arc::clone(&input.provider),
+            &input.model_id,
+            &input.tool_specs,
+            Arc::clone(&input.tool_registry),
+            &session_shell,
+            &thinking,
+            &input.workspace_dir,
+        )
+        .await?;
+        total_written += pass2_written;
+    } else {
+        tracing::debug!("memory_distill: pass 2 skipped (no new agent memories)");
+    }
+
+    Ok(total_written)
+}
+
+/// Run the distillation tool-calling loop for up to MAX_ROUNDS.
+/// Returns the number of successful memory_manage writes.
+async fn run_distill_rounds(
+    mut messages: Vec<ChatMessage>,
+    provider: Arc<dyn ChatProvider>,
+    model_id: &str,
+    tool_specs: &[ToolSpec],
+    tool_registry: Arc<ToolRegistry>,
+    session_shell: &Session,
+    thinking: &Option<ThinkingConfig>,
+    workspace_dir: &str,
+) -> Result<usize> {
     let mut files_written = 0usize;
 
     for round in 1..=MAX_ROUNDS {
@@ -500,7 +674,7 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
             if call.name == "memory_manage" {
                 if let Some(obj) = args.as_object_mut() {
                     obj.entry("model".to_string())
-                        .or_insert_with(|| serde_json::Value::String(input.model_id.clone()));
+                        .or_insert_with(|| serde_json::Value::String(model_id.to_string()));
                     // Distillation is the ONLY writer to the agent layer.
                     obj.insert(
                         "scope".to_string(),
@@ -511,7 +685,7 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
                     if obj.get("action").and_then(|a| a.as_str()) == Some("add") {
                         if let Some(name) = obj.get("name").and_then(|n| n.as_str()) {
                             if let Some(existing) =
-                                find_duplicate_agent_memory(&input.workspace_dir, name)
+                                find_duplicate_agent_memory(workspace_dir, name)
                             {
                                 tracing::warn!(
                                     candidate = name,
@@ -547,7 +721,7 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
                 continue;
             }
 
-            let raw = tool.execute(args, &session_shell).await;
+            let raw = tool.execute(args, session_shell).await;
             let result: anyhow::Result<ToolResult> = raw;
             let (result_content, is_error) = match &result {
                 Ok(r) => {
