@@ -83,7 +83,7 @@ pub use scheduling::webhook_loader::{WebhookJobDef, load_webhook_jobs};
 pub use session::SessionManager;
 pub use session::{BackendPersistHook, BreakpointItem, InMemoryBackend, PersistHook, Session};
 pub use session::{detect_incomplete_turn, identify_breakpoint};
-pub use session_context::SessionContext;
+pub use session_context::{DelegationNotice, SessionContext};
 pub use tool_registry::ToolRegistry;
 pub use turn::{SubResult, SubStatus, TurnContext, TurnResult, TurnSuspension};
 pub use turn_event::{

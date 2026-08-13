@@ -127,12 +127,13 @@ pub delegation_notice_queue: Mutex<VecDeque<DelegationNotice>>,
 pub struct DelegationNotice {
     pub id: String,              // synthetic_id：delegation:{sub_session_id} / delegation-msg:{msg_id}
     pub content: String,         // 渲染好的通知文本（wake 现有渲染逻辑，含 progress 折叠）
-    pub status: Option<SubStatus>, // Some=终端事件（Completed/Failed/TimedOut），None=Message{Final}
     pub silenced_override: Option<bool>, // 入队时快照（见 §4.4 竞态）
-    pub sent_message_count: u64, // 终端事件降噪用
-    pub enqueued_at: u64,
 }
 ```
+
+> P1 实现（2026-08-13）取最小字段集：`status` / `sent_message_count` / `enqueued_at`
+> 由 P2 持久化引入（§5.2 的 `CompletionNoticeEntry`），P1 的 drain 分流只用
+> `silenced_override`（`id` 兼作去重键）。
 
 ### 4.2 wake() 改造
 
@@ -151,7 +152,11 @@ pub struct DelegationNotice {
 
 ### 4.3 drain 触发点（三个）
 
-1. **`process_turn` 尾部**（`session_context.rs`，turn_lock 释放后）：drain 队列，逐条跑 notice turn（复用现有 `process_turn` 路径，此刻锁空闲，立即执行）。这是主路径。
+1. **turn 尾部**（`dispatch_turn` 的 turn task，`process_turn` 返回、`turn_lock` 释放后）：
+   drain 队列，逐条跑 notice turn（复用现有 `process_turn` 路径，此刻锁空闲，立即执行）。这是主路径。
+   P1 实现（2026-08-13）落在这里而非 `session_context.rs` —— `process_turn` 尾部无
+   `OrchestratorCtx` 访问权（`SessionContext` 不持有 ctx），drain 需要 ctx 解析 session/
+   channel/active 判定，故放在持有 ctx 的 `dispatch_turn` spawn task 尾部。
 2. **wake 入队时发现空闲**（§4.2）：立即 drain，保持完成事件的即时性（主代理 idle 时结果不延迟）。
 3. **daemon 启动恢复**（§5.4）：扫描持久化 Pending → 重新入队 → drain。
 

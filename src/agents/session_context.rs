@@ -118,9 +118,34 @@ pub struct SessionContext {
     /// preview) must survive until the LAST notice turn finishes. Runtime-
     /// only, not persisted (a daemon restart re-enters via `suspension.json`).
     pub notice_turns_in_flight: AtomicUsize,
+    /// P1 (2026-08-13, RFC delegation-notice-queue §4): delegation completion
+    /// notices enqueued while `turn_lock` is busy. Enqueued by `route_notice`
+    /// (wake path), drained by `drain_delegation_notices` — dispatch-time
+    /// idle (wake sees `try_lock` succeed) or turn-end (dispatch_turn tail).
+    /// FIFO; deduped by notice id within a drain pass. Runtime-only: NOT
+    /// persisted (P2 adds the persistent delivery queue).
+    pub delegation_notice_queue:
+        std::sync::Mutex<std::collections::VecDeque<DelegationNotice>>,
     /// Per-turn cancel token. Recreated each turn by `process_turn`.
     /// `/stop` fires this to cancel the in-flight turn without locking `session`.
     pub turn_cancel: std::sync::Mutex<tokio_util::sync::CancellationToken>,
+}
+
+/// P1 (2026-08-13, RFC delegation-notice-queue §4): a delegation completion
+/// notice enqueued while the session's `turn_lock` is busy (a user turn or
+/// another notice turn is running). Enqueued by `route_notice`, drained by
+/// `drain_delegation_notices` (dispatch-time idle / turn-end). Runtime-only:
+/// NOT persisted — P2 adds the persistent delivery queue.
+#[derive(Debug, Clone)]
+pub struct DelegationNotice {
+    /// Unique synthetic message id — dedup key within a drain pass (a
+    /// terminal event has one notice; Message events have unique ids).
+    pub id: String,
+    /// Rendered notice text (terminal summary or sub-agent message).
+    pub content: String,
+    /// Wake-time silence intent snapshot (see `silenced_override` doc in
+    /// `ChannelInboundMessage`).
+    pub silenced_override: Option<bool>,
 }
 
 /// 单 preview (2026-08-12): RAII guard decrementing the per-session
@@ -181,6 +206,7 @@ impl SessionContext {
             suspension_persist,
             pending_user_messages: std::sync::Mutex::new(std::collections::VecDeque::new()),
             notice_turns_in_flight: AtomicUsize::new(0),
+            delegation_notice_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             user_profile: Arc::new(UserProfile::default()),
         };
@@ -202,6 +228,7 @@ impl SessionContext {
             suspension_persist,
             pending_user_messages: std::sync::Mutex::new(std::collections::VecDeque::new()),
             notice_turns_in_flight: AtomicUsize::new(0),
+            delegation_notice_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             user_profile: profile,
         };
@@ -333,6 +360,46 @@ impl SessionContext {
     /// queued or running (see `notice_turns_in_flight` doc).
     pub fn has_notice_turns_in_flight(&self) -> bool {
         self.notice_turns_in_flight.load(Ordering::SeqCst) > 0
+            || !self
+                .delegation_notice_queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+    }
+
+    /// P1 (2026-08-13, RFC delegation-notice-queue §4): enqueue a delegation
+    /// completion notice for later drain. Called from `route_notice` while
+    /// `turn_lock` is busy (or as the first step of an immediate drain).
+    pub fn enqueue_delegation_notice(&self, notice: DelegationNotice) {
+        self.delegation_notice_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(notice);
+    }
+
+    /// P1 (2026-08-13, RFC delegation-notice-queue §4): take the whole queue
+    /// (FIFO order) for one drain pass. Notices enqueued DURING the drain
+    /// stay for the next pass — a single drain is bounded.
+    pub fn take_delegation_notices(&self) -> Vec<DelegationNotice> {
+        std::mem::take(
+            &mut *self
+                .delegation_notice_queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+        .into_iter()
+        .collect()
+    }
+
+    /// P1 (2026-08-13, RFC delegation-notice-queue §4): true while any
+    /// delegation notice waits for a drain. Feeds the dispatch_turn tail
+    /// (turn-end drain trigger) and the wake idle check.
+    pub fn has_queued_delegation_notices(&self) -> bool {
+        !self
+            .delegation_notice_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 
     /// 方案 C: snapshot of the suspension state (P0-2 consumes terminal
@@ -421,8 +488,10 @@ impl SessionContext {
                 // behind `turn_lock` (counted in `notice_turns_in_flight`).
                 // Clearing here would drop the cross-turn preview and let each
                 // queued notice open its own message (multi-message spam bug).
-                // Clear only when no notice turns remain.
-                if s.pending.is_empty() && self.notice_turns_in_flight.load(Ordering::SeqCst) == 0 {
+                // P1 (2026-08-13): `has_notice_turns_in_flight` now also covers
+                // the enqueued-but-undrained queue — clear only when no notice
+                // turns remain AND nothing waits for a drain.
+                if s.pending.is_empty() && !self.has_notice_turns_in_flight() {
                     *guard = None;
                 }
             }

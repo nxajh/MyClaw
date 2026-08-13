@@ -310,7 +310,10 @@ pub(super) async fn route_notice(
         .is_some_and(|id| id == session_id);
 
     if is_active {
-        // Active session — route through dispatch_turn so output streams live.
+        // Active session — route through the notice queue (P1,
+        // docs/delegation-notice-queue-rfc.md §4). The synthetic turn is
+        // built by `drain_delegation_notices`; this function only enqueues
+        // and decides whether an immediate drain is safe.
         let key = match SessionKey::parse(routing_key) {
             Some(k) => k,
             None => {
@@ -324,35 +327,150 @@ pub(super) async fn route_notice(
             return;
         }
 
-        // 单 preview (2026-08-12): this notice turn is now dispatched —
-        // count it in-flight synchronously (same sync section as
-        // `record_terminal`, no await in between, zero race window with the
-        // origin turn's `clear_suspension_if_collected`). The RAII guard in
-        // `process_turn` decrements it on exit.
+        // Enqueue BEFORE the idle check: the queue must be non-empty by the
+        // time the drain (or the turn-end drain trigger) reads it.
         if let Some(sctx) = &sctx_opt {
-            sctx.bump_notice_turn();
-        }
+            sctx.enqueue_delegation_notice(crate::agents::DelegationNotice {
+                id: synthetic_id,
+                content,
+                silenced_override,
+            });
 
-        let synthetic = ChannelInboundMessage {
-            id: synthetic_id,
-            sender: crate::channels::MessageSender::new(key.sender.clone()),
-            receiver: crate::channels::MessageReceiver::new(
-                session
-                    .last_message
-                    .as_ref()
-                    .map(|m| m.receiver.id.clone())
-                    .unwrap_or_default(),
-            ),
-            content: crate::channels::ChannelMessageContent::text(content),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            interruption_scope_id: None,
-            silenced_override,
-        };
-        super::inbound::dispatch_turn(ctx, &key, synthetic).await;
+            // Idle check: tokio Mutex::try_lock succeeds ONLY when the lock
+            // is free AND has no waiters (FIFO fairness) — so a success
+            // means the drain runs immediately (equivalently: dispatch_turn
+            // today). A busy lock means a user/notice turn is running (or
+            // waiting); the turn-end drain trigger in `dispatch_turn` picks
+            // the queue up — no spawn, no lock contention here.
+            if sctx.turn_lock.try_lock().is_ok() {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "session idle; draining delegation notices immediately"
+                );
+                let drain_ctx = ctx.clone();
+                let drain_sid = session_id.to_string();
+                tokio::spawn(async move {
+                    drain_delegation_notices(&drain_ctx, &drain_sid).await;
+                });
+            } else {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "session busy; delegation notice queued for turn-end drain"
+                );
+            }
+        } else {
+            // No materialized context (should not happen for an active
+            // session) — fall back to the pre-P1 direct dispatch so the
+            // notice is not silently lost. No bump (no queue to track it);
+            // matches the old no-bump path.
+            let synthetic = ChannelInboundMessage {
+                id: synthetic_id,
+                sender: crate::channels::MessageSender::new(key.sender.clone()),
+                receiver: crate::channels::MessageReceiver::new(
+                    session
+                        .last_message
+                        .as_ref()
+                        .map(|m| m.receiver.id.clone())
+                        .unwrap_or_default(),
+                ),
+                content: crate::channels::ChannelMessageContent::text(content),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                interruption_scope_id: None,
+                silenced_override,
+            };
+            super::inbound::dispatch_turn(ctx, &key, synthetic).await;
+        }
     } else {
         // Non-active session — load a temporary context, process the turn,
         // persist the result. The user sees it when they switch back.
         process_non_active(ctx, session_id, &content, silenced_override).await;
+    }
+}
+
+/// P1 (2026-08-13, RFC delegation-notice-queue §4): drain the session's
+/// enqueued delegation notices — one synthetic turn per notice, FIFO.
+/// Triggered by `route_notice` when the session is idle (immediate) and by
+/// the `dispatch_turn` tail (turn-end). Dedupes by notice id within a pass;
+/// a single pass is bounded (notices enqueued DURING the drain stay for the
+/// next pass). `bump_notice_turn` happens here, synchronously before each
+/// `dispatch_turn` spawn — the same sync section the pre-P1 code used.
+pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: &str) {
+    let session = match ctx.sessions.get_by_id(session_id) {
+        Some(s) => s,
+        None => {
+            // P2 semantics (already how route_notice behaves): a vanished
+            // session is the only dead-letter case — nothing to deliver to.
+            tracing::warn!(session_id = %session_id, "session not found for delegation notice drain");
+            return;
+        }
+    };
+    // The queue lives on the REGISTERED context (the one `route_notice`
+    // enqueued onto). A switched-away session has no registered context and
+    // never goes through the queue (process_non_active path instead).
+    let sctx = match ctx.sessions.registered_context_by_session_id(session_id) {
+        Some(s) => s,
+        None => {
+            tracing::warn!(session_id = %session_id, "no registered context for delegation notice drain");
+            return;
+        }
+    };
+    let notices = sctx.take_delegation_notices();
+    if notices.is_empty() {
+        return;
+    }
+    tracing::info!(session_id = %session_id, count = notices.len(), "draining delegation notices");
+
+    // Re-resolve routing + activity per notice: the session may have gone
+    // inactive between enqueue and drain (user switched away mid-turn).
+    let routing_key = &session.owner;
+    let key = match SessionKey::parse(routing_key) {
+        Some(k) => k,
+        None => {
+            tracing::warn!(routing_key = %routing_key, "invalid routing key in delegation notice drain");
+            return;
+        }
+    };
+    let is_active = ctx
+        .sessions
+        .active_session_id(routing_key)
+        .is_some_and(|id| id == session_id);
+
+    let mut seen = std::collections::HashSet::new();
+    for notice in notices {
+        if !seen.insert(notice.id.clone()) {
+            tracing::warn!(notice_id = %notice.id, "duplicate delegation notice in drain pass; skipping");
+            continue;
+        }
+        let silenced_override = notice.silenced_override;
+
+        if is_active && ctx.channel(&key.account_key()).is_some() {
+            // 单 preview (2026-08-12): count this notice turn in-flight
+            // synchronously (same sync section as `record_terminal`, no
+            // await in between) — the RAII guard in `process_turn`
+            // decrements on exit.
+            sctx.bump_notice_turn();
+
+            let synthetic = ChannelInboundMessage {
+                id: notice.id,
+                sender: crate::channels::MessageSender::new(key.sender.clone()),
+                receiver: crate::channels::MessageReceiver::new(
+                    session
+                        .last_message
+                        .as_ref()
+                        .map(|m| m.receiver.id.clone())
+                        .unwrap_or_default(),
+                ),
+                content: crate::channels::ChannelMessageContent::text(notice.content),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                interruption_scope_id: None,
+                silenced_override,
+            };
+            super::inbound::dispatch_turn(ctx, &key, synthetic).await;
+        } else {
+            // Session went inactive (or channel disappeared) — fall back to
+            // the non-active path so the notice still lands in history.
+            process_non_active(ctx, session_id, &notice.content, silenced_override).await;
+        }
     }
 }
 
@@ -419,9 +537,10 @@ async fn process_non_active(
 /// fails fast) and never blocks the assertions.
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::test_ctx;
+    use super::super::test_support::{test_ctx, MockChannel};
     use super::*;
-    use crate::agents::{AgentMessage, SessionContext};
+    use crate::agents::{AgentMessage, DelegationNotice, SessionContext};
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     /// A session registered in `ctx` with one pending task "t1".
@@ -686,5 +805,158 @@ mod tests {
         let intent_t2 = Some(sctx.has_pending_delegations());
         assert_eq!(intent_t2, Some(false));
         assert!(!crate::agents::session_context::decide_silenced(intent_t2, live));
+    }
+
+    // ---- P1 (2026-08-13, RFC delegation-notice-queue §4): 内存投递队列 ----
+
+    #[tokio::test]
+    async fn notice_queue_fifo_roundtrip() {
+        let ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.enqueue_delegation_notice(DelegationNotice {
+            id: "n1".to_string(),
+            content: "one".to_string(),
+            silenced_override: Some(false),
+        });
+        sctx.enqueue_delegation_notice(DelegationNotice {
+            id: "n2".to_string(),
+            content: "two".to_string(),
+            silenced_override: None,
+        });
+        assert!(sctx.has_queued_delegation_notices());
+        // P1: `has_notice_turns_in_flight` covers the undrained queue too.
+        assert!(sctx.has_notice_turns_in_flight());
+        let taken = sctx.take_delegation_notices();
+        assert_eq!(taken.len(), 2);
+        assert_eq!(taken[0].id, "n1");
+        assert_eq!(taken[1].id, "n2");
+        assert!(!sctx.has_queued_delegation_notices());
+        assert!(!sctx.has_notice_turns_in_flight());
+    }
+
+    #[tokio::test]
+    async fn busy_turn_lock_holds_notices_for_turn_end_drain() {
+        let channel = MockChannel::new();
+        let ctx = test_ctx(vec![(("mock".into(), "default".into()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        // Simulate a running turn: hold `turn_lock` so the wake's idle check
+        // fails.
+        let _busy = sctx.turn_lock.lock().await;
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                summary: "done".to_string(),
+                duration_secs: 3,
+                sent_message_count: 0,
+            },
+        )
+        .await;
+        // Enqueued, NOT dispatched — no immediate drain while busy.
+        assert!(sctx.has_queued_delegation_notices());
+        assert_eq!(sctx.notice_turns_in_flight.load(Ordering::SeqCst), 0);
+        assert!(channel.sent.lock().unwrap().is_empty());
+        drop(_busy);
+    }
+
+    #[tokio::test]
+    async fn idle_wake_drains_immediately() {
+        let channel = MockChannel::new();
+        let ctx = test_ctx(vec![(("mock".into(), "default".into()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                summary: "done".to_string(),
+                duration_secs: 3,
+                sent_message_count: 0,
+            },
+        )
+        .await;
+        // wake spawned the drain; give it a moment to take + dispatch.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!sctx.has_queued_delegation_notices());
+        assert_eq!(sctx.notice_turns_in_flight.load(Ordering::SeqCst), 0);
+        // The notice turn ran (NullRegistry → error notice lands on channel).
+        assert!(!channel.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_dispatches_each_notice_in_fifo_order() {
+        let channel = MockChannel::new();
+        let ctx = test_ctx(vec![(("mock".into(), "default".into()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        sctx.enqueue_delegation_notice(DelegationNotice {
+            id: "n1".to_string(),
+            content: "first".to_string(),
+            silenced_override: Some(false),
+        });
+        sctx.enqueue_delegation_notice(DelegationNotice {
+            id: "n2".to_string(),
+            content: "second".to_string(),
+            silenced_override: Some(false),
+        });
+        drain_delegation_notices(&ctx, &sctx.session_id).await;
+        // drain only awaits take+spawn; the notice turns run in background.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!sctx.has_queued_delegation_notices());
+        assert_eq!(sctx.notice_turns_in_flight.load(Ordering::SeqCst), 0);
+        // Each notice spawned a turn; each failed on NullRegistry and sent
+        // one error message to the channel.
+        assert_eq!(channel.sent.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn drain_dedupes_duplicate_notice_ids() {
+        let channel = MockChannel::new();
+        let ctx = test_ctx(vec![(("mock".into(), "default".into()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        sctx.enqueue_delegation_notice(DelegationNotice {
+            id: "dup".to_string(),
+            content: "first".to_string(),
+            silenced_override: Some(false),
+        });
+        sctx.enqueue_delegation_notice(DelegationNotice {
+            id: "dup".to_string(),
+            content: "second".to_string(),
+            silenced_override: Some(false),
+        });
+        drain_delegation_notices(&ctx, &sctx.session_id).await;
+        // drain only awaits take+spawn; the notice turn runs in background.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!sctx.has_queued_delegation_notices());
+        // Only one notice dispatched (dedup), one error message.
+        assert_eq!(channel.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn undrained_notices_keep_suspension_alive() {
+        let ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("t1".to_string());
+        // Wake burst collected the terminal...
+        let _ = sctx.record_terminal(
+            "t1".to_string(),
+            SubStatus::Completed,
+            "done".to_string(),
+            0,
+        );
+        // ...but a notice is still waiting for a drain — suspension survives.
+        sctx.enqueue_delegation_notice(DelegationNotice {
+            id: "n1".to_string(),
+            content: "notice".to_string(),
+            silenced_override: Some(false),
+        });
+        sctx.clear_suspension_if_collected();
+        assert!(sctx.suspension_snapshot().is_some());
+        // Drain completes the sequence — next clear drops the suspension.
+        let _ = sctx.take_delegation_notices();
+        sctx.clear_suspension_if_collected();
+        assert!(sctx.suspension_snapshot().is_none());
     }
 }

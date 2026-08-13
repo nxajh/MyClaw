@@ -602,6 +602,18 @@ pub(super) async fn dispatch_turn(
         let result = session_ctx
             .process_turn(msg, Some(channel.clone()), runtime)
             .await;
+        // P1 (2026-08-13, RFC delegation-notice-queue §4): after the turn
+        // releases `turn_lock`, drain delegation notices that arrived while
+        // it ran (completions whose `route_notice` saw a busy lock). Runs
+        // BEFORE the queued-user-message drain below: `drain_delegation_notices`
+        // bumps `notice_turns_in_flight` synchronously before spawning each
+        // notice turn, so the user-message check sees the counter and keeps
+        // queueing until the suspension sequence truly ends. The drain only
+        // awaits take+spawn (microseconds), not the notice turns themselves —
+        // those serialize on `turn_lock` like any turn.
+        if session_ctx.has_queued_delegation_notices() {
+            super::delegation::drain_delegation_notices(&ctx, &session_ctx.session_id).await;
+        }
         // 单 preview (2026-08-12): after a turn that ends OUTSIDE the
         // suspension sequence (not silenced, no re-delegation, suspension
         // already clear), drain ONE queued user message and re-dispatch it
