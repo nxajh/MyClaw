@@ -1144,7 +1144,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         );
 
         // Build parent tool registry: same tools + agent_delegate + agent_list
-        // + agent_kill + tool_search.
+        // + agent_kill + sessions_yield + tool_search.
         let mut parent_tools = ToolRegistry::new();
         for tool in base_tools_arc.all_tools() {
             parent_tools.register(tool);
