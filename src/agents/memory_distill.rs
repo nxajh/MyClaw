@@ -578,6 +578,7 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
 
 /// Run the distillation tool-calling loop for up to MAX_ROUNDS.
 /// Returns the number of successful memory_manage writes.
+#[allow(clippy::too_many_arguments)]
 async fn run_distill_rounds(
     mut messages: Vec<ChatMessage>,
     provider: Arc<dyn ChatProvider>,
