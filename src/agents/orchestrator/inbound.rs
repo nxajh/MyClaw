@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
 use crate::agents::commands;
-use crate::agents::user_messages::{MSG_ABORT_ACK, MSG_NO_PENDING_RETRY, MSG_TURN_FAILED};
+use crate::agents::user_messages::{MSG_ABORT_ACK, MSG_NO_PENDING_RETRY};
 use crate::channels::{
     CallbackAction, Channel, ChannelInboundMessage, ChannelMessageContent, ChannelOutboundMessage,
     MessageReceiver,
@@ -728,6 +728,7 @@ mod tests {
     use super::*;
 
     use super::super::test_support::{MockChannel, inbound_msg, test_ctx};
+    use crate::agents::user_messages::MSG_TURN_FAILED;
     use crate::storage::InboundSpool;
 
     /// Golden test: the inbound chain order is load-bearing (ask-reply must run
