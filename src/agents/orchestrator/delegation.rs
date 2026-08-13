@@ -616,18 +616,15 @@ mod tests {
         let mut content = "[系统通知] 子代理已完成后台任务 (session_id: t1)".to_string();
         maybe_append_silence_guidance(&sctx, &mut content);
         assert!(content.contains("中间恢复轮"));
-        assert!(content.contains("不会终结"));
-        // 七次修正 (2026-08-12): 挂起轮输出按「流式已显示与否」区分投递 —
-        // 流式通道以 💬 commentary 展示(不投递独立消息),无流式通道直接发送.
+        // 异步委派通知改造 (2026-08-13): 删掉"不会终结/不得输出最终结论"
+        // 硬约束(死锁根源), 改为 sessions_yield 引导 + 绝不轮询.
         assert!(content.contains("将作为进度说明展示给用户"));
-        assert!(content.contains("输出简洁的中间进展"));
-        assert!(content.contains("不要生成最终结论"));
-        assert!(content.contains("完整汇总答复"));
-        // 架构修正 (2026-08-12): 模型 spawn 后可继续其他任务;子代理完成会
-        // 主动唤醒并注入结果;结果未齐不得输出最终结论.
-        assert!(content.contains("发出委托后你可以继续处理其他任务"));
-        assert!(content.contains("子代理完成时会主动唤醒你并注入结果"));
-        assert!(content.contains("结果未齐时不得输出最终结论"));
+        assert!(content.contains("sessions_yield"));
+        assert!(content.contains("结束当前轮"));
+        assert!(content.contains("子代理完成时会自动唤醒你并把结果作为下一条消息注入"));
+        assert!(content.contains("绝不轮询"));
+        assert!(!content.contains("不得输出最终结论"));
+        assert!(!content.contains("不会终结"));
     }
 
     #[tokio::test]
