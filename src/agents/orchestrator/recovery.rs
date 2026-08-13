@@ -12,12 +12,13 @@
 use std::sync::Arc;
 
 use super::ctx::OrchestratorCtx;
-use super::delegation::route_notice;
+use super::delegation::{drain_delegation_notices, process_non_active, route_notice};
 use super::key::SessionKey;
 use super::turn::ResolvedTurn;
 use crate::agents::turn::{SubStatus, TurnSuspension};
 use crate::agents::{
-    AgentRuntime, DelegationCoordinator, DelegationEvent, SessionContext, UnfinishedSubAgent,
+    AgentRuntime, DelegationCoordinator, DelegationEvent, DelegationNotice, SessionContext,
+    UnfinishedSubAgent,
 };
 
 /// Where a recovered sub-agent turn's output goes.
@@ -328,6 +329,106 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
             recover_suspension(&ctx, session_ctx, &covered).await;
         });
     }
+
+    // P2 (2026-08-13, RFC delegation-notice-queue §5): re-deliver persisted
+    // completion notices (crash between wake-persist and turn-delivery). Runs
+    // AFTER suspension recovery so active-session lookups see the same
+    // registrations the suspension loop just materialized.
+    recover_completion_queue(ctx);
+}
+
+/// P2 (2026-08-13, RFC delegation-notice-queue §5): re-deliver completion
+/// notices persisted before a crash. Entries written by `route_notice` are
+/// re-enqueued into their parent session's notice queue (active sessions get
+/// an immediate drain; non-active ones take the `process_non_active` path,
+/// which marks the entry delivered once the turn persists its content).
+/// Entries whose parent session no longer exists are dead-lettered (marked
+/// delivered / dropped) with a warning — there is nothing left to deliver to.
+fn recover_completion_queue(ctx: &Arc<OrchestratorCtx>) {
+    let Some(store) = ctx.completion_queue.clone() else {
+        // Degraded (P1 in-memory delivery) or tests — nothing to recover.
+        return;
+    };
+    let pending = store.pending();
+    if pending.is_empty() {
+        return;
+    }
+    tracing::info!(count = pending.len(), "recovering persisted completion notices");
+
+    for entry in pending {
+        let session_id = entry.parent_session_id.clone();
+
+        // Dead-letter: the parent session vanished — drop the entry.
+        let Some(session) = ctx.sessions.get_by_id(&session_id) else {
+            tracing::warn!(
+                session_id = %session_id,
+                notice_id = %entry.id,
+                "completion queue: parent session not found; dead-lettering notice"
+            );
+            if let Err(e) = store.mark_delivered(&entry.id) {
+                tracing::warn!(notice_id = %entry.id, err = %e, "completion queue: dead-letter mark failed");
+            }
+            continue;
+        };
+
+        // The entry's routing key (owner) decides activity + channel.
+        let Some(key) = SessionKey::parse(&session.owner) else {
+            tracing::warn!(
+                session_id = %session_id,
+                owner = %session.owner,
+                "completion queue: invalid routing key; dead-lettering notice"
+            );
+            if let Err(e) = store.mark_delivered(&entry.id) {
+                tracing::warn!(notice_id = %entry.id, err = %e, "completion queue: dead-letter mark failed");
+            }
+            continue;
+        };
+
+        let is_active = ctx
+            .sessions
+            .active_session_id(&session.owner)
+            .is_some_and(|id| id == session_id);
+
+        if is_active && ctx.channel(&key.account_key()).is_some() {
+            // Active: re-enqueue into the registered context's notice queue
+            // and drain immediately (mirrors `route_notice`'s active path).
+            let Some(sctx) = ctx.sessions.registered_context_by_session_id(&session_id) else {
+                // Materialization race (session switched away mid-startup) —
+                // fall back to the non-active path.
+                let ctx = Arc::clone(ctx);
+                let sid = session_id.clone();
+                let id = entry.id.clone();
+                let content = entry.content.clone();
+                let silenced = entry.silenced_override;
+                tokio::spawn(async move {
+                    process_non_active(&ctx, &sid, &content, silenced, Some(id)).await;
+                });
+                continue;
+            };
+            sctx.enqueue_delegation_notice(DelegationNotice {
+                id: entry.id,
+                content: entry.content,
+                silenced_override: entry.silenced_override,
+            });
+            let ctx = Arc::clone(ctx);
+            let sid = session_id.clone();
+            tokio::spawn(async move {
+                drain_delegation_notices(&ctx, &sid).await;
+            });
+        } else {
+            // Non-active (or channel missing): process via the non-active
+            // path with the persisted id so a successful turn marks the
+            // entry delivered.
+            let ctx = Arc::clone(ctx);
+            let sid = session_id.clone();
+            let id = entry.id.clone();
+            let content = entry.content.clone();
+            let silenced = entry.silenced_override;
+            tokio::spawn(async move {
+                process_non_active(&ctx, &sid, &content, silenced, Some(id)).await;
+            });
+        }
+    }
 }
 
 /// P1-1 (RFC §5): recover one persisted suspension after a daemon restart.
@@ -399,6 +500,10 @@ async fn recover_suspension(
         &session_ctx.session_id,
         notice,
         format!("recovery:{}", session_ctx.session_id),
+        // P2: recovery-synthesized notices are NOT persisted (no NoticeMeta)
+        // — the store only tracks wake-time delegation events, and the
+        // `recovery:` id would never be marked delivered anyway.
+        None,
     )
     .await;
 }
@@ -439,6 +544,80 @@ mod tests {
             "test",
             3,
         ))
+    }
+
+    /// P2 (2026-08-13, RFC delegation-notice-queue §5): entries whose parent
+    /// session vanished are dead-lettered (dropped) — no re-delivery loop, no
+    /// crash, and the file is removed.
+    #[test]
+    fn recovery_dead_letters_vanished_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+        );
+        store
+            .append(crate::storage::CompletionNoticeEntry {
+                seq: 0,
+                id: "delegation:t1".to_string(),
+                sub_session_id: "t1".to_string(),
+                parent_session_id: "ghost-session".to_string(),
+                status: Some("completed".to_string()),
+                content: "notice".to_string(),
+                silenced_override: None,
+                sent_message_count: 0,
+                enqueued_at: 0,
+                delivery_state: crate::storage::DeliveryState::Pending,
+            })
+            .unwrap();
+        let mut ctx = test_ctx(vec![]);
+        ctx.completion_queue = Some(Arc::clone(&store));
+        recover_completion_queue(&Arc::new(ctx));
+        assert!(
+            store.pending().is_empty(),
+            "dead-lettered entry must be dropped"
+        );
+        assert!(
+            !tmp.path().join("queue").join("1.json").exists(),
+            "dead-lettered file must be removed"
+        );
+    }
+
+    /// P2: an entry whose parent session EXISTS is re-delivered through the
+    /// non-active path (spawned; no channel in the ctx → not the active
+    /// branch). NullRegistry makes the turn fail, so the entry stays Pending —
+    /// at-least-once semantics preserved (re-tried on the next restart).
+    #[tokio::test]
+    async fn recovery_keeps_pending_when_turn_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+        );
+        let mut ctx = test_ctx(vec![]);
+        ctx.completion_queue = Some(Arc::clone(&store));
+        // Create the parent session (get_or_create auto-activates; the
+        // missing channel routes recovery through the non-active path).
+        let session = ctx.sessions.get_or_create("mock:default:u1");
+        let sid = session.id.clone();
+        store
+            .append(crate::storage::CompletionNoticeEntry {
+                seq: 0,
+                id: "delegation:t1".to_string(),
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                status: Some("completed".to_string()),
+                content: "notice".to_string(),
+                silenced_override: None,
+                sent_message_count: 0,
+                enqueued_at: 0,
+                delivery_state: crate::storage::DeliveryState::Pending,
+            })
+            .unwrap();
+        recover_completion_queue(&Arc::new(ctx));
+        assert_eq!(
+            store.pending().len(),
+            1,
+            "failed turn must keep the entry Pending (at-least-once)"
+        );
     }
 
     #[tokio::test]

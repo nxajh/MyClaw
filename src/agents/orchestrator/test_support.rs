@@ -142,6 +142,7 @@ pub(crate) fn test_ctx(channels: Vec<((String, String), Arc<dyn Channel>)>) -> O
         delegator: None,
         scheduler: None,
         turn_tracker: Arc::new(TurnTracker::new()),
+        completion_queue: None,
     }
 }
 

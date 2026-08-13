@@ -614,9 +614,32 @@ pub(super) fn dispatch_turn_spawn(
         }
         // Successful turns: process_turn does the final `channel.send_message(text)`
         // fallback internally. We only handle the error notice here.
+        // P2: the synthetic notice id is the store's dedup/mark key — clone
+        // before `msg` moves into process_turn.
+        let notice_id = msg.id.clone();
         let result = session_ctx
             .process_turn(msg, Some(channel.clone()), runtime)
             .await;
+        // P2 (2026-08-13, RFC delegation-notice-queue §5.3): the turn
+        // persisted its content to session history (Ok) — mark the persisted
+        // entry delivered so a restart does not re-deliver it. Only
+        // `delegation*` synthetic ids are tracked; `recovery:` and channel
+        // user-message ids are never persisted (mark returns false — no-op).
+        // Err keeps the entry Pending (at-least-once re-delivery).
+        if result.is_ok() && notice_id.starts_with("delegation") {
+            if let Some(store) = &ctx.completion_queue {
+                match store.mark_delivered(&notice_id) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            notice_id = %notice_id,
+                            err = %e,
+                            "completion queue: mark delivered failed"
+                        );
+                    }
+                }
+            }
+        }
         // P1 (2026-08-13, RFC delegation-notice-queue §4): after the turn
         // releases `turn_lock`, drain delegation notices that arrived while
         // it ran (completions whose `route_notice` saw a busy lock). Runs

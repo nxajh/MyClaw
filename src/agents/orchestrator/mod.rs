@@ -287,6 +287,31 @@ impl Orchestrator {
             warn!("no channels enabled");
         }
 
+        // P2 (2026-08-13, RFC delegation-notice-queue §5): open the persistent
+        // completion-notice delivery queue (at-least-once across restarts).
+        // `None` degrades to P1 in-memory-only delivery — a crashed notice is
+        // then lost, but the daemon still runs (fail-open, same as tests).
+        let completion_queue_dir = parts
+            .workspace_dir
+            .join(".state")
+            .join("completion_queue");
+        let completion_queue = match crate::storage::CompletionNoticeStore::open(
+            completion_queue_dir.clone(),
+        ) {
+            Ok(store) => {
+                info!(dir = %completion_queue_dir.display(), "completion queue opened");
+                Some(Arc::new(store))
+            }
+            Err(e) => {
+                error!(
+                    err = %e,
+                    dir = %completion_queue_dir.display(),
+                    "completion queue open failed; degraded to in-memory delivery"
+                );
+                None
+            }
+        };
+
         let ctx = Arc::new(OrchestratorCtx {
             channels,
             sessions: parts.session_manager,
@@ -297,6 +322,7 @@ impl Orchestrator {
             delegator: parts.delegator,
             scheduler: parts.scheduler,
             turn_tracker: Arc::new(ctx::TurnTracker::new()),
+            completion_queue,
         });
 
         let orchestrator = Orchestrator {

@@ -55,6 +55,28 @@ fn maybe_append_silence_guidance(sctx: &SessionContext, content: &mut String) {
     }
 }
 
+/// P2 (2026-08-13, RFC delegation-notice-queue §5.2): metadata carried from
+/// `wake` into `route_notice` for persistence. Terminal events carry a
+/// terminal status; sub-agent `Message` events carry `status: None` (the RFC
+/// entry allows null). `recover_suspension`'s recovery-synthesized notice
+/// passes `None` for the whole struct — it is never persisted.
+#[derive(Debug, Clone)]
+pub(super) struct NoticeMeta {
+    pub sub_session_id: String,
+    pub status: Option<SubStatus>,
+    pub sent_message_count: u64,
+}
+
+/// P2 (RFC §5.2): lowercase terminal status stored in persisted entries.
+/// Hand-written — serde's default variant naming would produce PascalCase.
+fn substatus_str(s: SubStatus) -> &'static str {
+    match s {
+        SubStatus::Completed => "completed",
+        SubStatus::Failed => "failed",
+        SubStatus::TimedOut => "timed_out",
+    }
+}
+
 /// Wake the parent agent on a `DelegationEvent` (sub-agent completion/failure/message).
 pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     // 方案 C (turn-suspension RFC §2.3): `Message{kind: Progress}` is never
@@ -254,7 +276,22 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     }
 
     // Route the synthesized notice (terminal or message) into the session.
-    route_notice(ctx, &parent_session_id, content, synthetic_id).await;
+    // P2 (RFC §5.2): carry the metadata for persistence — terminal and
+    // `Message` events both persist (Message with `status: None`); the
+    // recovery-synthesized notice passes `None` instead (not persisted).
+    let notice_meta = NoticeMeta {
+        sub_session_id: sub_session_id.clone(),
+        status,
+        sent_message_count,
+    };
+    route_notice(
+        ctx,
+        &parent_session_id,
+        content,
+        synthetic_id,
+        Some(notice_meta),
+    )
+    .await;
 }
 
 /// Route a synthesized system notice into the parent session:
@@ -272,6 +309,7 @@ pub(super) async fn route_notice(
     session_id: &str,
     mut content: String,
     synthetic_id: String,
+    notice_meta: Option<NoticeMeta>,
 ) {
     // Resolve the session to get its routing key (owner).
     let session = match ctx.sessions.get_by_id(session_id) {
@@ -323,13 +361,42 @@ pub(super) async fn route_notice(
         };
         if ctx.channel(&key.account_key()).is_none() {
             tracing::warn!(routing_key = %routing_key, "channel for delegation event not found, falling back to non-active path");
-            process_non_active(ctx, session_id, &content, silenced_override).await;
+            process_non_active(ctx, session_id, &content, silenced_override, None).await;
             return;
         }
 
         // Enqueue BEFORE the idle check: the queue must be non-empty by the
         // time the drain (or the turn-end drain trigger) reads it.
         if let Some(sctx) = &sctx_opt {
+            // P2 (2026-08-13, RFC delegation-notice-queue §5.2): persist the
+            // notice BEFORE it enters the in-memory queue — a crash after
+            // enqueue but before the turn persists its content must not lose
+            // the notice (startup recovery re-enqueues Pending entries).
+            // Fail-open: a storage error still delivers now via the queue
+            // (degraded to P1 for this notice; it just won't survive a
+            // restart). Dedup: the store's `seen` set returns `None` on a
+            // duplicate id — no double file.
+            if let (Some(store), Some(meta)) = (&ctx.completion_queue, &notice_meta) {
+                let entry = crate::storage::CompletionNoticeEntry {
+                    seq: 0,
+                    id: synthetic_id.clone(),
+                    sub_session_id: meta.sub_session_id.clone(),
+                    parent_session_id: session_id.to_string(),
+                    status: meta.status.map(|s| substatus_str(s).to_string()),
+                    content: content.clone(),
+                    silenced_override,
+                    sent_message_count: meta.sent_message_count,
+                    enqueued_at: chrono::Utc::now().timestamp() as u64,
+                    delivery_state: crate::storage::DeliveryState::Pending,
+                };
+                if let Err(e) = store.append(entry) {
+                    tracing::warn!(
+                        notice_id = %synthetic_id,
+                        err = %e,
+                        "completion queue: persist failed; delivering in-memory only"
+                    );
+                }
+            }
             sctx.enqueue_delegation_notice(crate::agents::DelegationNotice {
                 id: synthetic_id,
                 content,
@@ -383,7 +450,10 @@ pub(super) async fn route_notice(
     } else {
         // Non-active session — load a temporary context, process the turn,
         // persist the result. The user sees it when they switch back.
-        process_non_active(ctx, session_id, &content, silenced_override).await;
+        // P2: not persisted here (no queue to enter; the wake→turn window is
+        // small and RFC §5 keeps this path in-memory-only) — `notice_id`
+        // stays None so the store is untouched.
+        process_non_active(ctx, session_id, &content, silenced_override, None).await;
     }
 }
 
@@ -473,7 +543,17 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
         } else {
             // Session went inactive (or channel disappeared) — fall back to
             // the non-active path so the notice still lands in history.
-            process_non_active(ctx, session_id, &notice.content, silenced_override).await;
+            // P2: pass the persisted id so a successful non-active turn marks
+            // the stored entry delivered — otherwise it would stay Pending
+            // and be re-delivered after every restart.
+            process_non_active(
+                ctx,
+                session_id,
+                &notice.content,
+                silenced_override,
+                Some(notice.id),
+            )
+            .await;
         }
     }
 }
@@ -484,11 +564,17 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
 /// `process_turn` with `channel=None`, and drops the context when done.
 /// The LLM's response is persisted to history so the user sees it on
 /// `/switch` return.
-async fn process_non_active(
+///
+/// P2 (2026-08-13, RFC delegation-notice-queue §5.3): when `notice_id` is
+/// `Some`, the synthetic turn uses that id and a successful turn marks the
+/// persisted entry delivered (at-least-once). `None` (wake for a non-active
+/// session, recovery-synthesized notices) leaves the store untouched.
+pub(super) async fn process_non_active(
     ctx: &OrchestratorCtx,
     session_id: &str,
     content: &str,
     silenced_override: Option<bool>,
+    notice_id: Option<String>,
 ) {
     let session_ctx = match ctx.sessions.load_context_by_session_id(session_id) {
         Some(c) => c,
@@ -502,6 +588,9 @@ async fn process_non_active(
     let session_id_owned = session_id.to_string();
     let content_owned = content.to_string();
     let turn_tracker = ctx.turn_tracker.clone();
+    // P2: keep the notice id + store handle for the post-turn delivery mark.
+    let notice_id_owned = notice_id.clone();
+    let completion_queue = ctx.completion_queue.clone();
 
     // 单 preview (2026-08-12): any delegation notice (silenced or loud) is
     // part of the suspension sequence — count it in-flight before the spawn
@@ -514,7 +603,7 @@ async fn process_non_active(
     tokio::spawn(async move {
         let _guard = turn_tracker.track();
         let synthetic = ChannelInboundMessage {
-            id: format!("delegation:{}", uuid::Uuid::new_v4()),
+            id: notice_id.unwrap_or_else(|| format!("delegation:{}", uuid::Uuid::new_v4())),
             sender: crate::channels::MessageSender::new("system".to_string()),
             receiver: crate::channels::MessageReceiver::new(String::new()),
             content: crate::channels::ChannelMessageContent::text(content_owned),
@@ -526,6 +615,26 @@ async fn process_non_active(
         match session_ctx.process_turn(synthetic, None, runtime).await {
             Ok(_) => {
                 tracing::info!(session_id = %session_id_owned, "non-active delegation turn completed");
+                // P2 (RFC §5.3): content persisted to history — mark the
+                // stored entry delivered (drop the file) so a restart does
+                // not re-deliver it. On Err the entry stays Pending
+                // (at-least-once). `Ok(false)` = id never persisted (wake
+                // without a store / recovery notices) — no-op.
+                if let (Some(store), Some(id)) = (&completion_queue, &notice_id_owned) {
+                    match store.mark_delivered(id) {
+                        Ok(true) => {
+                            tracing::debug!(notice_id = %id, "completion queue: notice marked delivered");
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                notice_id = %id,
+                                err = %e,
+                                "completion queue: mark delivered failed"
+                            );
+                        }
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(session_id = %session_id_owned, err = %e, "non-active delegation turn failed");
@@ -552,6 +661,49 @@ mod tests {
         let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
         sctx.add_pending_task("t1".to_string());
         sctx
+    }
+
+    /// P2 (2026-08-13, RFC delegation-notice-queue §5.2): a wake for an
+    /// ACTIVE session (auto-activated by `get_or_create_context`) with a
+    /// channel present persists the notice BEFORE it enters the queue. The
+    /// test runtime's NullRegistry makes the notice turn fail, so the entry
+    /// stays Pending — exactly the at-least-once state a crash would leave
+    /// (recovery re-enqueues it on the next start).
+    #[tokio::test]
+    async fn active_wake_persists_notice_before_enqueue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+        );
+        let channel: Arc<dyn crate::channels::Channel> = MockChannel::new();
+        let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
+        ctx.completion_queue = Some(Arc::clone(&store));
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid.clone(),
+                summary: "persisted summary".to_string(),
+                duration_secs: 5,
+                sent_message_count: 0,
+            },
+        )
+        .await;
+        let pending = store.pending();
+        assert_eq!(pending.len(), 1, "notice must be persisted before enqueue");
+        let e = &pending[0];
+        assert_eq!(e.id, "delegation:t1");
+        assert_eq!(e.sub_session_id, "t1");
+        assert_eq!(e.parent_session_id, sid);
+        assert_eq!(e.status.as_deref(), Some("completed"));
+        assert_eq!(e.sent_message_count, 0);
+        // The just-collected terminal cleared `pending` — wake-time silence
+        // intent is false (see route_notice race-fix comment).
+        assert_eq!(e.silenced_override, Some(false));
+        assert!(e.content.contains("persisted summary"));
+        assert_eq!(e.delivery_state, crate::storage::DeliveryState::Pending);
     }
 
     #[tokio::test]

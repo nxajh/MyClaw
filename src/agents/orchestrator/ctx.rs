@@ -166,6 +166,11 @@ pub struct OrchestratorCtx {
     pub scheduler: Option<crate::agents::SharedScheduler>,
     /// In-flight turn task counter for drain-on-hot-switch.
     pub turn_tracker: SharedTurnTracker,
+    /// P2 (2026-08-13, RFC delegation-notice-queue §5): persistent delivery
+    /// queue for delegation completion notices (at-least-once across
+    /// restarts). `None` when the storage dir cannot be opened (degraded to
+    /// P1 in-memory-only delivery) or in in-memory tests.
+    pub completion_queue: Option<Arc<crate::storage::CompletionNoticeStore>>,
 }
 
 impl OrchestratorCtx {
