@@ -213,8 +213,8 @@ fn _p1_drain_chain_send_guards() {
         unreachable!()
     }
 
-    let _ = require_send(super::inbound::dispatch_turn(never_ctx(), never_key(), never_msg()));
-    let _ = require_send(super::delegation::drain_delegation_notices(never_ctx(), never_str()));
+    drop(require_send(super::inbound::dispatch_turn(never_ctx(), never_key(), never_msg())));
+    drop(require_send(super::delegation::drain_delegation_notices(never_ctx(), never_str())));
     assert_send::<crate::channels::ChannelInboundMessage>();
     // spawn 闭包按 move 捕获 ctx、drain 跨 await 持有 key —— Sync 不够, 必须 Send
     assert_send::<OrchestratorCtx>();
