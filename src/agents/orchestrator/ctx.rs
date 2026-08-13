@@ -186,25 +186,30 @@ impl OrchestratorCtx {
 
 // P1 CI 回归守卫 (2026-08-13): `drain_delegation_notices` 被 `dispatch_turn` 的
 // spawn 闭包 await, 闭包内逐级 await 的 future 必须 Send。死函数（非 cfg(test)）
-// 让普通 `cargo check` 就能验证并给出字段级诊断; `unreachable!()` 只用于构造
+// 让普通 `cargo check` 就能验证并给出字段级诊断。`unreachable!()` 只用于构造
 // 类型（future 惰性, 不执行）。
-#[allow(dead_code)]
+#[allow(dead_code, unreachable_code)]
 fn _p1_drain_chain_send_guards() {
     fn require_send<F: std::future::Future + Send>(f: F) -> F {
         f
     }
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
+    fn never_ctx() -> &'static OrchestratorCtx {
+        unreachable!()
+    }
+    fn never_key() -> &'static crate::agents::orchestrator::key::SessionKey {
+        unreachable!()
+    }
+    fn never_msg() -> crate::channels::ChannelInboundMessage {
+        unreachable!()
+    }
+    fn never_str() -> &'static str {
+        unreachable!()
+    }
 
-    let _ = require_send(super::inbound::dispatch_turn(
-        &unreachable!(),
-        &unreachable!(),
-        unreachable!(),
-    ));
-    let _ = require_send(super::delegation::drain_delegation_notices(
-        &unreachable!(),
-        unreachable!(),
-    ));
+    let _ = require_send(super::inbound::dispatch_turn(never_ctx(), never_key(), never_msg()));
+    let _ = require_send(super::delegation::drain_delegation_notices(never_ctx(), never_str()));
     assert_send::<crate::channels::ChannelInboundMessage>();
     assert_sync::<OrchestratorCtx>();
     assert_sync::<crate::agents::orchestrator::key::SessionKey>();
