@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
 use crate::agents::commands;
-use crate::agents::user_messages::{MSG_ABORT_ACK, MSG_NO_PENDING_RETRY};
+use crate::agents::user_messages::{MSG_ABORT_ACK, MSG_NO_PENDING_RETRY, MSG_TURN_FAILED};
 use crate::channels::{
     CallbackAction, Channel, ChannelInboundMessage, ChannelMessageContent, ChannelOutboundMessage,
     MessageReceiver,
@@ -1122,10 +1122,16 @@ mod tests {
         // All entries drained and marked Done (mark-after per replay turn).
         assert!(spool.pending().is_empty());
         assert_eq!(spool.len(), 0);
-        // Registered user → the replay chain passes everything through; the
-        // turns fail fast at provider resolution (replay_one_sync only logs),
-        // so nothing is sent to the channel.
-        assert!(ch.texts().is_empty());
+        // Registered user → Gate passes everything through, so every entry
+        // reaches process_turn; each turn fails fast at provider resolution
+        // (NullRegistry) and sends exactly one MSG_TURN_FAILED notice.
+        let texts = ch.texts();
+        assert_eq!(texts.len(), 3, "each replayed turn sends one failure notice");
+        assert!(
+            texts.iter().all(|t| t.as_str() == MSG_TURN_FAILED),
+            "expected only failure notices, got: {:?}",
+            texts
+        );
         // History holds the replayed user texts in spool order (oldest
         // first). process_turn prepends a <system-reminder> to the content,
         // so assert on the content tail, not exact equality.
