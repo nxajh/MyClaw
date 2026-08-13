@@ -372,9 +372,10 @@ mod tests {
         assert_eq!(on_disk.status, SpoolStatus::Pending);
         assert_eq!(on_disk.msg.id, "m1");
         assert_eq!(on_disk.channel, "telegram");
-        let pending = spool.pending();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].seq, 1);
+        // In-memory pending set holds it (post-open appends are not returned
+        // by pending() — that's the baseline watermark, covered by
+        // pending_respects_baseline_watermark / reopen tests).
+        assert_eq!(spool.len(), 1);
     }
 
     #[test]
@@ -475,9 +476,9 @@ mod tests {
         spool.append("telegram", "acc1", &msg("m1")).unwrap();
         let done_seq = spool.append("telegram", "acc1", &msg("m2")).unwrap().unwrap();
         spool.mark_done(done_seq).unwrap();
-        // Not yet compacted: tombstone present, pending intact.
+        // Not yet compacted: tombstone present, pending intact (in-memory set).
         assert!(spool_dir.join(format!("{done_seq}.json")).exists());
-        assert_eq!(spool.pending().len(), 1);
+        assert_eq!(spool.len(), 1);
         // Force compaction by faking an old tombstone (created_at in the past).
         let tomb_path = spool_dir.join(format!("{done_seq}.json"));
         let mut entry: SpoolEntry =
@@ -487,7 +488,7 @@ mod tests {
         assert!(spool.compact_if_needed().unwrap());
         assert!(!tomb_path.exists(), "tombstone removed");
         assert!(spool_dir.join("1.json").exists(), "pending kept");
-        assert_eq!(spool.pending().len(), 1);
+        assert_eq!(spool.len(), 1);
         // No-op when there is nothing to compact.
         assert!(!spool.compact_if_needed().unwrap());
     }
