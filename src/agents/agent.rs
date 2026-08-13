@@ -588,7 +588,7 @@ impl Agent {
                 // turn (mutual exclusion) or when this is a sub-agent session.
                 if !turn_called_memory && session.parent_session_id.is_none() {
                     let mut fork_messages = messages.clone();
-                    fork_messages.push(msg);
+                    fork_messages.push(msg.clone());
                     let fork_input = crate::agents::memory_fork::ForkInput {
                         messages: fork_messages,
                         model_id: model_id.clone(),
