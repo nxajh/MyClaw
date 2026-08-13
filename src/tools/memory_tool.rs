@@ -31,6 +31,44 @@ fn short_sha256(content: &str) -> String {
     hash.chars().take(16).collect()
 }
 
+/// Archive the previous version of a memory file before it is overwritten.
+///
+/// Copies the old content to `{memory_dir}/.versions/{name}/v{N}__{date}__{hash}.md`
+/// so that distillation and fork-driven replaces are recoverable.
+fn archive_memory_version(memory_dir: &Path, name: &str, old_content: &str) {
+    let versions_dir = memory_dir.join(".versions").join(name);
+    if let Err(e) = std::fs::create_dir_all(&versions_dir) {
+        tracing::warn!(err = %e, name, "memory version: failed to create versions dir");
+        return;
+    }
+
+    // Determine next version number by counting existing archives.
+    let next_v = match std::fs::read_dir(&versions_dir) {
+        Ok(rd) => rd
+            .flatten()
+            .filter_map(|e| {
+                e.file_name()
+                    .to_str()
+                    .and_then(|s| s.strip_prefix('v'))
+                    .and_then(|s| s.split("__").next())
+                    .and_then(|n| n.parse::<u32>().ok())
+            })
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(1),
+        Err(_) => 1,
+    };
+
+    let hash = short_sha256(old_content);
+    let date = chrono::Utc::now().format("%Y%m%d").to_string();
+    let archive_name = format!("v{}__{}__{}.md", next_v, date, hash);
+    let archive_path = versions_dir.join(&archive_name);
+
+    if let Err(e) = std::fs::write(&archive_path, old_content) {
+        tracing::warn!(err = %e, path = %archive_path.display(), "memory version: failed to write archive");
+    }
+}
+
 fn redact_audit_reason(reason: Option<&str>) -> Option<String> {
     reason
         .map(str::trim)
@@ -1143,9 +1181,8 @@ impl MemoryManageTool {
             .iter()
             .find(|f| f.name == name)
             .ok_or_else(|| format!("Memory '{}' not found in the {} scope.", name, scope))?;
-        let old_hash = std::fs::read_to_string(&existing.path)
-            .ok()
-            .map(|content| short_sha256(&content));
+        let old_content = std::fs::read_to_string(&existing.path).ok();
+        let old_hash = old_content.as_deref().map(short_sha256);
 
         let content = args["content"]
             .as_str()
@@ -1201,6 +1238,13 @@ impl MemoryManageTool {
 
         // Write to the same location as the existing file.
         let target = existing.path.clone();
+
+        // Archive the previous version before overwriting.
+        if let Some(ref old) = old_content {
+            let memory_dir = target.parent().unwrap_or(Path::new("."));
+            archive_memory_version(memory_dir, name, old);
+        }
+
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
         append_memory_audit(
