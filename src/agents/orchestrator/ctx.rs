@@ -183,3 +183,34 @@ impl OrchestratorCtx {
         self.channels.get(account)
     }
 }
+
+// P1 CI 回归守卫 (2026-08-13): `drain_delegation_notices` 被 `dispatch_turn` 的
+// spawn 闭包 await, 闭包内逐级 await 的 future 必须 Send。死函数（非 cfg(test)）
+// 让普通 `cargo check` 就能验证并给出字段级诊断; `unreachable!()` 只用于构造
+// 类型（future 惰性, 不执行）。
+#[allow(dead_code)]
+fn _p1_drain_chain_send_guards() {
+    fn require_send<F: std::future::Future + Send>(f: F) -> F {
+        f
+    }
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+
+    let _ = require_send(super::inbound::dispatch_turn(
+        &unreachable!(),
+        &unreachable!(),
+        unreachable!(),
+    ));
+    let _ = require_send(super::delegation::drain_delegation_notices(
+        &unreachable!(),
+        unreachable!(),
+    ));
+    assert_send::<crate::channels::ChannelInboundMessage>();
+    assert_sync::<OrchestratorCtx>();
+    assert_sync::<crate::agents::orchestrator::key::SessionKey>();
+    // drain 跨 await 持有的状态
+    assert_send::<crate::agents::session::Session>();
+    assert_send::<std::sync::Arc<crate::agents::SessionContext>>();
+    assert_sync::<std::sync::Arc<crate::agents::SessionContext>>();
+    assert_send::<std::collections::VecDeque<crate::agents::DelegationNotice>>();
+}
