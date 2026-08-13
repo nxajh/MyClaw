@@ -188,6 +188,11 @@ impl OrchestratorCtx {
 // spawn 闭包 await, 闭包内逐级 await 的 future 必须 Send。死函数（非 cfg(test)）
 // 让普通 `cargo check` 就能验证并给出字段级诊断。`unreachable!()` 只用于构造
 // 类型（future 惰性, 不执行）。
+// 2026-08-13 修复: 根因是 Send 证明环 —— drain 曾 await dispatch_turn, 而
+// dispatch_turn 体内 spawn 的闭包又 await drain; 外部查各自 future 单独 Send
+// 可通过（余归纳）, 但 spawn 现场无法闭合。现 drain 直接同步调用
+// `dispatch_turn_spawn`（无 await 体）, 环已斩断。以下守卫验证斩环后的不变量:
+// 两个 future 仍 Send + spawn 闭包/drain 跨 await 持有的类型 Send。
 #[allow(dead_code, unreachable_code)]
 fn _p1_drain_chain_send_guards() {
     fn require_send<F: std::future::Future + Send>(f: F) -> F {
@@ -211,8 +216,9 @@ fn _p1_drain_chain_send_guards() {
     let _ = require_send(super::inbound::dispatch_turn(never_ctx(), never_key(), never_msg()));
     let _ = require_send(super::delegation::drain_delegation_notices(never_ctx(), never_str()));
     assert_send::<crate::channels::ChannelInboundMessage>();
-    assert_sync::<OrchestratorCtx>();
-    assert_sync::<crate::agents::orchestrator::key::SessionKey>();
+    // spawn 闭包按 move 捕获 ctx、drain 跨 await 持有 key —— Sync 不够, 必须 Send
+    assert_send::<OrchestratorCtx>();
+    assert_send::<crate::agents::orchestrator::key::SessionKey>();
     // drain 跨 await 持有的状态
     assert_send::<crate::agents::session::Session>();
     assert_send::<std::sync::Arc<crate::agents::SessionContext>>();

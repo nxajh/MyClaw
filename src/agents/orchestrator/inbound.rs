@@ -514,6 +514,21 @@ pub(super) async fn dispatch_turn(
     key: &SessionKey,
     msg: ChannelInboundMessage,
 ) {
+    dispatch_turn_spawn(ctx, key, msg);
+}
+
+/// Synchronous core of `dispatch_turn` — the body has NO awaits (it records
+/// the inbound message and spawns the turn task). `drain_delegation_notices`
+/// calls this directly instead of awaiting `dispatch_turn`: awaiting the
+/// async entry here would make the spawned-turn future graph cyclic
+/// (`dispatch_turn`'s body spawns the block that awaits the drain, and the
+/// drain awaits `dispatch_turn`) and the `Send` proof at `tokio::spawn`
+/// fails to close. A sync call keeps the graph acyclic.
+pub(super) fn dispatch_turn_spawn(
+    ctx: &OrchestratorCtx,
+    key: &SessionKey,
+    msg: ChannelInboundMessage,
+) {
     let sk = key.to_string();
 
     let session_ctx = ctx.sessions.get_or_create_context(&sk);

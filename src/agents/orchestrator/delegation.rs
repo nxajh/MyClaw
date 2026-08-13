@@ -393,7 +393,8 @@ pub(super) async fn route_notice(
 /// the `dispatch_turn` tail (turn-end). Dedupes by notice id within a pass;
 /// a single pass is bounded (notices enqueued DURING the drain stay for the
 /// next pass). `bump_notice_turn` happens here, synchronously before each
-/// `dispatch_turn` spawn — the same sync section the pre-P1 code used.
+/// notice-turn spawn (`dispatch_turn_spawn`) — the same sync section the
+/// pre-P1 code used.
 pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: &str) {
     let session = match ctx.sessions.get_by_id(session_id) {
         Some(s) => s,
@@ -465,7 +466,10 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
                 interruption_scope_id: None,
                 silenced_override,
             };
-            super::inbound::dispatch_turn(ctx, &key, synthetic).await;
+            // Sync spawn (no await): awaiting `dispatch_turn` here would
+            // create a cyclic Send-proving graph (the block `dispatch_turn`
+            // spawns awaits this drain). `dispatch_turn_spawn` has no awaits.
+            super::inbound::dispatch_turn_spawn(ctx, &key, synthetic);
         } else {
             // Session went inactive (or channel disappeared) — fall back to
             // the non-active path so the notice still lands in history.
