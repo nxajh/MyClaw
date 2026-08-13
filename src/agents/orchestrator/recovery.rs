@@ -9,6 +9,7 @@
 //! Unfinished sub-agents are recovered via `Agent::run_recovery` and the
 //! terminal event is delivered through [`CompletionSink`].
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::ctx::OrchestratorCtx;
@@ -20,6 +21,7 @@ use crate::agents::{
     AgentRuntime, DelegationCoordinator, DelegationEvent, DelegationNotice, SessionContext,
     UnfinishedSubAgent,
 };
+use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 
 /// Where a recovered sub-agent turn's output goes.
 enum CompletionSink {
@@ -202,25 +204,18 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
             tracing::warn!(routing_key = %key, "startup recovery: channel not found");
             continue;
         }
-        let synthetic = crate::channels::ChannelInboundMessage {
-            id: format!("recovery:{}", snap.id),
-            sender: crate::channels::MessageSender::new(parsed.sender.clone()),
-            receiver: snap
-                .last_message
-                .as_ref()
-                .map(|m| m.receiver.clone())
-                .unwrap_or_else(|| crate::channels::MessageReceiver::new(parsed.sender.clone())),
-            content: crate::channels::ChannelMessageContent::text(
-                "[系统通知] daemon 重启，继续处理此前未完成的请求。",
-            ),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            interruption_scope_id: None,
-            silenced_override: None,
-        };
-        tracing::info!(session = %key, "startup recovery: found incomplete turn, dispatching through normal turn path");
+        // Reply target for the recovered turn's output: the receiver of the
+        // session's last persisted message (thread preserved), falling back to
+        // a DM to the sender.
+        let reply_target = snap
+            .last_message
+            .as_ref()
+            .map(|m| m.receiver.clone())
+            .unwrap_or_else(|| MessageReceiver::new(parsed.sender.clone()));
+        tracing::info!(session = %key, "startup recovery: found incomplete turn, spawning recovery + replay task");
         let ctx = Arc::clone(ctx);
         tokio::spawn(async move {
-            super::inbound::dispatch_turn(&ctx, &parsed, synthetic).await;
+            recover_active_session(ctx, parsed, reply_target).await;
         });
     }
 
@@ -343,14 +338,100 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
     recover_inbound_spool(ctx);
 }
 
+/// Recover ONE active session's interrupted turn, then replay its Pending
+/// spool entries (RFC §6.4). Replaces the old synthetic `[系统通知]` message +
+/// `dispatch_turn`: the recovery runs `Agent::run_recovery` directly against
+/// the existing history — no synthetic user message is appended to history and
+/// no restart notice is injected. Zero user confirmation, zero notification.
+///
+/// Phase 1 (holds `turn_lock` + session lock, like `spawn_recovery`): install
+/// `session.channel` so channel-scoped tools work, run `run_recovery`, capture
+/// the recovered text + `pending_retry`, clear `incomplete_turn`, uninstall
+/// the channel. The text is delivered OUTSIDE the locks.
+///
+/// Phase 2 (lock-free): replay Pending spooled entries for the key — AFTER the
+/// recovery turn so the incomplete history is resolved before the next user
+/// message is processed. `process_turn` acquires `turn_lock` itself, so the
+/// locks must be released first (no deadlock).
+async fn recover_active_session(
+    ctx: Arc<OrchestratorCtx>,
+    key: SessionKey,
+    reply_target: MessageReceiver,
+) {
+    let sk = key.to_string();
+    let Some(channel) = ctx.channel(&key.account_key()) else {
+        tracing::warn!(session = %sk, "startup recovery: channel gone; skipping session recovery");
+        return;
+    };
+    let session_ctx = ctx.session_context_for(&sk);
+
+    let text = {
+        let _turn_guard = session_ctx.turn_lock.lock().await;
+        let mut session = session_ctx.session.lock().await;
+        session.channel = Some(channel.clone());
+        let resolved = ResolvedTurn::resolve(&session, &ctx.runtime);
+        let turn_ctx = resolved.turn_context();
+        let result = session_ctx
+            .agent
+            .run_recovery(&mut session, turn_ctx, &ctx.runtime)
+            .await;
+        session.channel = None;
+        session.incomplete_turn = false;
+        // Stash `pending_retry` while the session lock is held (same pattern
+        // as process_turn's tail) so a later retry button keeps working.
+        if let Ok(Some(tr)) = &result {
+            if let Some(pr) = &tr.pending_retry {
+                *session_ctx.pending_retry.lock().await = Some(pr.clone());
+            }
+        }
+        drop(session);
+        match result {
+            Ok(Some(tr)) => {
+                tracing::info!(session = %sk, "startup recovery: turn completed");
+                tr.text
+            }
+            Ok(None) => {
+                tracing::debug!(session = %sk, "startup recovery: no recovery needed");
+                String::new()
+            }
+            Err(e) => {
+                tracing::warn!(session = %sk, err = %e, "startup recovery failed");
+                crate::agents::user_messages::user_facing_error_message(&e)
+            }
+        }
+    };
+    if !text.is_empty() {
+        let message = ChannelOutboundMessage {
+            receiver: reply_target,
+            content: ChannelMessageContent::text(text),
+            options: Default::default(),
+        };
+        if let Err(e) = channel.send_message(&message).await {
+            tracing::warn!(session = %sk, err = %e, "startup recovery: deliver failed");
+        }
+    }
+
+    // Phase 2 — lock-free (process_turn takes turn_lock itself).
+    super::inbound::replay_pending_for_key(&ctx, &key).await;
+}
+
 /// RFC inbound-spool §6.4: replay Pending inbound messages persisted before a
 /// crash. `pending()` returns only entries with `seq <= baseline` (open-time
 /// watermark), so a hot-switch successor never replays messages it appended
-/// while waiting for the old process. Each replay runs the FULL dispatch chain
-/// (interceptors, rate-limit, ask routing, dispatch_turn) in its own task —
-/// identical semantics to live delivery — and marks the entry Done after
-/// dispatch returns (a panic inside dispatch leaves it Pending for the next
-/// restart: at-least-once).
+/// while waiting for the old process.
+///
+/// v4: replay is grouped per routing key `(channel, account, sender_id)` and
+/// only for ACTIVE sessions:
+/// - no active session → entries stay in the spool; the `DispatchTurn`
+///   pre-hook replays them when the user switches back;
+/// - active session with an incomplete turn → skipped here; the
+///   `recover_active_session` task (spawned by run_startup's incomplete-turn
+///   loop) recovers the turn first, then replays the entries (Phase 2);
+/// - active session, complete history → one task replays the key's entries
+///   serially (oldest first) through `replay_pending_for_key`, which runs the
+///   replay chain (full interception semantics minus the terminal
+///   `DispatchTurn`) and marks each entry Done after its turn returns
+///   (mark-after keeps at-least-once).
 fn recover_inbound_spool(ctx: &Arc<OrchestratorCtx>) {
     let Some(spool) = ctx.inbound_spool.clone() else {
         // Degraded (in-memory-only delivery) or tests — nothing to recover.
@@ -360,19 +441,46 @@ fn recover_inbound_spool(ctx: &Arc<OrchestratorCtx>) {
     if pending.is_empty() {
         return;
     }
-    tracing::info!(count = pending.len(), "replaying persisted inbound spool entries");
 
-    for entry in pending {
-        let msg = entry.msg.into_runtime();
+    // Group by the routing-key triple. `sender` may itself contain ':', so the
+    // triple is matched explicitly — never by string-splitting the key.
+    let mut by_key: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+    for entry in &pending {
+        *by_key
+            .entry((
+                entry.channel.clone(),
+                entry.account.clone(),
+                entry.msg.sender_id.clone(),
+            ))
+            .or_default() += 1;
+    }
+    tracing::info!(
+        count = pending.len(),
+        keys = by_key.len(),
+        "replaying persisted inbound spool entries (active sessions)"
+    );
+
+    for ((channel, account, sender), count) in by_key {
+        let key = SessionKey::new(channel, account, sender);
+        let sk = key.to_string();
+        let Some(active_id) = ctx.sessions.active_session_id(&sk) else {
+            // Inactive session: leave the entries in the spool — the
+            // switch-back replay (`DispatchTurn` pre-hook) drains them.
+            tracing::debug!(session = %sk, count, "spool recovery: session inactive, leaving entries for switch-back");
+            continue;
+        };
+        // Active session with an incomplete turn: `recover_active_session`
+        // owns this key (Phase 1 recovery + Phase 2 replay) — skip to avoid a
+        // double replay.
+        if ctx.sessions.get_by_id(&active_id).is_some_and(|s| {
+            !s.history.is_empty() && super::history_has_incomplete_turn(&s.history)
+        }) {
+            continue;
+        }
+        tracing::info!(session = %sk, count, "spool recovery: replaying active session");
         let ctx = Arc::clone(ctx);
-        let spool = Arc::clone(&spool);
-        let seq = entry.seq;
-        let account = (entry.channel, entry.account);
         tokio::spawn(async move {
-            super::inbound::dispatch(&ctx, account, msg).await;
-            if let Err(e) = spool.mark_done(seq) {
-                tracing::warn!(seq, err = %e, "inbound spool: replay mark_done failed; entry stays Pending");
-            }
+            super::inbound::replay_pending_for_key(&ctx, &key).await;
         });
     }
 }
@@ -832,11 +940,14 @@ mod tests {
         ));
     }
 
-    /// RFC inbound-spool §6.4: Pending entries persisted by a crashed process
-    /// are replayed through the full dispatch chain and marked Done once
-    /// dispatch returns. Simulates the crash by appending in one store
-    /// instance (dropped without mark_done), reopening as the successor, then
-    /// running recovery.
+    /// RFC inbound-spool §6.4 (v4): Pending entries persisted by a crashed
+    /// process are replayed only for ACTIVE sessions and marked Done after
+    /// each replay turn returns. Simulates the crash by appending in one
+    /// store instance (dropped without mark_done), reopening as the
+    /// successor, then running recovery. The test creates the active session
+    /// up front — without one, v4 leaves the entries in the spool for the
+    /// switch-back hook (see `replay_noop_without_spool` for the no-spool
+    /// case).
     #[tokio::test]
     async fn replay_persisted_inbound_and_marks_done() {
         let tmp = tempfile::tempdir().unwrap();
@@ -858,6 +969,9 @@ mod tests {
             "reopened spool must see the pre-crash Pending entry"
         );
         let mut ctx = test_ctx(vec![]);
+        // v4 replays only active sessions — register `telegram:acc1:u1` (the
+        // key derived from the spooled entry's routing triple) as active.
+        let _ = ctx.sessions.get_or_create("telegram:acc1:u1");
         ctx.inbound_spool = Some(Arc::clone(&spool));
         recover_inbound_spool(&Arc::new(ctx));
         // The replay task runs async — poll until mark_done lands.

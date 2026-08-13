@@ -144,6 +144,10 @@ impl TurnSuspension {
 /// Everything in here is "what this turn will use"—no further resolution needed
 /// inside `Agent.run()`. Channels, sessions, runtime infrastructure are accessed
 /// through other parameters (`&mut Session`, `&AgentRuntime`).
+///
+/// `Clone` (v4): `Agent::run` hands a copy to `run_recovery` (the pre-turn
+/// safety net) while keeping the original for the main `run_inner` loop.
+#[derive(Clone)]
 pub struct TurnContext<'a> {
     /// Fully assembled system prompt: builtin sections + AGENT.md body
     /// + user profile + runtime info + skill instructions.

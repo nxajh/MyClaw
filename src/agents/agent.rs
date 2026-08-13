@@ -56,7 +56,29 @@ impl Agent {
     /// (caller's responsibility — matches RFC §三.A where SessionContext
     /// does pre-turn bookkeeping). This entrypoint only drives the
     /// LLM ↔ tool loop.
+    ///
+    /// v4 (RFC inbound-spool §6.4): runs `run_recovery` first as a safety
+    /// net — if the history is mid-turn (a crash interrupted the previous
+    /// turn before it was dispatched), the recovery finishes that turn and
+    /// its result is returned instead of running the LLM on malformed
+    /// history. When no recovery is needed, delegates to [`Self::run_inner`].
     pub async fn run(
+        &self,
+        session: &mut Session,
+        turn_ctx: TurnContext<'_>,
+        runtime: &AgentRuntime,
+    ) -> Result<TurnResult> {
+        if let Some(tr) = self.run_recovery(session, turn_ctx.clone(), runtime).await? {
+            return Ok(tr);
+        }
+        self.run_inner(session, turn_ctx, runtime).await
+    }
+
+    /// The raw LLM ↔ tool loop (no recovery pre-check). Called by [`Self::run`]
+    /// after recovery finds nothing to do, and by `run_recovery`'s tail for
+    /// Cases B/C. Never calls back into [`Self::run`] — that would recurse
+    /// through `run_recovery` indefinitely.
+    async fn run_inner(
         &self,
         session: &mut Session,
         turn_ctx: TurnContext<'_>,
@@ -900,9 +922,9 @@ impl Agent {
     /// - **Case A** — assistant tool_calls without matching tool_results:
     ///   re-execute each orphan call via the same ToolExecutor `run()`
     ///   uses, append the results to history, then fall through to
-    ///   `run()` so the LLM continues.
+    ///   `run_inner()` so the LLM continues.
     /// - **Case B** — trailing tool_results, no LLM response: just call
-    ///   `run()`. The chat loop sends the current history to the LLM
+    ///   `run_inner()`. The chat loop sends the current history to the LLM
     ///   without appending a fresh user message.
     /// - **Case C** — trailing user message, no LLM response: same as
     ///   Case B.
@@ -1049,9 +1071,11 @@ impl Agent {
             exec_marker_clear(runtime.sessions_dir.as_deref(), &session.id);
         }
 
-        // Cases B, C, and tail of A: drive Agent.run from the now-well-formed
-        // history. The user message (if any) is already in history.
-        let tr = self.run(session, turn_ctx, runtime).await?;
+        // Cases B, C, and tail of A: drive the LLM loop from the now
+        // well-formed history. The user message (if any) is already in
+        // history. `run_inner` (not `run`): `run` would re-enter
+        // `run_recovery` and recurse forever.
+        let tr = self.run_inner(session, turn_ctx, runtime).await?;
         Ok(Some(tr))
     }
 
@@ -1675,10 +1699,20 @@ fn backoff_duration(attempt: usize) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::context_engine::ContextEngine;
+    use crate::agents::resource_provider::ResourceProvider;
     use crate::agents::session::Session;
+    use crate::agents::tool_executor::ToolExecutor;
+    use crate::agents::{AgentRegistry, LoopBreaker, LoopBreakerConfig};
+    use crate::config::agent::{PermissionMode, RunMode};
     use crate::config::sub_agent::SubAgentConfig;
-    use crate::providers::{Tool, ToolResult};
+    use crate::providers::{
+        ChatModelConfig, ChatProvider, EmbeddingProvider, ImageGenerationProvider,
+        ProviderSummary, SearchFallbackEntry, SearchProvider, SttProvider, Tool, ToolResult,
+        TtsProvider, VideoGenerationProvider,
+    };
     use async_trait::async_trait;
+    use parking_lot::RwLock;
 
     #[test]
     fn fold_view_image_inlines_results_when_tool_absent() {
@@ -1761,6 +1795,98 @@ mod tests {
             isolation: Default::default(),
             timeout: None,
         }
+    }
+
+    /// A `ProviderRegistry` that errors on everything — enough to satisfy
+    /// `AgentRuntime`'s type, never enough to run a real turn.
+    struct BailingRegistry;
+
+    #[rustfmt::skip]
+    impl ProviderRegistry for BailingRegistry {
+        fn get_chat_provider(&self, _c: Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_chat_provider_with_hint(&self, _c: Capability, _h: Option<&str>) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_chat_fallback_chain(&self, _c: Capability) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>> { anyhow::bail!("test stub") }
+        fn get_embedding_provider(&self) -> anyhow::Result<(Arc<dyn EmbeddingProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_image_provider(&self) -> anyhow::Result<(Arc<dyn ImageGenerationProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_tts_provider(&self) -> anyhow::Result<(Arc<dyn TtsProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn VideoGenerationProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn SearchProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<SearchFallbackEntry>> { anyhow::bail!("test stub") }
+        fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_chat_model_config(&self, _m: &str) -> anyhow::Result<&ChatModelConfig> { anyhow::bail!("test stub") }
+        fn get_chat_provider_by_model(&self, _m: &str) -> Option<(Arc<dyn ChatProvider>, String)> { None }
+        fn get_chat_provider_id_by_model(&self, _m: &str) -> Option<String> { None }
+        fn get_chat_media_policy(&self, _m: &str) -> Option<crate::providers::MediaPolicy> { None }
+        fn get_chat_routing_models(&self) -> Vec<String> { Vec::new() }
+        fn get_all_provider_summaries(&self) -> Vec<ProviderSummary> { Vec::new() }
+    }
+
+    /// An `AgentRuntime` whose provider registry always bails — the turn
+    /// under test must fail with "test stub" before touching any real LLM.
+    fn bailing_runtime() -> AgentRuntime {
+        let providers: Arc<dyn ProviderRegistry> = Arc::new(BailingRegistry);
+        let tools = Arc::new(crate::agents::ToolRegistry::new());
+        let skills = Arc::new(RwLock::new(crate::agents::SkillManager::new()));
+        let agents = Arc::new(AgentRegistry::default());
+        let resources = ResourceProvider::new(
+            Arc::clone(&skills),
+            Arc::clone(&agents),
+            Vec::new(),
+            std::path::PathBuf::new(),
+            std::path::PathBuf::new(),
+            String::new(),
+            0,
+        );
+        let context_engine = Arc::new(ContextEngine::new(
+            &crate::config::agent::ContextConfig::default(),
+            Arc::clone(&providers),
+            resources,
+            Arc::clone(&tools),
+        ));
+        let tool_executor = Arc::new(ToolExecutor::new(30));
+        let loop_breaker = Arc::new(LoopBreaker::new(LoopBreakerConfig::default()));
+        AgentRuntime::new(
+            providers,
+            tools,
+            skills,
+            agents,
+            context_engine,
+            tool_executor,
+            loop_breaker,
+        )
+    }
+
+    /// Regression guard for the v4 recovery refactor: `Agent::run` must
+    /// pre-check `run_recovery`, and `run_recovery`'s Cases B/C must fall
+    /// through to `run_inner` — NOT back into `run` (that would re-enter
+    /// `run_recovery` and recurse until the stack overflows).
+    ///
+    /// Case C (trailing user message, no LLM response) exercises the full
+    /// `run → run_recovery → run_inner` chain; the stub registry makes the
+    /// first provider lookup fail with "test stub", which is exactly what
+    /// we assert. A regression to `run_recovery` calling `run()` would
+    /// abort the test with a stack overflow instead of returning Err.
+    #[tokio::test]
+    async fn run_prechecks_recovery_without_recursing() {
+        let mut session = Session::new("sess-1".into());
+        session.add_user("pending question".into());
+        let agent = Agent::new(empty_config());
+        let runtime = bailing_runtime();
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Default,
+            run_mode: RunMode::Interactive,
+        };
+        let err = match agent.run(&mut session, turn_ctx, &runtime).await {
+            Ok(_) => panic!("expected recovery to run the LLM and hit the stub registry"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("test stub"),
+            "expected stub registry error, got: {err}"
+        );
     }
 
     struct NamedTool(&'static str);

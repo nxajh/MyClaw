@@ -1,7 +1,7 @@
 # RFC: 入站消息持久化 Spool（跨通道至少一次投递）
 
-- 状态：已实施（2026-08-13，P1 存储层 + P2 集成 + P3 恢复/测试，CI 绿；待部署）
-- 日期：2026-08-13
+- 状态：已实施（2026-08-13，P1 存储层 + P2 集成 + P3 恢复/测试，CI 绿；待部署）；**v4 修复（2026-08-14）**：恢复路径缺陷（CrashRecovery 吞重放消息 + 恢复需用户确认）——CrashRecovery 退役、先恢复后重放、`Agent::run` 自动恢复兜底、零确认零通知
+- 日期：2026-08-13（v4 修订 2026-08-14）
 - 范围：qqbot / telegram / wechat 三通道统一；orchestrator 入站路径；startup recovery
 
 ## 1. 背景与问题
@@ -178,29 +178,45 @@ OrchestratorEvent::Inbound { channel_type, account_id, message, seq } => {
 
 **附件消息不入 seen**（不调 append 自然不产生去重键）：wechat buf 回退重拉时附件消息会再次投递——正确行为，因附件本就未持久化、无重放去重需求；若入 seen 反而会被去重丢消息。
 
-### 6.4 startup recovery：重放（`recovery.rs`）
+### 6.4 startup recovery：先恢复 incomplete turn，再重放（`recovery.rs`，v4）
 
-独立函数 `recover_inbound_spool(ctx)`（`recovery.rs` L354），在 `run_startup` 末尾挂接（L343，`recover_completion_queue` L337 之后——两条独立恢复线，先恢复 completion queue、再重放入站，session 注册均已就绪）：
+**v4 重写（2026-08-14）**。v1 缺陷：重放走完整 `dispatch` 链并声明"与实时消息 identical semantics"，但链上的 `CrashRecovery` 拦截器把"重放的第一条 Pending 消息"误判为"用户对不完整 turn 的 retry/abort 输入"——吞掉该消息、stash 旧消息 A、提示 retry/abort；用户 restart 后再次吞。v4：**退役 `CrashRecovery` 拦截器**，重放走专门 `replay_chain()`，恢复语义改为**零用户确认、零注入通知**。
+
+#### 恢复编排（`run_startup`，`recovery.rs`）
+
+- 对每个 **active + incomplete** session：spawn `recover_active_session(ctx, key, reply_target)`——替代旧的合成 `[系统通知]` 消息 + `dispatch_turn`（合成消息会污染历史并被 `CrashRecovery` 误读）。
+  - **Phase 1**（持 `turn_lock` + session 锁，同 `spawn_recovery`）：install `session.channel` → `ResolvedTurn::resolve` → `run_recovery` → 卸 channel → `incomplete_turn = false` → 持锁 stash `pending_retry` → 捕获恢复文本。锁外 deliver（`reply_target` = `snap.last_message.receiver`，回退 `MessageReceiver::new(parsed.sender)`）。
+  - **Phase 2**（锁外——`process_turn` 自取 `turn_lock`，持锁重放必死锁）：`replay_pending_for_key(ctx, key)` 重放该 key 的 Pending 条目。**先恢复后重放**：incomplete 历史先被 `run_recovery` 收尾，下一条用户消息才在完整历史上处理。
+  - 恢复文本由 `run_recovery` 从既有历史形状推导（Case A/B/C，`agent.rs`），不追加合成消息、不注入重启通知；`Ok(None)` = 无需恢复，不发任何消息。
+
+#### 重放（`recover_inbound_spool` + `replay_pending_for_key`）
 
 ```rust
 fn recover_inbound_spool(ctx: &Arc<OrchestratorCtx>) {
     let Some(spool) = ctx.inbound_spool.clone() else { return; }; // 降级/测试：无事可做
     let pending = spool.pending();      // seq <= baseline_seq，升序（§8.3）
     if pending.is_empty() { return; }
-    for entry in pending {
-        let msg = entry.msg.into_runtime(); // PersistedChannelMessage → ChannelInboundMessage
-        tokio::spawn(async move {           // 独立任务重放，不阻塞 recovery 主流程
-            inbound::dispatch(&ctx, account, msg).await;
-            if let Err(e) = spool.mark_done(seq) { warn!(...); } // dispatch 返回后 mark_done
-        });
+    // v4: 按路由三元组 (channel, account, sender_id) 分组（sender 可含 ':'，绝不解析路由串）
+    let mut by_key: BTreeMap<(String, String, String), usize> = ...;
+    for ((channel, account, sender), count) in by_key {
+        let key = SessionKey::new(channel, account, sender);
+        let Some(active_id) = ctx.sessions.active_session_id(&key) else {
+            continue; // inactive：留 spool，切回时 DispatchTurn 钩子重放（自愈）
+        };
+        if ctx.sessions.get_by_id(&active_id).is_some_and(|s|
+            !s.history.is_empty() && history_has_incomplete_turn(&s.history)
+        ) { continue; } // 归 recover_active_session（Phase 2）管，避免双处理
+        tokio::spawn(async move { replay_pending_for_key(&ctx, &key).await; }); // 每 key 单任务
     }
 }
 ```
 
-- `PersistedChannelMessage::into_runtime()` 已实现（`message.rs` L349）：还原 `ChannelInboundMessage`（`sender: MessageSender::new(sender_id)`，`content: ChannelMessageContent::text(text)`，files 空）。
-- 重放走完整 `dispatch` 链（含 ask 路由、限流、crash-recovery 拦截）——行为与实时消息一致。
-- 重放顺序按 seq 升序；每个重放任务**自己调 `mark_done`**（重放不走事件循环，无法复用 §6.2）；dispatch 内部 panic 则条目保持 Pending，下次重启再试（至少一次）。
+- **重放链 `replay_chain()`**（`inbound.rs`，5 项）：`[AskReply, Callback, Gate, SlashCommand, MentionPreParse]`——完整拦截语义（ask 路由/回调/权限门/斜杠命令/提及预处理）**减去**终段 `DispatchTurn` 与已退役的 `CrashRecovery`。重放消息**不进** `DispatchTurn`（终段由 `replay_one_sync` 同步驱动 `process_turn`）。
+- **`replay_one_sync`**：`msg.id = format!("replay:{}", msg.id)`（`replay:` 前缀 = DispatchTurn 前置钩子的防重入守卫）→ 遍历 replay 链 → 终段同步 `await process_turn(msg, Some(channel), runtime)`（带 channel；`ctx.channel` 缺失 return，条目仍被调用方 mark_done——mark-after 保 at-least-once）。**同步串行**：同 key 多条按 seq 升序逐条 await，不并发 spawn（`tokio::Mutex` 非 FIFO，并发重放会乱序）。
+- **`replay_pending_for_key`**：`pending_for(channel, account, sender_id)` 三元组精确匹配（`inbound_spool.rs`，继承 baseline 水印——`seq > baseline` 是本进程 live/in-flight 消息，永不重放，这是跨进程边界，天然排除运行时在途消息）；每条 `replay_one_sync` 返回后**无条件 `mark_done(seq)`**（mark-after，at-least-once）。
+- **DispatchTurn 前置钩子**（`inbound.rs`）：`if !msg.id.starts_with("replay:") { replay_pending_for_key(ctx, key).await; }` 然后 dispatch_turn——inactive session 切回（`/switch` 或该 key 首次消息触达）时自愈重放；`replay:` 前缀是防御性防重入（重放消息本就绕开 DispatchTurn）。
 - 无 spool（`None`）时为空操作（`replay_noop_without_spool` 测试覆盖）。
+- `PersistedChannelMessage::into_runtime()`（`message.rs` L349）还原 `ChannelInboundMessage`（`sender: MessageSender::new(sender_id)`，files 空）。
 
 ## 7. 去重与幂等
 
@@ -220,8 +236,9 @@ fn recover_inbound_spool(ctx: &Arc<OrchestratorCtx>) {
 ```
 daemon 启动 → channels 就绪 → orchestrator run()
 → spawn 的 recovery 任务（无旧进程等待）→ run_startup：
-   ① 现有 incomplete-turn session 恢复（并行）
-   ② spool.pending() 重放（§6.4）
+   ① incomplete-turn 的 active session：同任务先 run_recovery 收尾、再重放该 key 的 Pending（§6.4，零确认零通知）
+   ② 其余 active session 的 Pending：每 key 单任务重放（§6.4）
+   ③ inactive session 的 Pending：留 spool，切回时 DispatchTurn 前置钩子重放（自愈）
 → 事件循环开始消费（新消息正常路径）
 ```
 
@@ -229,7 +246,9 @@ daemon 启动 → channels 就绪 → orchestrator run()
 
 ```
 进程死亡 → systemd 重启 → 正常启动路径（§8.1）
-→ spool 重放未处理消息；session incomplete-turn 恢复并存
+→ incomplete 会话：先 run_recovery 收尾、再重放该 key 的 Pending（同任务串行）
+→ active 完整会话：直接重放；inactive：留 spool，切回时钩子重放
+→ 兜底：任何后续 turn 进入 Agent::run 前自动 run_recovery（T4，防遗漏路径）
 ```
 
 ### 8.3 hot switch（SIGUSR1）
@@ -250,8 +269,10 @@ daemon 启动 → channels 就绪 → orchestrator run()
 
 1. mark_done 在 dispatch 返回后同步执行（事件循环内）；
 2. 重放水位线 `baseline_seq` 排除新进程收到的新消息；
-3. 重放任务完成后 mark_done；
+3. 重放任务完成后 mark_done（mark-after）；
 4. seen 去重兜底（极端竞态下同一 msg.id 二次 append 被跳过）。
+
+**v4 窄竞态（接受，非修复）**：mark-after 语义下，startup 重放任务与 DispatchTurn 前置钩子可能**并发双处理同一条 Pending**（极窄窗口：进程刚启动、事件循环恰好同时收到该 key 的首条新消息）。后果是**重复处理**（该条消息被 agent 处理两次），不是丢消息——mark-before 虽可避免双处理，但会在 `process_turn` 返回前标记 Done，期间崩溃即丢消息（破坏 at-least-once），故不做。
 
 ## 9. 可靠性边界与权衡
 
@@ -287,6 +308,15 @@ daemon 启动 → channels 就绪 → orchestrator run()
 16. ✅ 三通道现有 listen/dispatch 测试全绿（CI 全量 `cargo test`）
 17. ✅ clippy -D warnings（CI `build.yml` L46）
 
+**v4（2026-08-14，恢复路径缺陷修复）**
+18. ✅ `pending_for` 三元组过滤（`pending_for_filters_by_routing_triple`：reopen 后 pre-open 条目可查、Done 排除、兄弟三元组互不影响、未知三元组空）
+19. ✅ `pending_for` 排除本进程 append（`pending_for_excludes_post_open_appends`：baseline 水印 = 跨进程边界，live/in-flight 永不重放）
+20. ✅ 重放只针对 active session（`replay_persisted_inbound_and_marks_done` v4 改造：先 `get_or_create` 注册 active session；无 active 时条目留 spool 待切回钩子）
+21. ✅ CrashRecovery 退役（`chain_order_is_pinned` 删 crash_recovery；3 个 crash_recovery 测试删除；`retry_abort_content` 删除）
+22. ✅ replay 链顺序固定（`replay_chain_order_is_pinned`：AskReply → Callback → Gate → SlashCommand → MentionPreParse，重放与实时共享同一链序；实时链序见 `chain_order_is_pinned`）
+23. ✅ 重放同步串行 + 顺序 + `replay:` 防重入——① `replay_pending_for_key_serial_and_ordered`：注册用户放行 Gate → 3 条按 spool 序进 process_turn → 断言 spool 清空 + history user 文本顺序（ends_with，因 process_turn 拼 `<system-reminder>` 前缀）；② `dispatch_turn_prehook_drains_pending_before_dispatch`：未注册用户 → Gate Stop 每条 + mark_done（mark-after），断言 3 条 GATE_PROMPT + 1 条 live error notice 共 4 发送；③ `dispatch_turn_prehook_skips_replay_prefix`：`replay:` 前缀不触发钩子，spool 保持 1（防重入守卫）
+24. ✅ T4 `run()` 自动 `run_recovery` 兜底——`run`/`run_inner` 拆分消除互递归（§6.4 恢复编排）；`run_prechecks_recovery_without_recursing`（agent.rs）：Case C 历史 + BailingRegistry stub → 断言 Err 含 "test stub"（若 run_recovery 尾部误调 `run()` 会栈溢出而非返回 Err）
+
 ## 11. 实施记录（走 CI，x86 禁本地编译）
 
 1. ✅ `src/storage/inbound_spool.rs`（InboundSpool + 7 单测 §10）——模块位置偏差见 §5（初稿写 `src/channels/spool.rs`）
@@ -298,6 +328,8 @@ daemon 启动 → channels 就绪 → orchestrator run()
 6. ✅ `recover_inbound_spool` 重放（`recovery.rs` L343 / L354-378，含 baseline 水位线）
 7. ✅ 集成测试（recovery 2 个）+ 全量测试 + clippy——CI run 31716733711 全绿
 8. ✅ PR → CI 绿；**`myclaw update` 部署待授权**（2026-08-13，部署契约：先征求授权）
+9. ✅ **v4（2026-08-14）**：`inbound_spool.rs` `pending_for` API + 2 单测；`inbound.rs` CrashRecovery 拦截器退役 + `replay_chain()`（5 项）+ `replay_one_sync`/`replay_pending_for_key` + DispatchTurn 前置钩子 + 测试更新；`recovery.rs` `recover_active_session`（Phase 1 恢复/Phase 2 重放）+ `recover_inbound_spool` 重写（三元组分 key、active-only）+ 测试改造；`user_messages.rs` 删 MSG_INCOMPLETE_TURN/BTN_RETRY/BTN_ABORT；`turn.rs` TurnContext derive Clone + `agent.rs` `run`/`run_inner` 拆分（T4 兜底）；RFC §6.4/§8 修正（本段）
+10. ⏳ v4 CI 编译验证 + **`myclaw update` 部署授权**（2026-08-14，待）
 
 ## 12. 风险与权衡
 

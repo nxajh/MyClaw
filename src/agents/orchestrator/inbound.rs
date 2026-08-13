@@ -5,9 +5,15 @@
 //! rewritten ([`Flow::Next`]). The terminal [`DispatchTurn`] always stops the
 //! chain by spawning the actual turn.
 //!
-//! Order: ask-reply → callback (retry/abort) → crash-recovery prompt →
-//! slash-command → dispatch-turn. The chain is the single source of truth for
-//! "what happens to an inbound message before it reaches `process_turn`".
+//! Order: ask-reply → callback (retry/abort) → gate → slash-command →
+//! mention-preparse → dispatch-turn. The chain is the single source of truth
+//! for "what happens to an inbound message before it reaches `process_turn`".
+//!
+//! Spooled-message replay (RFC inbound-spool §6.4) uses a `replay_chain` — the
+//! same interceptors minus the terminal `DispatchTurn` — and drives
+//! `process_turn` synchronously (in order, no spawn) instead of dispatching a
+//! fresh turn; the `DispatchTurn` pre-hook drains Pending spool entries for
+//! the routing key before dispatching a real user message (switch-back replay).
 
 use std::sync::Arc;
 
@@ -16,12 +22,10 @@ use async_trait::async_trait;
 use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
 use crate::agents::commands;
-use crate::agents::user_messages::{
-    BTN_ABORT, BTN_RETRY, MSG_ABORT_ACK, MSG_INCOMPLETE_TURN, MSG_NO_PENDING_RETRY,
-};
+use crate::agents::user_messages::{MSG_ABORT_ACK, MSG_NO_PENDING_RETRY};
 use crate::channels::{
     CallbackAction, Channel, ChannelInboundMessage, ChannelMessageContent, ChannelOutboundMessage,
-    InlineButton, MessageReceiver,
+    MessageReceiver,
 };
 use tracing::error;
 
@@ -48,16 +52,24 @@ trait Interceptor: Send + Sync {
 }
 
 /// The ordered interceptor chain. Terminal stage (`DispatchTurn`) must be last.
-fn chain() -> [&'static dyn Interceptor; 7] {
+fn chain() -> [&'static dyn Interceptor; 6] {
     [
         &AskReply,
         &Callback,
-        &CrashRecovery,
         &Gate,
         &SlashCommand,
         &MentionPreParse,
         &DispatchTurn,
     ]
+}
+
+/// Replay chain: the same interceptors minus the terminal `DispatchTurn`.
+/// Replayed (spooled) messages must pass through the full interception
+/// semantics (gate, callbacks, slash commands, ask-reply) but are driven by
+/// [`replay_one_sync`] — synchronously, in order — and must never re-enter the
+/// `DispatchTurn` pre-hook (no-reentry via the `replay:` id prefix).
+fn replay_chain() -> [&'static dyn Interceptor; 5] {
+    [&AskReply, &Callback, &Gate, &SlashCommand, &MentionPreParse]
 }
 
 /// Run the inbound chain for one user message.
@@ -179,9 +191,10 @@ impl Interceptor for Callback {
         if is_retry {
             match pending {
                 Some(user_msg) => {
-                    // Retry continues the incomplete turn; clear the load-time
-                    // flag so CrashRecovery does not re-prompt if the spawn is
-                    // delayed. The actual recovery path re-reads history.
+                    // Retry continues the turn; clear the load-time incomplete
+                    // flag so the rewritten message is treated as a fresh user
+                    // message (not an open-tail continuation). process_turn
+                    // also clears the flag at turn start.
                     if let Ok(mut session) = session_ctx.session.try_lock() {
                         session.incomplete_turn = false;
                     }
@@ -224,70 +237,6 @@ impl Interceptor for Callback {
             send_text(&channel, &reply_target, MSG_ABORT_ACK).await;
             Flow::Stop
         }
-    }
-}
-
-// ── CrashRecovery ─────────────────────────────────────────────────────────────
-
-/// An incomplete turn loaded from a previous crash/SIGKILL: stash the orphaned
-/// user message on `pending_retry` and prompt the user with retry/abort buttons.
-struct CrashRecovery;
-
-#[async_trait]
-impl Interceptor for CrashRecovery {
-    fn name(&self) -> &'static str {
-        "crash_recovery"
-    }
-    async fn handle(
-        &self,
-        ctx: &OrchestratorCtx,
-        key: &SessionKey,
-        msg: ChannelInboundMessage,
-    ) -> Flow {
-        let sk = key.to_string();
-        let session_ctx = ctx.session_context_for(&sk);
-        if let Ok(mut session) = session_ctx.session.try_lock() {
-            // Re-check history shape: a stale incomplete_turn flag (or a
-            // session repaired offline) must not block a completed turn.
-            let still_incomplete = session.incomplete_turn
-                && super::history_has_incomplete_turn(&session.history);
-            if session.incomplete_turn && !still_incomplete {
-                session.incomplete_turn = false;
-            }
-            if still_incomplete {
-                session.incomplete_turn = false;
-
-                let last_user_msg = session
-                    .history
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "user")
-                    .map(|m| m.text_content().to_string())
-                    .unwrap_or_default();
-                *session_ctx.pending_retry.lock().await = Some(last_user_msg);
-                drop(session);
-
-                let channel = match ctx.channel(&key.account_key()) {
-                    Some(c) => c,
-                    None => return Flow::Stop,
-                };
-                let message = ChannelOutboundMessage {
-                    receiver: MessageReceiver::new(msg.receiver.id.clone()).with_reply_to(
-                        msg.receiver
-                            .reply_to_message_id
-                            .clone()
-                            .unwrap_or_else(|| msg.id.clone()),
-                    ),
-                    content: retry_abort_content(MSG_INCOMPLETE_TURN, &sk),
-                    options: Default::default(),
-                };
-                if let Err(e) = channel.send_message(&message).await {
-                    error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
-                }
-                return Flow::Stop;
-            }
-        }
-        Flow::Next(msg)
     }
 }
 
@@ -500,6 +449,15 @@ impl Interceptor for DispatchTurn {
         key: &SessionKey,
         msg: ChannelInboundMessage,
     ) -> Flow {
+        // RFC §6.4 switch-back replay: before dispatching a fresh user message,
+        // drain any Pending spooled entries for this routing key (messages that
+        // arrived while the session was inactive or crashed mid-turn stay in the
+        // spool until the user comes back). Replayed messages carry `replay:`
+        // ids and never re-enter this interceptor, so the prefix check is a
+        // defensive no-reentry guard.
+        if !msg.id.starts_with("replay:") {
+            replay_pending_for_key(ctx, key).await;
+        }
         dispatch_turn(ctx, key, msg).await;
         Flow::Stop
     }
@@ -690,6 +648,70 @@ pub(super) fn dispatch_turn_spawn(
     });
 }
 
+// ── spooled-message replay (RFC inbound-spool §6.4) ──────────────────────────
+
+/// Replay ONE spooled message: run `replay_chain` (full interception
+/// semantics — gate, callbacks, slash commands, ask-reply), then drive the
+/// turn synchronously (no spawn) so replays are serial and ordered. Replay
+/// only ever runs on paths with a live channel (startup Phase 2 /
+/// switch-back hook), so a missing channel here is a transient anomaly — the
+/// entry is still marked done by the caller, whose mark-after keeps
+/// at-least-once (a replayed message already delivered by an interceptor must
+/// not be delivered twice).
+async fn replay_one_sync(ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelInboundMessage) {
+    let mut msg = msg;
+    for stage in replay_chain() {
+        match stage.handle(ctx, key, msg).await {
+            Flow::Stop => return,
+            Flow::Next(m) => msg = m,
+        }
+    }
+    let Some(channel) = ctx.channel(&key.account_key()) else {
+        return;
+    };
+    let sk = key.to_string();
+    let session_ctx = ctx.sessions.get_or_create_context(&sk);
+    let runtime = ctx.runtime.clone();
+    if let Err(e) = session_ctx.process_turn(msg, Some(channel), runtime).await {
+        tracing::warn!(session = %sk, err = %e, "replay: process_turn failed");
+    }
+}
+
+/// Replay all Pending spooled entries for one routing key, oldest first.
+/// Called from the `DispatchTurn` pre-hook (switch-back) and from the startup
+/// recovery task (Phase 2, after `run_recovery`). Each entry is marked done
+/// AFTER its replay turn returns (mark-after keeps at-least-once: a crash
+/// mid-replay leaves the entry Pending for the next opportunity).
+pub(super) async fn replay_pending_for_key(ctx: &OrchestratorCtx, key: &SessionKey) {
+    let Some(spool) = &ctx.inbound_spool else {
+        return;
+    };
+    let pending = spool.pending_for(&key.channel, &key.account, &key.sender);
+    if pending.is_empty() {
+        return;
+    }
+    tracing::info!(
+        session = %key.to_string(),
+        count = pending.len(),
+        "replaying pending inbound spool entries"
+    );
+    for entry in pending {
+        let mut msg = entry.msg.into_runtime();
+        // `replay:` prefix: dedup-key-safe (channel ids never collide) and the
+        // DispatchTurn no-reentry guard — a replayed message never re-enters
+        // the switch-back pre-hook.
+        msg.id = format!("replay:{}", msg.id);
+        replay_one_sync(ctx, key, msg).await;
+        if let Err(e) = spool.mark_done(entry.seq) {
+            tracing::warn!(
+                seq = entry.seq,
+                err = %e,
+                "inbound spool: replay mark_done failed; entry stays Pending"
+            );
+        }
+    }
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 async fn send_text(channel: &Arc<dyn Channel>, reply_target: &str, text: &str) {
@@ -701,39 +723,12 @@ async fn send_text(channel: &Arc<dyn Channel>, reply_target: &str, text: &str) {
     let _ = channel.send_message(&message).await;
 }
 
-/// Build the **Retry / Abort** inline buttons prompt content.
-///
-/// The callback data carries a 32-char prefix of the session key so it fits
-/// within Telegram's 64-byte limit.
-pub(super) fn retry_abort_content(content: impl Into<String>, sk: &str) -> ChannelMessageContent {
-    let sk_prefix: String = sk.chars().take(32).collect();
-    ChannelMessageContent {
-        text: content.into(),
-        files: vec![],
-        buttons: vec![
-            InlineButton {
-                label: BTN_RETRY.to_string(),
-                callback_data: CallbackAction::Retry {
-                    session_key_prefix: sk_prefix.clone(),
-                }
-                .serialize(),
-            },
-            InlineButton {
-                label: BTN_ABORT.to_string(),
-                callback_data: CallbackAction::Abort {
-                    session_key_prefix: sk_prefix,
-                }
-                .serialize(),
-            },
-        ],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use super::super::test_support::{MockChannel, inbound_msg, test_ctx};
+    use crate::storage::InboundSpool;
 
     /// Golden test: the inbound chain order is load-bearing (ask-reply must run
     /// before callback before dispatch, etc.). Pin it so reordering is a
@@ -746,7 +741,6 @@ mod tests {
             vec![
                 "ask_reply",
                 "callback",
-                "crash_recovery",
                 "gate",
                 "slash_command",
                 "mention_preparse",
@@ -866,58 +860,7 @@ mod tests {
         assert!(ch.texts().iter().any(|t| t == MSG_NO_PENDING_RETRY));
     }
 
-    // ── CrashRecovery ─────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn crash_recovery_passes_through_when_turn_complete() {
-        let ctx = test_ctx(vec![]);
-        let flow = CrashRecovery
-            .handle(&ctx, &key(), inbound_msg("user1", "hi"))
-            .await;
-        assert_eq!(next_content(flow).as_deref(), Some("hi"));
-    }
-
-    #[tokio::test]
-    async fn crash_recovery_prompts_with_buttons_when_incomplete() {
-        let ch = MockChannel::new();
-        let ctx = with_channel(ch.clone());
-        let k = key();
-        {
-            let sc = ctx.session_context_for(&k.to_string());
-            let mut session = sc.session.lock().await;
-            session.incomplete_turn = true;
-            // History must actually look incomplete; a bare flag is no longer enough.
-            session.add_user("orphaned question".into());
-        }
-
-        let flow = CrashRecovery
-            .handle(&ctx, &k, inbound_msg("user1", "hi"))
-            .await;
-        assert!(matches!(flow, Flow::Stop));
-        // The incomplete-turn prompt is an Interactive payload (retry + abort).
-        let sent = ch.sent.lock().unwrap();
-        assert!(sent.iter().any(|m| m.content.buttons.len() == 2));
-    }
-
-    #[tokio::test]
-    async fn crash_recovery_clears_stale_flag_when_history_complete() {
-        let ctx = test_ctx(vec![]);
-        let k = key();
-        {
-            let sc = ctx.session_context_for(&k.to_string());
-            let mut session = sc.session.lock().await;
-            session.incomplete_turn = true;
-            session.add_user("hi".into());
-            session.add_assistant("hello".into());
-        }
-
-        let flow = CrashRecovery
-            .handle(&ctx, &k, inbound_msg("user1", "next"))
-            .await;
-        assert_eq!(next_content(flow).as_deref(), Some("next"));
-        let sc = ctx.session_context_for(&k.to_string());
-        assert!(!sc.session.lock().await.incomplete_turn);
-    }
+    // ── CrashRecovery 已退役（RFC §6.4）：恢复由 run_recovery + 重放接管 ──
 
     #[tokio::test]
     async fn callback_abort_closes_trailing_user() {
@@ -943,27 +886,6 @@ mod tests {
         assert!(!session.incomplete_turn);
         assert!(session.history.is_empty());
         assert!(ch.texts().iter().any(|t| t == MSG_ABORT_ACK));
-    }
-
-    // ── retry_abort_content helper ─────────────────────────────────────────
-
-    #[test]
-    fn retry_abort_content_truncates_long_session_key() {
-        let long_sk = "telegram:account:".to_string() + &"u".repeat(100);
-        let content = retry_abort_content("turn interrupted", &long_sk);
-        let buttons = content.buttons;
-        assert_eq!(buttons.len(), 2);
-        // Callback data embeds a <=32-char session-key prefix (Telegram's
-        // 64-byte callback_data limit).
-        for b in &buttons {
-            let action = CallbackAction::parse(&b.callback_data).expect("parseable callback");
-            let prefix = match action {
-                CallbackAction::Retry { session_key_prefix } => session_key_prefix,
-                CallbackAction::Abort { session_key_prefix } => session_key_prefix,
-                _ => panic!("expected retry/abort"),
-            };
-            assert_eq!(prefix.chars().count(), 32);
-        }
     }
 
     // ── DispatchTurn: 挂起期间用户消息排队 (RFC §3.7 架构修正) ─────────────
@@ -1089,6 +1011,196 @@ mod tests {
             sctx.take_user_message().is_none(),
             "unsuspended sessions never queue"
         );
+        wait_for_sent(&ch).await;
+    }
+
+    // ── spool replay (RFC inbound-spool §6.4) ──────────────────────────────
+
+    /// Golden test: the replay chain is the inbound chain minus the terminal
+    /// `DispatchTurn` — a replayed message must run full interception semantics
+    /// (gate, callbacks, slash commands, ask-reply) but must never re-enter the
+    /// switch-back pre-hook. Pin the order so reordering is a deliberate,
+    /// reviewed change.
+    #[test]
+    fn replay_chain_order_is_pinned() {
+        let names: Vec<&str> = replay_chain().iter().map(|s| s.name()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "ask_reply",
+                "callback",
+                "gate",
+                "slash_command",
+                "mention_preparse",
+            ]
+        );
+    }
+
+    /// A spooled inbound message with a DISTINCT id — the `inbound_msg` helper
+    /// hardcodes "test-msg", which the spool dedupes by (channel, account, id).
+    fn spool_msg(id: &str, content: &str) -> ChannelInboundMessage {
+        ChannelInboundMessage {
+            id: id.to_string(),
+            sender: crate::channels::MessageSender::new("user1".to_string()),
+            receiver: MessageReceiver::new("user1".to_string()),
+            content: ChannelMessageContent::text(content.to_string()),
+            timestamp: 0,
+            interruption_scope_id: None,
+            silenced_override: None,
+        }
+    }
+
+    /// Open a spool containing the given pre-crash Pending entries for
+    /// `(tg, acc, user1)`. Entries are appended in one instance (dropped
+    /// without mark_done), then the spool is reopened as the successor so
+    /// `seq <= baseline` makes them replayable — the same shape as
+    /// `recovery::replay_persisted_inbound_and_marks_done`. The `TempDir` is
+    /// returned alongside because `mark_done` rewrites the entry file.
+    fn spool_with_pending(entries: &[(&str, &str)]) -> (Arc<InboundSpool>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("inbound_spool");
+        {
+            let spool = InboundSpool::open(dir.clone()).unwrap();
+            for (id, text) in entries {
+                spool.append("tg", "acc", &spool_msg(id, text)).unwrap();
+            }
+        }
+        (
+            Arc::new(InboundSpool::open(dir).unwrap()),
+            tmp,
+        )
+    }
+
+    /// The text parts of the session's user messages, in history order.
+    fn session_user_texts(ctx: &OrchestratorCtx, k: &SessionKey) -> Vec<String> {
+        let sc = ctx.sessions.get_or_create_context(&k.to_string());
+        let session = sc.session.lock().await;
+        session
+            .history
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| {
+                m.parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        crate::providers::ContentPart::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect()
+    }
+
+    /// Register `tg:acc:user1` with a real user id so Gate lets it through
+    /// (an unregistered user is stopped at Gate with GATE_PROMPT and never
+    /// reaches process_turn — see `dispatch_turn_prehook_drains_pending_*`).
+    fn register_user(ctx: &mut OrchestratorCtx, k: &SessionKey) {
+        let resolver = Arc::new(crate::agents::UserResolver::new());
+        resolver.set(k.to_string(), "myclaw/u/test1".to_string());
+        ctx.known_users = Arc::new(
+            crate::agents::KnownUsersRegistry::in_memory()
+                .with_resolver(Arc::clone(&resolver)),
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_pending_for_key_serial_and_ordered() {
+        let ch = MockChannel::new();
+        let (spool, _tmp) = spool_with_pending(&[
+            ("m1", "first"),
+            ("m2", "second"),
+            ("m3", "third"),
+        ]);
+        let mut ctx = with_channel(ch.clone());
+        register_user(&mut ctx, &key());
+        ctx.inbound_spool = Some(Arc::clone(&spool));
+
+        let k = key();
+        replay_pending_for_key(&ctx, &k).await;
+
+        // All entries drained and marked Done (mark-after per replay turn).
+        assert!(spool.pending().is_empty());
+        assert_eq!(spool.len(), 0);
+        // Registered user → the replay chain passes everything through; the
+        // turns fail fast at provider resolution (replay_one_sync only logs),
+        // so nothing is sent to the channel.
+        assert!(ch.texts().is_empty());
+        // History holds the replayed user texts in spool order (oldest
+        // first). process_turn prepends a <system-reminder> to the content,
+        // so assert on the content tail, not exact equality.
+        let users = session_user_texts(&ctx, &k);
+        assert_eq!(users.len(), 3, "all three replays must reach process_turn");
+        for (i, expected) in ["first", "second", "third"].iter().enumerate() {
+            assert!(
+                users[i].ends_with(expected),
+                "user msg {} should end with {:?}, got {:?}",
+                i,
+                expected,
+                users[i]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_turn_prehook_drains_pending_before_dispatch() {
+        let ch = MockChannel::new();
+        let (spool, _tmp) = spool_with_pending(&[
+            ("m1", "hi one"),
+            ("m2", "hi two"),
+            ("m3", "hi three"),
+        ]);
+        let mut ctx = with_channel(ch.clone());
+        // Unregistered user (default test_ctx) — Gate stops each replayed
+        // entry, which still proves the pre-hook drained and marked them.
+        ctx.inbound_spool = Some(Arc::clone(&spool));
+
+        DispatchTurn
+            .handle(&ctx, &key(), inbound_msg("user1", "live message"))
+            .await;
+
+        assert!(
+            spool.pending().is_empty(),
+            "the pre-hook must drain Pending entries before dispatching the live message"
+        );
+        assert_eq!(spool.len(), 0, "drained entries must be marked Done");
+        // Each of the 3 replayed entries hit Gate (unregistered → GATE_PROMPT),
+        // then the live dispatch spawns a turn that fails fast against the
+        // NullRegistry → error notice: 4 sends total.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while ch.texts().len() < 4 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected 3 gate prompts + 1 live error notice, got {}",
+                ch.texts().len()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let texts = ch.texts();
+        assert_eq!(
+            texts.iter().filter(|t| t.as_str() == GATE_PROMPT).count(),
+            3,
+            "each replayed entry must be stopped by Gate, not dispatched"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_turn_prehook_skips_replay_prefix() {
+        let ch = MockChannel::new();
+        let (spool, _tmp) = spool_with_pending(&[("m1", "hi one")]);
+        let mut ctx = with_channel(ch.clone());
+        ctx.inbound_spool = Some(Arc::clone(&spool));
+
+        let mut msg = inbound_msg("user1", "already replayed");
+        msg.id = "replay:test-msg".to_string();
+        DispatchTurn.handle(&ctx, &key(), msg).await;
+
+        assert_eq!(
+            spool.pending().len(),
+            1,
+            "the pre-hook must skip `replay:`-prefixed messages (no-reentry guard)"
+        );
+        // The live dispatch still happens (fails fast → error notice).
         wait_for_sent(&ch).await;
     }
 }

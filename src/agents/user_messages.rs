@@ -137,10 +137,6 @@ fn message_for_classified(c: &crate::providers::ClassifiedError) -> String {
     }
 }
 
-/// Prompt shown when a previous turn was left incomplete (e.g. restart).
-pub const MSG_INCOMPLETE_TURN: &str =
-    "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。";
-
 /// Shown when the model returned empty text after all same-model retries.
 /// Default-routing variant (no session model override).
 pub const MSG_EMPTY_RESPONSE: &str =
@@ -180,12 +176,6 @@ pub const MSG_BARE_CONTINUE: &str =
 pub const MSG_IMAGE_ONLY_HINT: &str =
     "（系统提示：本轮仅收到图片、无用户文字说明。请先根据图片内容作答；\
      若无法判断意图，请向用户确认要做什么，勿虚构未提出的任务。）";
-
-/// Inline-button label: retry the incomplete/empty turn.
-pub const BTN_RETRY: &str = "🔄 重试";
-
-/// Inline-button label: abandon the incomplete/empty turn.
-pub const BTN_ABORT: &str = "✖ 放弃";
 
 #[cfg(test)]
 mod tests {

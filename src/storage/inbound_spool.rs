@@ -252,6 +252,22 @@ impl InboundSpool {
         v
     }
 
+    /// Pending entries for ONE routing key `(channel, account, sender_id)`,
+    /// seq-ascending and filtered to `seq <= baseline_seq` (same watermark as
+    /// [`Self::pending`] — entries appended by THIS process are live/in-flight
+    /// and must never be replayed). Used by the startup recovery task's Phase 2
+    /// and by the switch-back replay (`DispatchTurn` pre-hook) to drain spooled
+    /// messages that arrived while a session was inactive or crashed mid-turn.
+    /// The sender triple is matched explicitly (never by string-splitting the
+    /// routing key — `sender` may itself contain `:`).
+    pub fn pending_for(&self, channel: &str, account: &str, sender_id: &str) -> Vec<SpoolEntry> {
+        let mut v = self.pending();
+        v.retain(|e| {
+            e.channel == channel && e.account == account && e.msg.sender_id == sender_id
+        });
+        v
+    }
+
     /// Number of Pending entries (tests / diagnostics).
     pub fn len(&self) -> usize {
         self.pending
@@ -334,6 +350,18 @@ mod tests {
         ChannelInboundMessage {
             id: id.to_string(),
             sender: MessageSender::new("user"),
+            receiver: MessageReceiver::new("bot"),
+            content: ChannelMessageContent::text("hello"),
+            timestamp: 0,
+            interruption_scope_id: None,
+            silenced_override: None,
+        }
+    }
+
+    fn msg_from(sender: &str, id: &str) -> ChannelInboundMessage {
+        ChannelInboundMessage {
+            id: id.to_string(),
+            sender: MessageSender::new(sender),
             receiver: MessageReceiver::new("bot"),
             content: ChannelMessageContent::text("hello"),
             timestamp: 0,
@@ -436,6 +464,55 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn pending_for_filters_by_routing_triple() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let spool = InboundSpool::open(dir.path().join("inbound_spool")).unwrap();
+            // Pre-open entries → seq <= baseline after reopen → replayable.
+            spool.append("telegram", "acc1", &msg_from("u1", "m1")).unwrap();
+            spool.append("telegram", "acc1", &msg_from("u2", "m2")).unwrap();
+            spool.append("telegram", "acc2", &msg_from("u1", "m3")).unwrap();
+            spool.append("wechat", "acc1", &msg_from("u1", "m4")).unwrap();
+            // Done entry for the same triple must be excluded.
+            spool
+                .mark_done(
+                    spool
+                        .append("telegram", "acc1", &msg_from("u1", "m0"))
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        let spool = InboundSpool::open(dir.path().join("inbound_spool")).unwrap();
+        let got = spool.pending_for("telegram", "acc1", "u1");
+        assert_eq!(got.len(), 1, "only the pending entry for the exact triple");
+        assert_eq!(got[0].msg.id, "m1");
+        // Sibling triples still match their own entries.
+        let u2 = spool.pending_for("telegram", "acc1", "u2");
+        assert_eq!(u2.len(), 1);
+        assert_eq!(u2[0].msg.id, "m2");
+        let acc2 = spool.pending_for("telegram", "acc2", "u1");
+        assert_eq!(acc2.len(), 1);
+        assert_eq!(acc2[0].msg.id, "m3");
+        let wc = spool.pending_for("wechat", "acc1", "u1");
+        assert_eq!(wc.len(), 1);
+        assert_eq!(wc[0].msg.id, "m4");
+        // Unknown triple → empty, not an error.
+        assert!(spool.pending_for("telegram", "acc1", "nobody").is_empty());
+    }
+
+    #[test]
+    fn pending_for_excludes_post_open_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = InboundSpool::open(dir.path().join("inbound_spool")).unwrap();
+        // Appended by THIS process → seq > baseline → never replayable (they
+        // are live/in-flight in the event loop).
+        spool.append("telegram", "acc1", &msg_from("u1", "m1")).unwrap();
+        assert!(spool.pending_for("telegram", "acc1", "u1").is_empty());
+        assert_eq!(spool.len(), 1, "still occupies the pending set");
     }
 
     #[test]
