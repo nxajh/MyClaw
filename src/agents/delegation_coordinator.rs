@@ -425,15 +425,15 @@ impl DelegationCoordinator {
             if let Ok(mut status) = entry.status.write() {
                 *status = DelegationStatus::Cancelled;
             }
+            // Tombstone BEFORE abort: a crash in the window between abort and
+            // the tombstone write would leave a "running" checkpoint that
+            // restart resumes (duplicate execution). The update is idempotent
+            // on the checkpoint created at spawn.
+            self.persist_terminal_checkpoint(sub_session_id, DelegationStatus::Cancelled);
             entry.handle.abort();
             parent_session_id
         };
         self.running.remove(sub_session_id);
-        // Tombstone the durable checkpoint — the task was cancelled by the
-        // user. Its sub-session history may be mid-turn, so on restart
-        // `scan_unfinished_subagents` would otherwise re-run it; the terminal
-        // status makes `run_startup` skip it instead.
-        self.persist_terminal_checkpoint(sub_session_id, DelegationStatus::Cancelled);
         if let Some(tx) = self.event_sender() {
             if tx
                 .send(DelegationEvent::Failed {
@@ -1885,6 +1885,22 @@ mod tests {
         // Hand-instrument a running entry so the test doesn't depend on the
         // background spawn path.
         let sub_session_id = "test/s/sub".to_string();
+        // Production path creates a durable checkpoint at spawn; cancel's
+        // tombstone only updates an existing entry.
+        let checkpoint = crate::storage::DelegationCheckpoint {
+            parent_session_id: parent.session_id.clone(),
+            sub_session_id: sub_session_id.clone(),
+            agent_name: "coder".to_string(),
+            status: "running".to_string(),
+            started_at: chrono::Utc::now(),
+            timeout_secs: 60,
+            allowed_tools: None,
+            last_checkpoint: None,
+        };
+        dc.session_manager
+            .backend()
+            .save_delegation_checkpoint(&checkpoint)
+            .unwrap();
         dc.running.insert(
             sub_session_id.clone(),
             RunningEntry {
@@ -1914,6 +1930,26 @@ mod tests {
             other => panic!("expected Failed(cancelled), got {other:?}"),
         }
         assert!(dc.running_snapshot().is_empty());
+
+        // Tombstone is terminal Cancelled → restart skips resume (no
+        // duplicate execution), unlike the hot-switch "checkpointed" path.
+        let cp = dc
+            .session_manager
+            .backend()
+            .load_delegation_checkpoint(&sub_session_id)
+            .unwrap();
+        assert_eq!(cp.status, "cancelled");
+
+        // Exactly one event: the two-layer spawn's cancelled branch must NOT
+        // emit a second Failed (caller owns the terminal event). Give the
+        // aborted task's cleanup tail a chance to run on the current_thread
+        // runtime, then confirm the channel is quiet.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert!(
+            rx.try_recv().is_err(),
+            "cancel must emit exactly one Failed(cancelled) event"
+        );
     }
 
     #[tokio::test]
