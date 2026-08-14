@@ -1274,6 +1274,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             cc.set_config_path(config.config_path.clone());
             cc.set_skill_manager(skills_arc.clone());
             cc.set_provider_registry(registry_arc.clone());
+            cc.set_user_resolver(user_resolver.clone());
 
             // ── WebSocket socket: SO_REUSEPORT / fd inheritance ──────────────
             // Hot switch: reuse the inherited fd so the new process can bind the

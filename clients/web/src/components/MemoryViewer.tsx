@@ -5,11 +5,13 @@ import remarkGfm from 'remark-gfm'
 import { ErrorBanner } from './PageLayout'
 import {
   parseFrontmatter, getStyle, getInjectStyle, formatBytes, extractSeeAlso,
+  type MemoryScope,
 } from '../lib/memoryUtils'
 
 interface Props {
   name: string
   content: string
+  scope?: MemoryScope
   error: string | null
   onEdit: () => void
   onBack: () => void
@@ -18,7 +20,7 @@ interface Props {
   onOpenMemory?: (name: string) => void
 }
 
-export default function MemoryViewer({ name, content, error, onEdit, onBack, onDelete, onOpenMemory }: Props) {
+export default function MemoryViewer({ name, content, scope, error, onEdit, onBack, onDelete, onOpenMemory }: Props) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const parsed = parseFrontmatter(content)
   const style = getStyle(parsed.meta.type)
@@ -68,6 +70,18 @@ export default function MemoryViewer({ name, content, error, onEdit, onBack, onD
               >
                 Inject · {injectStyle.label}
               </span>
+              {scope && (
+                <span
+                  className={`text-xs font-semibold tracking-wide px-2.5 py-1 rounded-full ${
+                    scope === 'user'
+                      ? 'bg-sky-500/10 text-sky-300 border border-sky-500/20'
+                      : 'bg-zinc-500/10 text-zinc-300 border border-zinc-600/30'
+                  }`}
+                  title={scope === 'user' ? 'Stored in your private memory layer' : 'Stored in the shared agent memory layer'}
+                >
+                  {scope === 'user' ? '👤 My Memory' : '🤖 Agent Shared'}
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-3 text-xs text-zinc-500 font-mono">
               {parsed.meta.updated_at || parsed.meta.created_at ? (

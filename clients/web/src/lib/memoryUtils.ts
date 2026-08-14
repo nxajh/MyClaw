@@ -1,5 +1,7 @@
 export type MemType = 'user' | 'feedback' | 'rule' | 'project' | 'reference'
 export type InjectPolicy = 'always' | 'search'
+/** Storage layer: shared agent memory vs the current user's private layer. */
+export type MemoryScope = 'agent' | 'user'
 
 export interface MemoryFile {
   name: string
@@ -10,6 +12,8 @@ export interface MemoryFile {
   type?: string
   /** Injection policy: always → system-reminder every turn; search → on-demand only */
   inject?: InjectPolicy | string
+  /** Storage layer this entry lives in (agent = shared, user = per-user). */
+  scope?: MemoryScope
   link_count?: number
   backlink_count?: number
   created_at?: string

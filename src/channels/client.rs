@@ -186,6 +186,9 @@ pub struct ClientChannel {
     skill_manager: Arc<OnceLock<Arc<RwLock<crate::agents::SkillManager>>>>,
     /// Service registry for models API (set once after construction).
     provider_registry: Arc<OnceLock<Arc<dyn crate::providers::ProviderRegistry>>>,
+    /// Shared user resolver (routing_key → user_id) for per-user memory
+    /// paths in the management API (set once after construction).
+    user_resolver: Arc<OnceLock<Arc<crate::agents::UserResolver>>>,
 }
 
 impl ClientChannel {
@@ -205,6 +208,7 @@ impl ClientChannel {
             config_path: Arc::new(OnceLock::new()),
             skill_manager: Arc::new(OnceLock::new()),
             provider_registry: Arc::new(OnceLock::new()),
+            user_resolver: Arc::new(OnceLock::new()),
         }
     }
 
@@ -242,6 +246,12 @@ impl ClientChannel {
     /// Set the service registry (called from daemon.rs after construction).
     pub fn set_provider_registry(&self, sr: Arc<dyn crate::providers::ProviderRegistry>) {
         let _ = self.provider_registry.set(sr);
+    }
+
+    /// Set the shared user resolver (routing_key → user_id), called from
+    /// daemon.rs after construction. Enables per-user memory paths.
+    pub fn set_user_resolver(&self, resolver: Arc<crate::agents::UserResolver>) {
+        let _ = self.user_resolver.set(resolver);
     }
 
     /// Start the WebSocket server (spawns a background task).
@@ -286,6 +296,7 @@ impl ClientChannel {
         let config_path = self.config_path.clone();
         let skill_manager = self.skill_manager.clone();
         let provider_registry = self.provider_registry.clone();
+        let user_resolver = self.user_resolver.clone();
 
         let local_addr = listener.local_addr()?;
         tracing::info!("WebSocket server listening on ws://{}/myclaw", local_addr);
@@ -373,6 +384,7 @@ impl ClientChannel {
                         let config_path_clone = config_path.clone();
                         let skill_manager_clone = skill_manager.clone();
                         let provider_registry_clone = provider_registry.clone();
+                        let user_resolver_clone = user_resolver.clone();
                         let auth_token_clone = auth_token.clone();
 
                         tracing::info!(
@@ -883,6 +895,7 @@ impl ClientChannel {
                                                     config_path: &config_path_clone,
                                                     skill_manager: &skill_manager_clone,
                                                     provider_registry: &provider_registry_clone,
+                                                    user_resolver: &user_resolver_clone,
                                                 },
                                             );
                                             let _ = ws_sender.send(resp).await;
@@ -1180,6 +1193,34 @@ struct ApiContext<'a> {
     config_path: &'a Arc<OnceLock<std::path::PathBuf>>,
     skill_manager: &'a Arc<OnceLock<Arc<RwLock<crate::agents::SkillManager>>>>,
     provider_registry: &'a Arc<OnceLock<Arc<dyn crate::providers::ProviderRegistry>>>,
+    user_resolver: &'a Arc<OnceLock<Arc<crate::agents::UserResolver>>>,
+}
+
+/// Resolve the memory directory for a scope:
+/// - "agent" → `{workspace}/memory` (shared, cross-user layer)
+/// - "user"  → `{workspace}/users/{uid}/memory` (per-user layer)
+fn memory_scope_dir(
+    workspace: &std::path::Path,
+    scope: &str,
+    uid: &str,
+) -> std::path::PathBuf {
+    if scope == "user" {
+        workspace
+            .join("users")
+            .join(uid)
+            .join(crate::memory::MEMORY_DIR_NAME)
+    } else {
+        workspace.join(crate::memory::MEMORY_DIR_NAME)
+    }
+}
+
+/// Resolve the request's user_id via the shared resolver (routing_key → uid).
+/// Falls back to the raw routing key when no resolver is installed.
+fn memory_user_id(ctx: &ApiContext<'_>) -> String {
+    ctx.user_resolver
+        .get()
+        .map(|r| r.resolve(ctx.user_id))
+        .unwrap_or_else(|| ctx.user_id.to_string())
 }
 
 /// Route a management API request and return a JSON response string.
@@ -1404,12 +1445,32 @@ fn handle_api_request(
         }
 
         "memory.list" => {
+            let scope = params["scope"].as_str().unwrap_or("all");
             match ctx.workspace_dir.get() {
                 Some(dir) => {
-                    let memory_dir = dir.join("memory");
-                    let files = crate::memory::scan_memory_files(&memory_dir);
-                    let backlinks = crate::memory::build_backlinks(&files);
-                    let result: Vec<serde_json::Value> = files.iter().map(|f| {
+                    let uid = memory_user_id(ctx);
+                    // Collect (scope, file) rows; agent layer first so a
+                    // same-named agent entry wins dedup (matches scan_merged).
+                    let mut rows: Vec<(&str, crate::memory::MemoryFile)> = Vec::new();
+                    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    if scope == "all" || scope == "agent" {
+                        for f in crate::memory::scan_memory_files(&memory_scope_dir(dir, "agent", &uid)) {
+                            if seen.insert(f.name.clone()) {
+                                rows.push(("agent", f));
+                            }
+                        }
+                    }
+                    if scope == "all" || scope == "user" {
+                        for f in crate::memory::scan_memory_files(&memory_scope_dir(dir, "user", &uid)) {
+                            if seen.insert(f.name.clone()) {
+                                rows.push(("user", f));
+                            }
+                        }
+                    }
+                    let all_files: Vec<crate::memory::MemoryFile> =
+                        rows.iter().map(|(_, f)| f.clone()).collect();
+                    let backlinks = crate::memory::build_backlinks(&all_files);
+                    let result: Vec<serde_json::Value> = rows.iter().map(|(scope_name, f)| {
                         let bl_count = backlinks.get(&f.name).map(|b| b.len()).unwrap_or(0);
                         serde_json::json!({
                             "name": f.path.file_name().and_then(|n| n.to_str()).unwrap_or(&f.name).to_string(),
@@ -1419,6 +1480,7 @@ fn handle_api_request(
                             "tags": f.tags,
                             "type": f.mem_type,
                             "inject": f.inject,
+                            "scope": scope_name,
                             "link_count": f.links.len(),
                             "backlink_count": bl_count,
                             "created_at": f.created_at,
@@ -1448,10 +1510,15 @@ fn handle_api_request(
             if filename.contains('/') || filename.contains('\\') || filename.starts_with('.') {
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid filename" }).to_string();
             }
+            let scope = match params["scope"].as_str() {
+                Some("user") => "user",
+                _ => "agent",
+            };
             let content = params["content"].as_str().unwrap_or("");
             match ctx.workspace_dir.get() {
                 Some(dir) => {
-                    let memory_dir = dir.join("memory");
+                    let uid = memory_user_id(ctx);
+                    let memory_dir = memory_scope_dir(dir, scope, &uid);
                     let _ = std::fs::create_dir_all(&memory_dir);
                     let path = memory_dir.join(filename);
                     match std::fs::write(&path, content) {
@@ -1471,12 +1538,23 @@ fn handle_api_request(
             if filename.contains('/') || filename.contains('\\') || filename.starts_with('.') {
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid filename" }).to_string();
             }
+            let scope = params["scope"].as_str();
             match ctx.workspace_dir.get() {
                 Some(dir) => {
-                    let path = dir.join("memory").join(filename);
-                    match std::fs::remove_file(&path) {
+                    let uid = memory_user_id(ctx);
+                    let try_delete = |scope_name: &str| -> Result<(), String> {
+                        let path = memory_scope_dir(dir, scope_name, &uid).join(filename);
+                        std::fs::remove_file(&path)
+                            .map_err(|e| format!("failed to delete file: {}", e))
+                    };
+                    let result = match scope {
+                        Some("user") => try_delete("user"),
+                        Some("agent") => try_delete("agent"),
+                        _ => try_delete("agent").or_else(|_| try_delete("user")),
+                    };
+                    match result {
                         Ok(()) => serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string(),
-                        Err(e) => serde_json::json!({ "type": "api_error", "id": id, "error": format!("failed to delete file: {}", e) }).to_string(),
+                        Err(e) => serde_json::json!({ "type": "api_error", "id": id, "error": e }).to_string(),
                     }
                 }
                 None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
@@ -1504,17 +1582,31 @@ fn handle_api_request(
             }
             match ctx.workspace_dir.get() {
                 Some(dir) => {
-                    let path = dir.join("memory").join(filename);
-                    match std::fs::read_to_string(&path) {
-                        Ok(content) => serde_json::json!({
+                    let uid = memory_user_id(ctx);
+                    let scope = params["scope"].as_str();
+                    let try_read = |scope_name: &str| -> Option<(String, String)> {
+                        let path = memory_scope_dir(dir, scope_name, &uid).join(&filename);
+                        std::fs::read_to_string(&path)
+                            .ok()
+                            .map(|content| (scope_name.to_string(), content))
+                    };
+                    let found = match scope {
+                        Some("user") => try_read("user"),
+                        Some("agent") => try_read("agent"),
+                        // Backwards-compatible default: agent layer first,
+                        // fall back to the per-user layer.
+                        _ => try_read("agent").or_else(|| try_read("user")),
+                    };
+                    match found {
+                        Some((s, content)) => serde_json::json!({
                             "type": "api_response",
                             "id": id,
-                            "result": { "name": filename, "content": content }
+                            "result": { "name": filename, "content": content, "scope": s }
                         }).to_string(),
-                        Err(e) => serde_json::json!({
+                        None => serde_json::json!({
                             "type": "api_error",
                             "id": id,
-                            "error": format!("failed to read file: {}", e)
+                            "error": format!("failed to read file: {}", filename)
                         }).to_string(),
                     }
                 }
@@ -2016,4 +2108,197 @@ fn reconstruct_history(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::{SessionManager, SkillManager, UserResolver};
+    use crate::providers::capability_tool::ToolSpec;
+    use crate::providers::ProviderRegistry;
+
+    const USER_KEY: &str = "client:default:web-user:default";
+    const USER_UID: &str = "myclaw/u/019fe342-test";
+
+    fn write_mem(path: &std::path::Path, name: &str, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let frontmatter = format!(
+            "---\nname: \"{name}\"\ndescription: \"test entry\"\ntype: \"project\"\ninject: \"search\"\ncreated_at: \"2026-08-14\"\ntags: []\n---\n\n{body}"
+        );
+        std::fs::write(path.join(format!("{name}.md")), frontmatter).unwrap();
+    }
+
+    fn test_workspace() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        // agent (shared) layer
+        write_mem(&ws.join("memory"), "agent_only", "agent body");
+        write_mem(&ws.join("memory"), "shared_name", "AGENT version");
+        // per-user layer
+        let user_mem = ws.join("users").join(USER_UID).join("memory");
+        write_mem(&user_mem, "user_only", "user body");
+        write_mem(&user_mem, "shared_name", "USER version");
+        tmp
+    }
+
+    /// Build an ApiContext with a resolver pinning USER_KEY → USER_UID.
+    fn api(method: &str, params: serde_json::Value, ws: &std::path::Path) -> serde_json::Value {
+        let sm: Arc<OnceLock<Arc<SessionManager>>> = Arc::new(OnceLock::new());
+        let wd: Arc<OnceLock<std::path::PathBuf>> = Arc::new(OnceLock::new());
+        let ur: Arc<OnceLock<Arc<UserResolver>>> = Arc::new(OnceLock::new());
+        let ts: Arc<RwLock<Vec<ToolSpec>>> = Arc::new(RwLock::new(Vec::new()));
+        let cp: Arc<OnceLock<std::path::PathBuf>> = Arc::new(OnceLock::new());
+        let sk: Arc<OnceLock<Arc<RwLock<SkillManager>>>> = Arc::new(OnceLock::new());
+        let pr: Arc<OnceLock<Arc<dyn ProviderRegistry>>> = Arc::new(OnceLock::new());
+        let resolver = Arc::new(UserResolver::new());
+        resolver.set(USER_KEY.to_string(), USER_UID.to_string());
+        let _ = ur.set(resolver);
+        let _ = sm.set(Arc::new(SessionManager::in_memory()));
+        let _ = wd.set(ws.to_path_buf());
+        let ctx = ApiContext {
+            user_id: USER_KEY,
+            session_manager: &sm,
+            tool_specs: &ts,
+            workspace_dir: &wd,
+            config_path: &cp,
+            skill_manager: &sk,
+            provider_registry: &pr,
+            user_resolver: &ur,
+        };
+        let resp = handle_api_request("t1", method, &params, &ctx);
+        serde_json::from_str(&resp).unwrap()
+    }
+
+    fn rows(resp: &serde_json::Value) -> Vec<serde_json::Value> {
+        resp["result"].as_array().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn memory_list_merges_scopes_with_dedup() {
+        let tmp = test_workspace();
+        let resp = api("memory.list", serde_json::json!({}), tmp.path());
+        assert_eq!(resp["type"], "api_response");
+        let r = rows(&resp);
+        // agent_only + user_only + shared_name (agent wins) = 3
+        assert_eq!(r.len(), 3);
+        let shared = r.iter().find(|x| x["mem_name"] == "shared_name").unwrap();
+        assert_eq!(shared["scope"], "agent");
+        assert_eq!(shared["content"], "AGENT version");
+        let user_only = r.iter().find(|x| x["mem_name"] == "user_only").unwrap();
+        assert_eq!(user_only["scope"], "user");
+    }
+
+    #[test]
+    fn memory_list_scope_filter() {
+        let tmp = test_workspace();
+        let resp = api(
+            "memory.list",
+            serde_json::json!({ "scope": "user" }),
+            tmp.path(),
+        );
+        let r = rows(&resp);
+        assert_eq!(r.len(), 2);
+        assert!(r.iter().all(|x| x["scope"] == "user"));
+        let resp_agent = api(
+            "memory.list",
+            serde_json::json!({ "scope": "agent" }),
+            tmp.path(),
+        );
+        let r_agent = rows(&resp_agent);
+        assert_eq!(r_agent.len(), 2);
+        assert!(r_agent.iter().all(|x| x["scope"] == "agent"));
+    }
+
+    #[test]
+    fn memory_read_scope_routing() {
+        let tmp = test_workspace();
+        // No scope: agent layer wins over user layer.
+        let resp = api(
+            "memory.read",
+            serde_json::json!({ "name": "shared_name" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["result"]["content"], "AGENT version");
+        assert_eq!(resp["result"]["scope"], "agent");
+        // Explicit user scope.
+        let resp = api(
+            "memory.read",
+            serde_json::json!({ "name": "shared_name", "scope": "user" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["result"]["content"], "USER version");
+        assert_eq!(resp["result"]["scope"], "user");
+        // User-only entry found via fallback.
+        let resp = api(
+            "memory.read",
+            serde_json::json!({ "name": "user_only" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["result"]["scope"], "user");
+        // Missing entry.
+        let resp = api(
+            "memory.read",
+            serde_json::json!({ "name": "nope" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["type"], "api_error");
+    }
+
+    #[test]
+    fn memory_write_user_scope() {
+        let tmp = test_workspace();
+        let resp = api(
+            "memory.write",
+            serde_json::json!({ "name": "fresh_user.md", "content": "new user body", "scope": "user" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["type"], "api_response");
+        let user_path = tmp
+            .path()
+            .join("users")
+            .join(USER_UID)
+            .join("memory")
+            .join("fresh_user.md");
+        assert_eq!(
+            std::fs::read_to_string(&user_path).unwrap(),
+            "new user body"
+        );
+        // Default scope (agent) does not land in the user dir.
+        let resp = api(
+            "memory.write",
+            serde_json::json!({ "name": "default_scope.md", "content": "body" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["type"], "api_response");
+        assert!(!user_path.exists());
+        assert!(tmp.path().join("memory").join("default_scope.md").exists());
+    }
+
+    #[test]
+    fn memory_delete_scope_routing() {
+        let tmp = test_workspace();
+        // Explicit user scope removes the user-layer copy only.
+        let resp = api(
+            "memory.delete",
+            serde_json::json!({ "name": "shared_name", "scope": "user" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["type"], "api_response");
+        assert!(!tmp
+            .path()
+            .join("users")
+            .join(USER_UID)
+            .join("memory")
+            .join("shared_name.md")
+            .exists());
+        assert!(tmp.path().join("memory").join("shared_name.md").exists());
+        // Default fallback removes the agent-layer copy.
+        let resp = api(
+            "memory.delete",
+            serde_json::json!({ "name": "agent_only" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["type"], "api_response");
+        assert!(!tmp.path().join("memory").join("agent_only.md").exists());
+    }
 }

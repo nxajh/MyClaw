@@ -11,7 +11,7 @@ import MemoryViewer from '../components/MemoryViewer'
 import {
   getStyle, getInjectStyle, normalizeInject,
   collectTypeFilters, typeFilterLabel,
-  type MemoryFile, type InjectPolicy,
+  type MemoryFile, type InjectPolicy, type MemoryScope,
 } from '../lib/memoryUtils'
 
 /** Normalize inject for list rows (API always sends inject; default search if omitted). */
@@ -28,6 +28,15 @@ const INJECT_FILTER_LABELS: Record<InjectFilter, string> = {
   search: 'Search',
 }
 
+const SCOPE_FILTERS = ['all', 'agent', 'user'] as const
+type ScopeFilter = typeof SCOPE_FILTERS[number]
+
+const SCOPE_FILTER_LABELS: Record<ScopeFilter, string> = {
+  all: 'All scopes',
+  agent: 'Agent (shared)',
+  user: 'User (mine)',
+}
+
 export default function Memory() {
   const { status, request } = useWebSocketContext()
   const { toast } = useToast()
@@ -38,8 +47,8 @@ export default function Memory() {
 
   type View =
     | { mode: 'list' }
-    | { mode: 'view'; name: string; content: string }
-    | { mode: 'edit'; name: string; content: string }
+    | { mode: 'view'; name: string; content: string; scope?: MemoryScope }
+    | { mode: 'edit'; name: string; content: string; scope?: MemoryScope }
     | { mode: 'new' }
 
   const [view, setView] = useState<View>({ mode: 'list' })
@@ -47,6 +56,7 @@ export default function Memory() {
   const [searchQuery, setSearchQuery] = useState('')
   const [activeTab, setActiveTab] = useState<string>('all')
   const [injectFilter, setInjectFilter] = useState<InjectFilter>('all')
+  const [scopeFilter, setScopeFilter] = useState<ScopeFilter>('all')
 
   const isEditing = view.mode === 'edit' || view.mode === 'new'
 
@@ -81,12 +91,12 @@ export default function Memory() {
     }
   }, [status, request])
 
-  const openFile = useCallback(async (name: string) => {
+  const openFile = useCallback(async (name: string, scope?: MemoryScope) => {
     setLoadingFile(true)
     setError(null)
     try {
-      const res = await request('memory.read', { name }) as { name: string; content: string }
-      setView({ mode: 'view', name: res.name, content: res.content })
+      const res = await request('memory.read', { name, ...(scope ? { scope } : {}) }) as { name: string; content: string; scope?: MemoryScope }
+      setView({ mode: 'view', name: res.name, content: res.content, scope: res.scope || scope })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       toast(`Failed to open ${name}`, 'error')
@@ -95,14 +105,14 @@ export default function Memory() {
     }
   }, [request, toast])
 
-  const handleSave = useCallback(async (name: string, content: string) => {
+  const handleSave = useCallback(async (name: string, content: string, scope?: MemoryScope) => {
     setSaving(true)
     setError(null)
     try {
-      await request('memory.write', { name, content })
+      await request('memory.write', { name, content, ...(scope ? { scope } : {}) })
       toast('Memory fact saved', 'success')
       await fetchFiles()
-      setView({ mode: 'view', name, content })
+      setView({ mode: 'view', name, content, scope })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       toast('Failed to save memory', 'error')
@@ -111,10 +121,10 @@ export default function Memory() {
     }
   }, [request, fetchFiles, toast])
 
-  const handleDelete = useCallback(async (name: string) => {
+  const handleDelete = useCallback(async (name: string, scope?: MemoryScope) => {
     setError(null)
     try {
-      await request('memory.delete', { name })
+      await request('memory.delete', { name, ...(scope ? { scope } : {}) })
       toast('Memory fact deleted', 'success')
       setView({ mode: 'list' })
       await fetchFiles()
@@ -149,6 +159,7 @@ export default function Memory() {
       const matchesTab = activeTab === 'all' || f.type === activeTab
       const inj = normalizeInject(f.inject)
       const matchesInject = injectFilter === 'all' || inj === injectFilter
+      const matchesScope = scopeFilter === 'all' || (f.scope || 'agent') === scopeFilter
       const q = searchQuery.toLowerCase()
       const matchesSearch =
         !q ||
@@ -158,9 +169,9 @@ export default function Memory() {
         (f.tags && f.tags.some(t => t.toLowerCase().includes(q))) ||
         (f.content || '').toLowerCase().includes(q) ||
         inj.includes(q)
-      return matchesTab && matchesInject && matchesSearch
+      return matchesTab && matchesInject && matchesScope && matchesSearch
     })
-  }, [files, activeTab, injectFilter, searchQuery])
+  }, [files, activeTab, injectFilter, scopeFilter, searchQuery])
 
   // ── View mode: detail viewer ──
   if (view.mode === 'view') {
@@ -172,8 +183,9 @@ export default function Memory() {
         <MemoryViewer
           name={view.name}
           content={view.content}
+          scope={view.scope}
           error={error}
-          onEdit={() => setView({ mode: 'edit', name: view.name, content: view.content })}
+          onEdit={() => setView({ mode: 'edit', name: view.name, content: view.content, scope: view.scope })}
           onBack={backToList}
           onDelete={handleDelete}
           onOpenMemory={openFile}
@@ -192,8 +204,9 @@ export default function Memory() {
         {error && <ErrorBanner message={error} />}
         <MemoryEditor
           initial={view.mode === 'new' ? { name: '', content: '' } : { name: view.name, content: view.content }}
+          initialScope={view.mode === 'new' ? undefined : view.scope}
           onSave={handleSave}
-          onCancel={() => view.mode === 'new' ? backToList() : setView({ mode: 'view', name: view.name, content: view.content })}
+          onCancel={() => view.mode === 'new' ? backToList() : setView({ mode: 'view', name: view.name, content: view.content, scope: view.scope })}
           saving={saving}
         />
       </PageShell>
@@ -205,7 +218,7 @@ export default function Memory() {
     <PageShell>
       <PageHeader
         title="Memory"
-        subtitle={`${files.length} entries · ${alwaysCount} always-injected · type is semantic, inject controls system-reminder`}
+        subtitle={`${files.length} entries · ${alwaysCount} always-injected · ${files.filter(f => (f.scope || 'agent') === 'user').length} user-layer · type is semantic, inject controls system-reminder`}
         icon={<Brain size={18} className="text-violet-400" />}
         actions={
           <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
@@ -255,6 +268,30 @@ export default function Memory() {
         })}
       </div>
 
+      {/* Scope filter — storage layer (agent shared vs per-user) */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-xs text-zinc-500 mr-1">Scope</span>
+        {SCOPE_FILTERS.map(f => {
+          const isActive = scopeFilter === f
+          const count = f === 'all'
+            ? files.length
+            : files.filter(file => (file.scope || 'agent') === f).length
+          const cls = isActive
+            ? 'bg-zinc-800 text-zinc-100 border border-zinc-700/60'
+            : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/30 border border-transparent'
+          return (
+            <button
+              key={f}
+              onClick={() => setScopeFilter(f)}
+              className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all border ${cls}`}
+              title={f === 'agent' ? 'Shared across all users' : f === 'user' ? 'Private to the current user' : undefined}
+            >
+              {SCOPE_FILTER_LABELS[f]} <span className="opacity-50">{count}</span>
+            </button>
+          )
+        })}
+      </div>
+
       <SearchField
         value={searchQuery}
         onChange={setSearchQuery}
@@ -271,7 +308,7 @@ export default function Memory() {
           icon={<Brain size={28} />}
           action={
             files.length > 0 ? (
-              <button onClick={() => { setSearchQuery(''); setActiveTab('all'); setInjectFilter('all') }} className={btnPrimary}>
+              <button onClick={() => { setSearchQuery(''); setActiveTab('all'); setInjectFilter('all'); setScopeFilter('all') }} className={btnPrimary}>
                 Reset filters
               </button>
             ) : (
@@ -294,9 +331,9 @@ export default function Memory() {
             const links = (file.link_count || 0) + (file.backlink_count || 0)
             return (
               <EntityListItem
-                key={file.name}
+                key={`${file.scope || 'agent'}:${file.name}`}
                 density="comfortable"
-                onClick={() => openFile(file.name)}
+                onClick={() => openFile(file.name, file.scope)}
                 leading={
                   <span className="flex flex-col gap-1 shrink-0 items-start">
                     <span className={`text-xs uppercase font-semibold tracking-wider px-2 py-1 rounded-md ${style.badgeBg}`}>
@@ -322,6 +359,9 @@ export default function Memory() {
                 }
                 meta={
                   <span className="flex items-center gap-2">
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${(file.scope || 'agent') === 'user' ? 'bg-sky-500/10 text-sky-300' : 'bg-zinc-500/10 text-zinc-400'}`}>
+                      {(file.scope || 'agent') === 'user' ? '👤 User' : '🤖 Agent'}
+                    </span>
                     {links > 0 && <span className="flex items-center gap-0.5"><Link2 size={11} />{links}</span>}
                     <span>{(file.size / 1024).toFixed(1)} KB</span>
                   </span>

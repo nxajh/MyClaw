@@ -3,7 +3,7 @@ import { Edit3, Loader2, Check, X } from 'lucide-react'
 import { inputCls, btnPrimary, btnGhost } from './PageLayout'
 import {
   parseFrontmatter, getStyle, getInjectStyle, normalizeInject, yamlDoubleQuoted,
-  type MemType, type InjectPolicy,
+  type MemType, type InjectPolicy, type MemoryScope,
 } from '../lib/memoryUtils'
 
 const TYPE_OPTIONS: { value: MemType; label: string }[] = [
@@ -14,6 +14,11 @@ const TYPE_OPTIONS: { value: MemType; label: string }[] = [
   { value: 'reference', label: '📄 External Reference' },
 ]
 
+const SCOPE_OPTIONS: { value: MemoryScope; label: string; desc: string }[] = [
+  { value: 'agent', label: '🤖 Agent (shared)', desc: 'Visible to every user, like the built-in rule set.' },
+  { value: 'user', label: '👤 User (mine)', desc: 'Private to the current user’s layer.' },
+]
+
 const INJECT_OPTIONS: { value: InjectPolicy; label: string }[] = [
   { value: 'search', label: 'Search — on-demand only' },
   { value: 'always', label: 'Always — every conversation' },
@@ -21,12 +26,14 @@ const INJECT_OPTIONS: { value: InjectPolicy; label: string }[] = [
 
 interface Props {
   initial: { name: string; content: string }
-  onSave: (name: string, content: string) => void
+  /** Storage layer for existing entries; undefined for new ones. */
+  initialScope?: MemoryScope
+  onSave: (name: string, content: string, scope: MemoryScope) => void
   onCancel: () => void
   saving: boolean
 }
 
-export default function MemoryEditor({ initial, onSave, onCancel, saving }: Props) {
+export default function MemoryEditor({ initial, initialScope, onSave, onCancel, saving }: Props) {
   const isNew = !initial.name
 
   const parsed = useMemo(() => {
@@ -48,6 +55,7 @@ export default function MemoryEditor({ initial, onSave, onCancel, saving }: Prop
   }, [initial, isNew])
 
   const [name, setName] = useState(isNew ? '' : (parsed.meta.name || initial.name.replace('.md', '')))
+  const [scope, setScope] = useState<MemoryScope>(initialScope || 'agent')
   const [memType, setMemType] = useState<MemType>(parsed.meta.type)
   const [inject, setInject] = useState<InjectPolicy>(normalizeInject(parsed.meta.inject))
   const [description, setDescription] = useState(parsed.meta.description || '')
@@ -78,11 +86,11 @@ ${body.trim()}`
   const handleSave = () => {
     if (editorMode === 'raw') {
       const actualName = isNew ? (name.endsWith('.md') ? name : `${name}.md`) : initial.name
-      onSave(actualName, rawText)
+      onSave(actualName, rawText, scope)
       return
     }
     const cleanName = name.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
-    onSave(`${cleanName}.md`, buildMarkdown())
+    onSave(`${cleanName}.md`, buildMarkdown(), scope)
   }
 
   const handleToggleMode = (mode: 'visual' | 'raw') => {
@@ -131,6 +139,19 @@ ${body.trim()}`
               <label className="text-xs font-semibold text-zinc-400">Name</label>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. delegate_patience" className={inputCls} disabled={!isNew} autoFocus={isNew} />
               <p className="text-xs text-zinc-500">Unique key using only a-z, 0-9, _, -</p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-zinc-400">Storage</label>
+              <select
+                value={scope}
+                onChange={(e) => setScope(e.target.value as MemoryScope)}
+                disabled={!isNew}
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-sm text-zinc-300 focus:border-zinc-700 outline-none transition-colors duration-150 disabled:opacity-60"
+                title={isNew ? undefined : 'The storage layer of an existing entry cannot be changed here'}
+              >
+                {SCOPE_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+              </select>
+              <p className="text-xs text-zinc-500">{SCOPE_OPTIONS.find(o => o.value === scope)?.desc}</p>
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400">Type</label>
