@@ -154,7 +154,7 @@ pub struct DelegationNotice {
 #[derive(Debug, Clone)]
 pub enum TerminalRecord {
     /// 首次记录：结果已写入 suspension，调用方应发送通知
-    Recorded(TurnSuspension),
+    Recorded(Box<TurnSuspension>),
     /// 该 sub_session_id 已记录过（幂等命中）：调用方应跳过通知
     Duplicate,
     /// 会话没有活跃 suspension（父代理未被挂起等待）
@@ -489,7 +489,7 @@ impl SessionContext {
         // Persist after the guard drops — persist_suspension re-locks the
         // same std Mutex (not reentrant).
         self.persist_suspension();
-        TerminalRecord::Recorded(snapshot)
+        TerminalRecord::Recorded(Box::new(snapshot))
     }
 
     /// 方案 C (RFC §3.4): clear the suspension once every pending task has
