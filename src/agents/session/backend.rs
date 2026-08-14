@@ -328,6 +328,21 @@ impl SessionBackend for InMemoryBackend {
         Ok(())
     }
 
+    fn load_delegation_checkpoint(&self, sub_session_id: &str) -> Option<crate::storage::DelegationCheckpoint> {
+        self.checkpoints.read().get(sub_session_id).cloned()
+    }
+
+    fn update_delegation_checkpoint_status(
+        &self,
+        sub_session_id: &str,
+        status: &str,
+    ) -> std::io::Result<()> {
+        if let Some(mut cp) = self.checkpoints.write().get_mut(sub_session_id) {
+            cp.status = status.to_string();
+        }
+        Ok(())
+    }
+
     fn delete_delegation_checkpoint(&self, sub_session_id: &str) -> std::io::Result<()> {
         self.checkpoints.write().remove(sub_session_id);
         Ok(())

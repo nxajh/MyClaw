@@ -1217,16 +1217,36 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Correlate: unfinished sub-agents that have a matching checkpoint are
     // confirmed resumable (clean shutdown). Those WITHOUT a checkpoint are
     // crash remnants — log them at warn level so operators can distinguish.
-    // Both sides key on the sub-session id (the checkpoint primary key).
+    // Checkpoints carrying a terminal status (方案 A tombstone) are neither:
+    // the task already finished and `run_startup` skips it. Both sides key on
+    // the sub-session id (the checkpoint primary key).
     let checkpoint_sub_session_ids: std::collections::HashSet<&str> =
         checkpoints.iter().map(|c| c.sub_session_id.as_str()).collect();
+    let terminal_sub_session_ids: std::collections::HashSet<&str> = checkpoints
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.status.as_str(),
+                "completed" | "failed" | "timed_out" | "cancelled"
+            )
+        })
+        .map(|c| c.sub_session_id.as_str())
+        .collect();
     for sa in &unfinished_subagents {
         if checkpoint_sub_session_ids.contains(sa.sub_session_id.as_str()) {
-            tracing::info!(
-                agent = %sa.agent_name,
-                session_id = %sa.sub_session_id,
-                "resumable sub-agent (checkpointed — clean shutdown)"
-            );
+            if terminal_sub_session_ids.contains(sa.sub_session_id.as_str()) {
+                tracing::info!(
+                    agent = %sa.agent_name,
+                    session_id = %sa.sub_session_id,
+                    "unfinished sub-agent with terminal checkpoint (tombstone — skipped on recovery)"
+                );
+            } else {
+                tracing::info!(
+                    agent = %sa.agent_name,
+                    session_id = %sa.sub_session_id,
+                    "resumable sub-agent (checkpointed — clean shutdown)"
+                );
+            }
         } else {
             tracing::warn!(
                 agent = %sa.agent_name,

@@ -1201,6 +1201,40 @@ impl SessionBackend for JsonFileBackend {
         Ok(())
     }
 
+    fn load_delegation_checkpoint(&self, sub_session_id: &str) -> Option<crate::storage::DelegationCheckpoint> {
+        let path = self.delegation_checkpoint_path(sub_session_id);
+        if !path.exists() {
+            return None;
+        }
+        let bytes = fs::read(&path).ok()?;
+        match serde_json::from_slice::<crate::storage::DelegationCheckpoint>(&bytes) {
+            Ok(cp) => Some(cp),
+            Err(e) => {
+                tracing::warn!(
+                    path = ?path,
+                    err = %e,
+                    "load delegation checkpoint: corrupt entry, ignoring"
+                );
+                None
+            }
+        }
+    }
+
+    fn update_delegation_checkpoint_status(
+        &self,
+        sub_session_id: &str,
+        status: &str,
+    ) -> std::io::Result<()> {
+        let Some(mut cp) = self.load_delegation_checkpoint(sub_session_id) else {
+            // No checkpoint (e.g. the crash happened before spawn finished) —
+            // nothing to tombstone; the recovery path treats missing
+            // checkpoints as crash remnants and resumes them.
+            return Ok(());
+        };
+        cp.status = status.to_string();
+        self.save_delegation_checkpoint(&cp)
+    }
+
     fn load_delegation_checkpoints(&self) -> Vec<crate::storage::DelegationCheckpoint> {
         let dir = self.root.join("delegations");
         let Ok(entries) = fs::read_dir(&dir) else {

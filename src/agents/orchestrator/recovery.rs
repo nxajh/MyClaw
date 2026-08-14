@@ -146,6 +146,26 @@ fn should_recover_active_session(
 /// resumed turn. Inactive sessions are left for the normal message path.
 ///
 /// Sub-agents: resume via `run_recovery` and emit the terminal event.
+
+/// Whether a persisted `DelegationCheckpoint.status` is a terminal tombstone
+/// (方案 A): the sub-agent's lifecycle already ended (Completed / Failed /
+/// TimedOut / Cancelled) and the parent side received the terminal event, so
+/// startup must NOT resume it — re-running would duplicate the work. Only
+/// "running" / "checkpointed" checkpoints are resumable; a missing checkpoint
+/// is a crash remnant.
+fn is_terminal_checkpoint_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "timed_out" | "cancelled")
+}
+
+/// Collect the sub-session ids whose checkpoint is a terminal tombstone.
+fn terminal_checkpoint_ids(checkpoints: &[crate::storage::DelegationCheckpoint]) -> std::collections::HashSet<String> {
+    checkpoints
+        .iter()
+        .filter(|cp| is_terminal_checkpoint_status(&cp.status))
+        .map(|cp| cp.sub_session_id.clone())
+        .collect()
+}
+
 pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSubAgent]) {
     let sessions = Arc::clone(&ctx.sessions);
     let _runtime = ctx.runtime.clone();
@@ -153,6 +173,16 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
     let delegator = ctx.delegator.clone();
     let _turn_tracker = ctx.turn_tracker.clone();
     let backend = Arc::clone(sessions.backend());
+
+    // 方案 A: sub-agents whose durable checkpoint carries a terminal status
+    // (tombstone) already finished their lifecycle — the parent received the
+    // terminal event before the daemon died. Exclude them from recovery AND
+    // from the `covered` set (their terminal event will NOT be re-emitted, so
+    // a parent suspension still holding such a pending task must fall through
+    // to the uncovered-fail backstop and let the parent re-decide on the next
+    // turn).
+    let terminal_ids: std::collections::HashSet<String> =
+        terminal_checkpoint_ids(&backend.load_delegation_checkpoints());
 
     // P1-1: sessions with a persisted non-empty suspension (daemon died while
     // a turn was suspended). These are excluded from the incomplete-turn
@@ -174,9 +204,15 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
 
     // Sub-session ids (FQID) the sub-agent recovery loop below will complete:
     // their terminal events arrive through the normal wake path, so
-    // `recover_suspension` must not fail them.
-    let covered: std::collections::HashSet<String> =
-        unfinished.iter().map(|sa| sa.sub_session_id.clone()).collect();
+    // `recover_suspension` must not fail them. Terminal tombstones are
+    // EXCLUDED — their terminal event is not re-emitted, so a parent
+    // suspension still holding such a pending task must fall through to the
+    // uncovered-fail backstop below instead of waiting forever.
+    let covered: std::collections::HashSet<String> = unfinished
+        .iter()
+        .filter(|sa| !terminal_ids.contains(&sa.sub_session_id))
+        .map(|sa| sa.sub_session_id.clone())
+        .collect();
 
     // Recover only the active session for each routing key. Inactive sessions
     // resume when the user switches back and sends a normal message.
@@ -222,6 +258,26 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
     for sa in unfinished {
         if sa.sub_session_id.is_empty() || sa.parent_session_id.is_empty() {
             tracing::debug!(session_id = %sa.sub_session_id, "sub-agent recovery: skipping (no sub_session_id or parent_session_id)");
+            continue;
+        }
+
+        // 方案 A tombstone: a terminal checkpoint means the sub-agent's
+        // lifecycle already ended (the parent received its terminal event
+        // before the daemon died) and only the mid-turn history remains.
+        // Resuming would RE-RUN the finished task — instead skip it, remove
+        // the tombstone (the sub-session history is kept for reference), and
+        // emit nothing: `covered` already excludes this id, so a parent
+        // suspension still holding the pending task falls through to the
+        // uncovered-fail backstop and re-decides on the next turn.
+        if terminal_ids.contains(&sa.sub_session_id) {
+            tracing::info!(
+                session_id = %sa.sub_session_id,
+                agent = %sa.agent_name,
+                "sub-agent startup recovery: terminal checkpoint tombstone — skipping resume"
+            );
+            if let Err(e) = backend.delete_delegation_checkpoint(&sa.sub_session_id) {
+                tracing::warn!(session_id = %sa.sub_session_id, err = %e, "cleanup terminal tombstone failed");
+            }
             continue;
         }
 
@@ -692,6 +748,39 @@ mod tests {
             "test",
             3,
         ))
+    }
+
+    /// 方案 A: only terminal checkpoint statuses are classified as tombstones
+    /// (excluded from startup recovery); running/checkpointed are resumable.
+    #[test]
+    fn terminal_checkpoint_ids_filters_terminal_statuses() {
+        use crate::storage::DelegationCheckpoint;
+        let mk = |id: &str, status: &str| DelegationCheckpoint {
+            parent_session_id: "test/s/p".to_string(),
+            sub_session_id: id.to_string(),
+            agent_name: "coder".to_string(),
+            status: status.to_string(),
+            started_at: chrono::Utc::now(),
+            timeout_secs: 300,
+            allowed_tools: None,
+            last_checkpoint: None,
+        };
+        let cps = vec![
+            mk("s/running", "running"),
+            mk("s/checkpointed", "checkpointed"),
+            mk("s/completed", "completed"),
+            mk("s/failed", "failed"),
+            mk("s/timed_out", "timed_out"),
+            mk("s/cancelled", "cancelled"),
+            mk("s/unknown", "bogus"),
+        ];
+        let ids = terminal_checkpoint_ids(&cps);
+        for terminal in ["s/completed", "s/failed", "s/timed_out", "s/cancelled"] {
+            assert!(ids.contains(terminal), "{terminal} should be terminal");
+        }
+        for resumable in ["s/running", "s/checkpointed", "s/unknown"] {
+            assert!(!ids.contains(resumable), "{resumable} should NOT be terminal");
+        }
     }
 
     /// P2 (2026-08-13, RFC delegation-notice-queue §5): entries whose parent

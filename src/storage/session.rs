@@ -376,8 +376,9 @@ pub trait SessionBackend: Send + Sync {
     }
 
     /// Persist (or update) a durable delegation checkpoint. Called when a
-    /// background task spawns and during shutdown. Terminal cleanup uses
-    /// `delete_delegation_checkpoint`.
+    /// background task spawns, during shutdown, and when a terminal status
+    /// rewrites the checkpoint as a tombstone (see
+    /// `update_delegation_checkpoint_status`).
     fn save_delegation_checkpoint(
         &self,
         _checkpoint: &DelegationCheckpoint,
@@ -385,7 +386,25 @@ pub trait SessionBackend: Send + Sync {
         Ok(())
     }
 
-    /// Delete a delegation checkpoint (called after terminal completion).
+    /// Load a single delegation checkpoint by sub-session id.
+    fn load_delegation_checkpoint(&self, _sub_session_id: &str) -> Option<DelegationCheckpoint> {
+        None
+    }
+
+    /// Rewrite a checkpoint's status in place (tombstone semantics): terminal
+    /// cleanup keeps the checkpoint with a terminal status instead of deleting
+    /// it, so a restart can distinguish "already finished, do not resume" from
+    /// "crash remnant, resume". Missing checkpoints are a no-op (idempotent).
+    fn update_delegation_checkpoint_status(
+        &self,
+        _sub_session_id: &str,
+        _status: &str,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Delete a delegation checkpoint (called only after a *Completed*
+    /// terminal state, whose history is complete and never triggers resume).
     fn delete_delegation_checkpoint(&self, _sub_session_id: &str) -> std::io::Result<()> {
         Ok(())
     }

@@ -66,6 +66,21 @@ impl DelegationStatus {
                 | DelegationStatus::Cancelled
         )
     }
+
+    /// Snake-case string form — matches the serde representation and the
+    /// `DelegationCheckpoint.status` field, so persisted statuses can be
+    /// compared/written without going through serde.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DelegationStatus::Running => "running",
+            DelegationStatus::Idle => "idle",
+            DelegationStatus::Completed => "completed",
+            DelegationStatus::Failed => "failed",
+            DelegationStatus::TimedOut => "timed_out",
+            DelegationStatus::Cancelled => "cancelled",
+            DelegationStatus::Checkpointed => "checkpointed",
+        }
+    }
 }
 
 /// Structured error for a sub-agent killed by its wall-clock timeout.

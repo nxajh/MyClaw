@@ -400,14 +400,11 @@ impl DelegationCoordinator {
             parent_session_id
         };
         self.running.remove(sub_session_id);
-        // Delete the durable checkpoint — the task was cancelled by the user.
-        if let Err(e) = self
-            .session_manager
-            .backend()
-            .delete_delegation_checkpoint(sub_session_id)
-        {
-            tracing::warn!(sub_session_id, err = %e, "agent_kill: delete delegation checkpoint failed");
-        }
+        // Tombstone the durable checkpoint — the task was cancelled by the
+        // user. Its sub-session history may be mid-turn, so on restart
+        // `scan_unfinished_subagents` would otherwise re-run it; the terminal
+        // status makes `run_startup` skip it instead.
+        self.persist_terminal_checkpoint(sub_session_id, DelegationStatus::Cancelled);
         if let Some(tx) = self.event_sender() {
             if tx
                 .send(DelegationEvent::Failed {
@@ -808,17 +805,14 @@ impl DelegationCoordinator {
                                     };
                                     // Terminal state reached (merge conflict
                                     // aborts the delegation): sync delegations
-                                    // must clean up their checkpoint here,
+                                    // must tombstone their checkpoint here,
                                     // since the completion branch below is
-                                    // skipped by this early return.
+                                    // skipped by this early return. The
+                                    // sub-session history is mid-turn, so a
+                                    // deleted checkpoint would let a restart
+                                    // re-run the failed task.
                                     if !is_async_delegation {
-                                        if let Err(e) = self
-                                            .session_manager
-                                            .backend()
-                                            .delete_delegation_checkpoint(&sub_session_id)
-                                        {
-                                            tracing::warn!(sub_session_id = %sub_session_id, err = %e, "delete delegation checkpoint failed");
-                                        }
+                                        self.persist_terminal_checkpoint(&sub_session_id, DelegationStatus::Failed);
                                     }
                                     return Err(anyhow::anyhow!(
                                         "sub-agent '{}' completed but merge failed (conflict). Worktree preserved at {}.{}",
@@ -929,26 +923,65 @@ impl DelegationCoordinator {
                 }
             }
 
-            // Sync delegations (no inbox): delete the durable checkpoint here.
+            // Sync delegations (no inbox): settle the durable checkpoint here.
             // The task has reached a terminal state (Ok or Err — both are
-            // terminal), so there is nothing to resume on restart. The async
-            // path keeps its checkpoint until the spawn task body has
-            // broadcast the terminal event (`spawn_delegate_async` deletes it
+            // terminal). Completed (Ok) deletes it: the result was returned to
+            // the parent's tool call and the sub-session is GC'd (or its
+            // history is complete), so nothing resumes on restart. Non-OK
+            // terminal states (timed out / failed) keep it as a tombstone with
+            // the terminal status so `run_startup` skips re-running the task.
+            // The async path keeps its checkpoint until the spawn task body has
+            // broadcast the terminal event (`spawn_delegate_async` settles it
             // there); deleting a missing key is idempotent, so the redundant
             // async re-delete is harmless. A crash mid-run still leaves the
             // checkpoint intact for `scan_unfinished_subagents`.
             if !is_async_delegation {
-                if let Err(e) = self
-                    .session_manager
-                    .backend()
-                    .delete_delegation_checkpoint(&sub_session_id)
-                {
-                    tracing::warn!(sub_session_id = %sub_session_id, err = %e, "delete delegation checkpoint failed");
+                if result.is_ok() {
+                    if let Err(e) = self
+                        .session_manager
+                        .backend()
+                        .delete_delegation_checkpoint(&sub_session_id)
+                    {
+                        tracing::warn!(sub_session_id = %sub_session_id, err = %e, "delete delegation checkpoint failed");
+                    }
+                } else {
+                    let terminal = if result
+                        .as_ref()
+                        .err()
+                        .and_then(|e| e.downcast_ref::<DelegationTimeout>())
+                        .is_some()
+                    {
+                        DelegationStatus::TimedOut
+                    } else {
+                        DelegationStatus::Failed
+                    };
+                    self.persist_terminal_checkpoint(&sub_session_id, terminal);
                 }
             }
 
             result
         }) // end Box::pin
+    }
+
+    /// 方案 A tombstone: terminal cleanup rewrites the durable checkpoint's
+    /// status (instead of deleting it) so a restart can tell "already
+    /// finished, do not resume" from "crash remnant, resume". Only a
+    /// *Completed* terminal state deletes the checkpoint — its history is
+    /// complete and never triggers resume. Missing checkpoints are a no-op
+    /// (idempotent; e.g. the crash happened before spawn finished).
+    fn persist_terminal_checkpoint(&self, sub_session_id: &str, status: DelegationStatus) {
+        if let Err(e) = self
+            .session_manager
+            .backend()
+            .update_delegation_checkpoint_status(sub_session_id, status.as_str())
+        {
+            tracing::warn!(
+                sub_session_id = %sub_session_id,
+                status = %status.as_str(),
+                err = %e,
+                "update delegation checkpoint status (tombstone) failed"
+            );
+        }
     }
 
     /// Delegate a task asynchronously — spawns the sub-agent in a
@@ -1120,14 +1153,21 @@ impl DelegationCoordinator {
             // `send_message(recipient=sub_session_id)` will now report the
             // session id as unknown instead of queueing into a dead channel.
             mailboxes.remove(&running_sub_session_id);
-            // Delete the durable checkpoint — the task reached a terminal
-            // state, so there's nothing to resume on restart.
-            if let Err(e) = sub_delegator
-                .session_manager
-                .backend()
-                .delete_delegation_checkpoint(&running_sub_session_id)
-            {
-                tracing::warn!(sub_session_id = %running_sub_session_id, err = %e, "delete delegation checkpoint failed");
+            // Settle the durable checkpoint — the task reached a terminal
+            // state. Completed deletes it (history is complete; nothing
+            // resumes on restart). TimedOut / Failed keep it as a tombstone
+            // with the terminal status so `run_startup` skips re-running the
+            // task whose history is mid-turn.
+            if terminal == DelegationStatus::Completed {
+                if let Err(e) = sub_delegator
+                    .session_manager
+                    .backend()
+                    .delete_delegation_checkpoint(&running_sub_session_id)
+                {
+                    tracing::warn!(sub_session_id = %running_sub_session_id, err = %e, "delete delegation checkpoint failed");
+                }
+            } else {
+                sub_delegator.persist_terminal_checkpoint(&running_sub_session_id, terminal);
             }
         });
 
@@ -1226,10 +1266,24 @@ impl DelegationCoordinator {
             }
             running.remove(&running_sub_session_id);
             mailboxes.remove(&running_sub_session_id);
-            // Delete the durable checkpoint — the recovered task reached a
-            // terminal state.
-            if let Err(e) = backend.delete_delegation_checkpoint(&running_sub_session_id) {
-                tracing::warn!(sub_session_id = %running_sub_session_id, err = %e, "delete delegation checkpoint failed");
+            // Settle the durable checkpoint — the recovered task reached a
+            // terminal state. Completed deletes it (its recovery finished and
+            // the history is now complete). TimedOut / Failed keep it as a
+            // tombstone so a SECOND restart does not re-run the recovery.
+            if terminal == DelegationStatus::Completed {
+                if let Err(e) = backend.delete_delegation_checkpoint(&running_sub_session_id) {
+                    tracing::warn!(sub_session_id = %running_sub_session_id, err = %e, "delete delegation checkpoint failed");
+                }
+            } else if let Err(e) = backend.update_delegation_checkpoint_status(
+                &running_sub_session_id,
+                terminal.as_str(),
+            ) {
+                tracing::warn!(
+                    sub_session_id = %running_sub_session_id,
+                    status = %terminal.as_str(),
+                    err = %e,
+                    "update delegation checkpoint status (tombstone) failed"
+                );
             }
         });
 
@@ -1552,6 +1606,49 @@ mod tests {
         assert_eq!(loaded[0].sub_session_id, "test/s/sub");
         assert_eq!(loaded[0].agent_name, "coder");
         assert_eq!(loaded[0].timeout_secs, 300);
+
+        backend.delete_delegation_checkpoint("test/s/sub").unwrap();
+        assert!(backend.load_delegation_checkpoints().is_empty());
+    }
+
+    /// 方案 A: terminal cleanup rewrites the checkpoint status (tombstone)
+    /// instead of deleting it — single-load roundtrip + status update +
+    /// idempotent update of a missing checkpoint.
+    #[test]
+    fn checkpoint_tombstone_update_via_backend() {
+        let (dc, manager) = coordinator(3);
+        let _ = dc; // not needed — we test the backend directly
+        let backend = manager.backend();
+        let cp = crate::storage::DelegationCheckpoint {
+            parent_session_id: "test/s/parent".to_string(),
+            sub_session_id: "test/s/sub".to_string(),
+            agent_name: "coder".to_string(),
+            status: "running".to_string(),
+            started_at: chrono::Utc::now(),
+            timeout_secs: 300,
+            allowed_tools: Some(vec!["shell".to_string()]),
+            last_checkpoint: None,
+        };
+        backend.save_delegation_checkpoint(&cp).unwrap();
+
+        // Single-load roundtrip.
+        let loaded = backend.load_delegation_checkpoint("test/s/sub").unwrap();
+        assert_eq!(loaded.status, "running");
+        assert!(backend.load_delegation_checkpoint("no-such-session").is_none());
+
+        // Tombstone: the terminal status is persisted, not deleted.
+        backend
+            .update_delegation_checkpoint_status("test/s/sub", "timed_out")
+            .unwrap();
+        let loaded = backend.load_delegation_checkpoint("test/s/sub").unwrap();
+        assert_eq!(loaded.status, "timed_out");
+        assert_eq!(loaded.agent_name, "coder"); // other fields preserved
+        assert_eq!(backend.load_delegation_checkpoints().len(), 1); // still on disk
+
+        // Idempotent: updating a missing checkpoint is a no-op.
+        backend
+            .update_delegation_checkpoint_status("no-such-session", "failed")
+            .unwrap();
 
         backend.delete_delegation_checkpoint("test/s/sub").unwrap();
         assert!(backend.load_delegation_checkpoints().is_empty());
