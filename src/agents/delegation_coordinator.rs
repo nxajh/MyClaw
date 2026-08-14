@@ -2200,7 +2200,7 @@ mod tests {
                 handle,
                 status: std::sync::RwLock::new(DelegationStatus::Running),
                 agent_name: "coder".to_string(),
-                parent_session_id: parent_session_id.clone(),
+                parent_session_id: parent.session_id.clone(),
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
                 timeout_secs: Some(60),
