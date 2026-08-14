@@ -16,6 +16,7 @@ use super::ctx::OrchestratorCtx;
 use super::delegation::{drain_delegation_notices, process_non_active, route_notice};
 use super::key::SessionKey;
 use super::turn::ResolvedTurn;
+use crate::agents::session_context::TerminalRecord;
 use crate::agents::turn::{SubStatus, TurnSuspension};
 use crate::agents::{
     AgentRuntime, DelegationCoordinator, DelegationEvent, DelegationNotice, SessionContext,
@@ -342,12 +343,29 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
                 )
             });
         if let Some(ref delegator) = delegator {
+            // Compute the *remaining* timeout from the durable checkpoint
+            // instead of re-issuing the full wall-clock budget: the sub-agent
+            // already consumed part of its time before the crash, so the
+            // resumed task should not get a fresh full timeout.
+            //
+            // remaining = started_at + timeout_secs - now, clamped to ≥ 1 s.
+            // Falls back to the full `sa.timeout_secs` when no checkpoint is
+            // found (crash remnant) — same budget as the original run.
+            let remaining_secs = backend
+                .load_delegation_checkpoint(&sa.sub_session_id)
+                .map(|cp| {
+                    let elapsed = (chrono::Utc::now() - cp.started_at)
+                        .num_seconds()
+                        .max(0) as u64;
+                    cp.timeout_secs.saturating_sub(elapsed).max(1)
+                })
+                .unwrap_or(sa.timeout_secs);
             delegator.recover_async(
                 sa.sub_session_id.clone(),
                 sa.agent_name.clone(),
                 sa.parent_session_id.clone(),
                 session_ctx,
-                sa.timeout_secs,
+                remaining_secs,
                 sa.allowed_tools.clone(),
             );
         } else {
@@ -674,8 +692,28 @@ async fn recover_suspension(
                 content.push_str(&format!("- {}\n", line));
             }
         }
-        session_ctx.record_terminal(sub_session_id.clone(), SubStatus::Failed, content.clone(), 0);
-        failed.push(content);
+        // 方案4: only include in the failure notice when this is a first
+        // recording. A `Duplicate` (already collected by another path, e.g.
+        // the sub-agent recovery loop's terminal event arriving first) means
+        // the notice must NOT be re-sent — previously the return value was
+        // discarded, causing duplicate failure notices.
+        match session_ctx.record_terminal(
+            sub_session_id.clone(),
+            SubStatus::Failed,
+            content.clone(),
+            0,
+        ) {
+            TerminalRecord::Recorded(_) => {
+                failed.push(content);
+            }
+            TerminalRecord::Duplicate | TerminalRecord::NoSuspension => {
+                tracing::debug!(
+                    sub_session_id = %sub_session_id,
+                    "recover_suspension: already collected or no suspension, skipping failure notice"
+                );
+                continue;
+            }
+        }
     }
 
     // All pending sub-sessions are covered by the sub-agent recovery loop —
@@ -949,6 +987,53 @@ mod tests {
         let snap = sctx.suspension_snapshot().unwrap();
         assert!(snap.results.is_empty());
         assert_eq!(snap.pending.len(), 2);
+    }
+
+    /// 方案4: if a pending task was already collected by the sub-agent
+    /// recovery loop's terminal event (arriving before recover_suspension
+    /// reaches it in the loop), `record_terminal` returns `Duplicate` and the
+    /// task must be skipped — no failure entry, no failure notice. This
+    /// simulates the race by pre-collecting the task, then re-adding it to
+    /// `pending` to mimic a snapshot taken before the terminal arrived.
+    #[tokio::test]
+    async fn recover_suspension_skips_pre_collected_task() {
+        let ctx = Arc::new(test_ctx(vec![]));
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("s1".to_string());
+        sctx.add_pending_task("s2".to_string());
+        // Pre-collect s1 (sub-agent recovery loop won the race)
+        let _ = sctx.record_terminal(
+            "s1".to_string(),
+            SubStatus::Completed,
+            "done by sub-agent".into(),
+            0,
+        );
+        // Re-add s1 to pending — simulates recover_suspension's snapshot
+        // having captured s1 before the terminal event collected it.
+        {
+            let mut guard = sctx.turn_suspension.lock().unwrap();
+            if let Some(s) = guard.as_mut() {
+                s.pending.push("s1".to_string());
+            }
+        }
+        let covered: HashSet<String> = [].into_iter().collect();
+        recover_suspension(&ctx, sctx.clone(), &covered).await;
+        // s1 was already collected → Duplicate → skipped (no Failed entry).
+        let snap = sctx.suspension_snapshot().unwrap();
+        let s1 = snap
+            .results
+            .iter()
+            .find(|r| r.sub_session_id == "s1")
+            .unwrap();
+        assert_eq!(s1.status, SubStatus::Completed);
+        assert_eq!(s1.content, "done by sub-agent");
+        // s2 was uncovered and NOT pre-collected → Failed entry.
+        let s2 = snap
+            .results
+            .iter()
+            .find(|r| r.sub_session_id == "s2")
+            .unwrap();
+        assert_eq!(s2.status, SubStatus::Failed);
     }
 
     #[test]

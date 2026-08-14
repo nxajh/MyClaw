@@ -148,6 +148,19 @@ pub struct DelegationNotice {
     pub silenced_override: Option<bool>,
 }
 
+/// 方案4 (terminal-event idempotency): three-state result of
+/// `record_terminal` — distinguishes a first recording from an idempotent
+/// duplicate hit so callers know whether to send a notification.
+#[derive(Debug, Clone)]
+pub enum TerminalRecord {
+    /// 首次记录：结果已写入 suspension，调用方应发送通知
+    Recorded(TurnSuspension),
+    /// 该 sub_session_id 已记录过（幂等命中）：调用方应跳过通知
+    Duplicate,
+    /// 会话没有活跃 suspension（父代理未被挂起等待）
+    NoSuspension,
+}
+
 /// 单 preview (2026-08-12): RAII guard decrementing the per-session
 /// in-flight notice-turn counter when a delegation-notice turn exits
 /// `process_turn` — on EVERY path (normal end, early return, error). The
@@ -429,19 +442,24 @@ impl SessionContext {
 
     /// 方案 C: collect a terminal event into the suspension — move the task
     /// out of `pending`, fold its suppressed progress reports into the new
-    /// `SubResult`, append to `results` in completion order. Returns the
-    /// updated snapshot when the session is suspended (`None` otherwise);
-    /// callers detect full collection via `snapshot.pending.is_empty()`.
+    /// `SubResult`, append to `results` in completion order. Returns
+    /// [`TerminalRecord::Recorded`] on first collection (callers send the
+    /// notice), [`TerminalRecord::Duplicate`] on an idempotent hit (skip the
+    /// notice), or [`TerminalRecord::NoSuspension`] when no suspension is
+    /// active.
     pub fn record_terminal(
         &self,
         sub_session_id: String,
         status: SubStatus,
         content: String,
         sent_message_count: u64,
-    ) -> Option<TurnSuspension> {
+    ) -> TerminalRecord {
         let snapshot = {
             let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
-            let s = guard.as_mut()?;
+            let s = match guard.as_mut() {
+                Some(s) => s,
+                None => return TerminalRecord::NoSuspension,
+            };
             // Idempotent: if the sub-session was already collected (not in
             // pending and already in results), return the current
             // snapshot without adding a duplicate result entry. This
@@ -450,7 +468,7 @@ impl SessionContext {
             if !s.pending.iter().any(|t| t == &sub_session_id)
                 && s.results.iter().any(|r| r.sub_session_id == sub_session_id)
             {
-                return guard.clone();
+                return TerminalRecord::Duplicate;
             }
             s.pending.retain(|t| t != &sub_session_id);
             let progress = s
@@ -469,7 +487,7 @@ impl SessionContext {
         // Persist after the guard drops — persist_suspension re-locks the
         // same std Mutex (not reentrant).
         self.persist_suspension();
-        snapshot
+        TerminalRecord::Recorded(snapshot)
     }
 
     /// 方案 C (RFC §3.4): clear the suspension once every pending task has
@@ -1558,9 +1576,12 @@ mod suspension_tests {
         let ctx = suspended();
         ctx.add_progress("t1", "working on it");
         ctx.add_progress("t1", "still going");
-        let snap = ctx
+        let snap = match ctx
             .record_terminal("t1".into(), SubStatus::Completed, "summary text".into(), 0)
-            .unwrap();
+        {
+            TerminalRecord::Recorded(s) => s,
+            other => panic!("expected Recorded, got {other:?}"),
+        };
         assert_eq!(snap.results.len(), 1);
         let r = &snap.results[0];
         assert_eq!(r.sub_session_id, "t1");
@@ -1590,13 +1611,53 @@ mod suspension_tests {
     }
 
     #[test]
-    fn record_terminal_without_suspension_returns_none() {
+    fn record_terminal_without_suspension_returns_no_suspension() {
         let (ctx, _m) = make_ctx();
         assert!(ctx.suspension_snapshot().is_none());
         assert!(!ctx.has_pending_delegations());
-        let snap = ctx.record_terminal("t9".into(), SubStatus::Completed, "x".into(), 0);
-        assert!(snap.is_none());
+        let rec = ctx.record_terminal("t9".into(), SubStatus::Completed, "x".into(), 0);
+        assert!(matches!(rec, TerminalRecord::NoSuspension));
         assert!(ctx.suspension_snapshot().is_none());
+    }
+
+    /// 方案4: a second `record_terminal` for the same sub_session_id returns
+    /// `Duplicate` (idempotent hit) — callers must skip the notification.
+    #[test]
+    fn record_terminal_second_call_is_duplicate() {
+        let ctx = suspended();
+        ctx.add_pending_task("t2".to_string()); // keep suspension alive after t1
+        let first = ctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0);
+        assert!(matches!(first, TerminalRecord::Recorded(_)));
+        // Second call: t1 is no longer pending and already in results → Duplicate
+        let second = ctx.record_terminal("t1".into(), SubStatus::Completed, "again".into(), 0);
+        assert!(matches!(second, TerminalRecord::Duplicate));
+        // Results unchanged — no duplicate entry added
+        let snap = ctx.suspension_snapshot().unwrap();
+        assert_eq!(snap.results.len(), 1);
+        assert_eq!(snap.results[0].content, "done");
+    }
+
+    /// 方案4: idempotency survives a daemon restart — a fresh context that
+    /// restores the persisted suspension must still return `Duplicate` for a
+    /// sub_session_id already collected before the crash.
+    #[test]
+    fn record_terminal_duplicate_survives_restart() {
+        let manager = Arc::new(SessionManager::in_memory());
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        ctx.add_pending_task("t1".to_string());
+        ctx.add_pending_task("t2".to_string()); // keep suspension alive
+        let first = ctx.record_terminal("t1".into(), SubStatus::Completed, "pre-crash".into(), 0);
+        assert!(matches!(first, TerminalRecord::Recorded(_)));
+
+        // Simulate restart: drop the context and re-create from the backend.
+        manager.drop_context("mock:default:u1");
+        let ctx2 = manager.get_or_create_context("mock:default:u1");
+        // t1 is already in results (persisted) → second call is Duplicate
+        let replayed = ctx2.record_terminal("t1".into(), SubStatus::Completed, "post-crash".into(), 0);
+        assert!(matches!(replayed, TerminalRecord::Duplicate));
+        let snap = ctx2.suspension_snapshot().unwrap();
+        assert_eq!(snap.results.len(), 1);
+        assert_eq!(snap.results[0].content, "pre-crash");
     }
 
     #[test]
