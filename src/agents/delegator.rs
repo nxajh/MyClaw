@@ -28,6 +28,7 @@ pub trait AgentDelegator: Send + Sync {
         parent_session: &Session,
         timeout: Option<u64>,
         allowed_tools: Option<Vec<String>>,
+        workspace: Option<&str>,
     ) -> anyhow::Result<String>;
 
     /// Spawn the sub-agent in the background and return its `session_id`
@@ -42,6 +43,7 @@ pub trait AgentDelegator: Send + Sync {
         _parent_session: &Session,
         _timeout: Option<u64>,
         _allowed_tools: Option<Vec<String>>,
+        _workspace: Option<&str>,
     ) -> anyhow::Result<String> {
         Err(anyhow::anyhow!("async delegation not supported"))
     }

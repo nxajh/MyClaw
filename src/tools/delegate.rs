@@ -88,6 +88,10 @@ impl Tool for AgentDelegateTool {
                     "items": { "type": "string" },
                     "description": "Optional list of allowed tool names for the sub-agent. If provided, the sub-agent can only use tools in this list (intersected with its config)."
                 },
+                "workspace": {
+                    "type": "string",
+                    "description": "Optional workspace for the sub-agent: the git repository root (absolute path) where the sub-agent works. REQUIRED when the target agent uses worktree isolation — the sub-agent's worktree is created inside this repository and its branch is merged back here on completion. For shared-isolation agents, optional: the sub-agent's working directory is pointed at it."
+                },
                 "timeout": {
                     "type": "integer",
                     "description": "Maximum wall-clock seconds for the sub-agent. Overrides the agent config default (600s). Hard ceiling is 1800s."
@@ -120,6 +124,7 @@ impl Tool for AgentDelegateTool {
             .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
         let mode = args["mode"].as_str().unwrap_or("sync");
         let timeout = args["timeout"].as_u64();
+        let workspace = args["workspace"].as_str();
         let allowed_tools = args["allowed_tools"].as_array().map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -129,7 +134,7 @@ impl Tool for AgentDelegateTool {
         tracing::info!(agent = %agent_name, task_len = task.len(), mode = %mode, timeout = ?timeout, "delegating task to sub-agent");
 
         if mode == "async" {
-            match self.delegator.delegate_async(agent_name, task, session, timeout, allowed_tools.clone()) {
+            match self.delegator.delegate_async(agent_name, task, session, timeout, allowed_tools.clone(), workspace) {
                 Ok(sub_session_id) => Ok(ToolResult {
                     success: true,
                     output: json!({
@@ -148,7 +153,11 @@ impl Tool for AgentDelegateTool {
                 }),
             }
         } else {
-            match self.delegator.delegate(agent_name, task, session, timeout, allowed_tools).await {
+            match self
+                .delegator
+                .delegate(agent_name, task, session, timeout, allowed_tools, workspace)
+                .await
+            {
                 Ok(result) => Ok(ToolResult {
                     success: true,
                     output: result,

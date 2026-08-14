@@ -343,6 +343,13 @@ impl DelegationCoordinator {
 
     /// Remove orphaned worktree directories left behind by crashed or
     /// timed-out sub-agent runs. Called once at daemon startup.
+    ///
+    /// Runs `git -C <dir> worktree remove` from the leftover directory
+    /// itself: git locates the owning repository through the worktree's
+    /// `.git` file (the startup path has no per-agent workspace context, and
+    /// `worktrees_root` itself is not a repository). `worktree remove` also
+    /// clears the worktree metadata in the owning repo, so no separate
+    /// `prune` is needed on the success path.
     pub fn cleanup_stale_worktrees(&self) {
         let entries = match std::fs::read_dir(&self.worktrees_root) {
             Ok(e) => e,
@@ -352,11 +359,11 @@ impl DelegationCoordinator {
         for entry in entries.flatten() {
             let path = entry.path();
             // Each worktree dir is named like `coder_<8hex>`.
-            // `git worktree remove --force` also removes stale git worktree metadata.
+            // `git -C <dir> worktree remove --force` also removes stale git worktree metadata.
             let out = std::process::Command::new("git")
                 .args(["worktree", "remove", "--force"])
                 .arg(&path)
-                .current_dir(&self.worktrees_root)
+                .current_dir(&path)
                 .output();
             let ok = out.as_ref().is_ok_and(|o| o.status.success());
             if !ok {
@@ -365,11 +372,7 @@ impl DelegationCoordinator {
             }
             cleaned += 1;
         }
-        // Also prune stale git worktree metadata.
-        let _ = std::process::Command::new("git")
-            .args(["worktree", "prune"])
-            .current_dir(&self.worktrees_root)
-            .output();
+        tracing::debug!(cleaned, root = %self.worktrees_root.display(), "cleaned stale worktrees");
         if cleaned > 0 {
             tracing::info!(count = cleaned, "cleaned up stale sub-agent worktrees");
         }
@@ -518,6 +521,7 @@ impl DelegationCoordinator {
         timeout_secs: u64,
         inbox: Option<SubAgentMailbox>,
         allowed_tools: Option<Vec<String>>,
+        workspace: Option<&'a str>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -556,8 +560,27 @@ impl DelegationCoordinator {
             );
 
             // --- worktree creation (moved BEFORE prompt so we can inject the path) ---
+            // worktree isolation requires the caller-provided `workspace`
+            // (git repo root): the sub-agent's worktree is created inside
+            // that repository and merged back into it on completion. Never
+            // fall back to the daemon cwd — that is a different repository
+            // (the workspace repo) and produces an empty worktree (bug 2026-08-13).
+            let worktree_repo = match config.isolation {
+                AgentIsolation::Worktree => Some(workspace.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "agent '{}' uses worktree isolation: the 'workspace' parameter \
+                         is required (git repo root where the sub-agent's worktree \
+                         is created and merged back)",
+                        config.name
+                    )
+                })?),
+                AgentIsolation::Shared => None,
+            };
+
             let (worktree_path, cleanup_worktree, branch_name) = match config.isolation {
                 AgentIsolation::Worktree => {
+                    let repo =
+                        worktree_repo.expect("worktree isolation guarantees workspace above");
                     let worktree_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
                     let branch_name = format!("subagent/{}_{}", config.name, worktree_id);
                     let worktree_path = self
@@ -580,6 +603,7 @@ impl DelegationCoordinator {
                             &worktree_path.to_string_lossy(),
                             "HEAD",
                         ])
+                        .current_dir(repo)
                         .output()
                         .map_err(|e| anyhow::anyhow!("failed to run git worktree add: {}", e))?;
 
@@ -600,10 +624,12 @@ impl DelegationCoordinator {
                 AgentIsolation::Shared => (PathBuf::new(), None, None),
             };
 
-            let workspace_dir = if worktree_path.as_os_str().is_empty() {
-                String::new()
-            } else {
+            let workspace_dir = if !worktree_path.as_os_str().is_empty() {
                 worktree_path.to_string_lossy().to_string()
+            } else if let Some(ws) = workspace {
+                ws.to_string()
+            } else {
+                String::new()
             };
 
             let workspace_section = if workspace_dir.is_empty() {
@@ -750,8 +776,11 @@ impl DelegationCoordinator {
 
             // Merge sub-agent branch back into the main branch (if it committed anything).
             if let Some(ref branch_name) = branch_name {
+                let repo =
+                    worktree_repo.expect("worktree isolation guarantees workspace for merge");
                 let diff = std::process::Command::new("git")
                     .args(["log", "--oneline", "HEAD..", branch_name])
+                    .current_dir(repo)
                     .output();
 
                 let has_commits = match diff {
@@ -763,6 +792,7 @@ impl DelegationCoordinator {
                     // Switch back to the previous branch.
                     let checkout = std::process::Command::new("git")
                         .args(["checkout", "@{-1}"])
+                        .current_dir(repo)
                         .output();
 
                     if let Ok(co) = checkout {
@@ -775,6 +805,7 @@ impl DelegationCoordinator {
                                     &format!("merge sub-agent: {}", config.name),
                                     branch_name,
                                 ])
+                                .current_dir(repo)
                                 .output();
 
                             match merge {
@@ -782,6 +813,7 @@ impl DelegationCoordinator {
                                     // Capture conflicted files for diagnostics.
                                     let conflicts = std::process::Command::new("git")
                                         .args(["diff", "--name-only", "--diff-filter=U"])
+                                        .current_dir(repo)
                                         .output();
                                     let conflict_files = match conflicts {
                                         Ok(c) => String::from_utf8_lossy(&c.stdout)
@@ -797,6 +829,7 @@ impl DelegationCoordinator {
                                     );
                                     let _ = std::process::Command::new("git")
                                         .args(["merge", "--abort"])
+                                        .current_dir(repo)
                                         .output();
                                     let detail = if conflict_files.is_empty() {
                                         String::new()
@@ -844,6 +877,8 @@ impl DelegationCoordinator {
             // Cleanup worktree + branch on any exit path.
             // (Merge conflicts already returned early above, preserving the worktree.)
             if cleanup_worktree.is_some() {
+                let repo =
+                    worktree_repo.expect("worktree isolation guarantees workspace for cleanup");
                 let _ = std::process::Command::new("git")
                     .args([
                         "worktree",
@@ -851,10 +886,12 @@ impl DelegationCoordinator {
                         "--force",
                         &worktree_path.to_string_lossy(),
                     ])
+                    .current_dir(repo)
                     .output();
                 if let Some(ref bn) = branch_name {
                     let _ = std::process::Command::new("git")
                         .args(["branch", "-D", bn])
+                        .current_dir(repo)
                         .output();
                 }
                 tracing::debug!(path = %worktree_path.display(), "cleaned up worktree and branch");
@@ -994,6 +1031,7 @@ impl DelegationCoordinator {
         parent_session_id: &str,
         timeout_secs: u64,
         allowed_tools: Option<Vec<String>>,
+        workspace: Option<&str>,
     ) -> anyhow::Result<String> {
         let agent = self.find_agent(agent_name).ok_or_else(|| {
             let available = self.configs.names();
@@ -1044,6 +1082,7 @@ impl DelegationCoordinator {
         let sub_delegator = self.clone();
         let task_owned = task.to_string();
         let parent_session_id_owned = parent_session_id.to_string();
+        let workspace_owned = workspace.map(|s| s.to_string());
         let event_tx = self.event_sender();
         let sub_session_id_clone = sub_session_id.clone();
         let agent_name_owned = agent_name.to_string();
@@ -1073,6 +1112,7 @@ impl DelegationCoordinator {
                     timeout_secs,
                     Some(mailbox),
                     allowed_tools,
+                    workspace_owned.as_deref(),
                 )
                 .await;
 
@@ -1315,6 +1355,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         parent_session: &super::session::Session,
         timeout: Option<u64>,
         allowed_tools: Option<Vec<String>>,
+        workspace: Option<&str>,
     ) -> anyhow::Result<String> {
         let config_timeout = self
             .find_agent(agent_name)
@@ -1334,6 +1375,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
             timeout_secs,
             None,
             allowed_tools,
+            workspace,
         )
         .await
     }
@@ -1345,12 +1387,20 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         parent_session: &super::session::Session,
         timeout: Option<u64>,
         allowed_tools: Option<Vec<String>>,
+        workspace: Option<&str>,
     ) -> anyhow::Result<String> {
         let config_timeout = self
             .find_agent(agent_name)
             .and_then(|a| a.config.timeout);
         let timeout_secs = resolve_timeout(timeout, config_timeout);
-        self.spawn_delegate_async(agent_name, task, &parent_session.id, timeout_secs, allowed_tools)
+        self.spawn_delegate_async(
+            agent_name,
+            task,
+            &parent_session.id,
+            timeout_secs,
+            allowed_tools,
+            workspace,
+        )
     }
 
     fn list_available(&self) -> Vec<(String, Option<String>)> {
@@ -1501,7 +1551,7 @@ mod tests {
         let parent = manager.get_or_create_context("mock:default:u1");
         let parent_id = parent.session_id.clone();
         let sub_session_id = dc
-            .spawn_delegate_async("coder", "do the thing", &parent_id, 60, None)
+            .spawn_delegate_async("coder", "do the thing", &parent_id, 60, None, None)
             .unwrap();
         assert!(
             sub_session_id.contains("/s/"),
@@ -1521,7 +1571,7 @@ mod tests {
         let (dc, manager) = coordinator(1);
         let parent = manager.get_or_create_context("mock:default:u1");
         let err = dc
-            .spawn_delegate_async("coder", "task", &parent.session_id, 60, None)
+            .spawn_delegate_async("coder", "task", &parent.session_id, 60, None, None)
             .unwrap_err();
         assert!(err.to_string().contains("maximum delegation depth exceeded"));
         assert!(parent.suspension_snapshot().is_none());
@@ -1533,7 +1583,7 @@ mod tests {
         let (dc, manager) = coordinator(3);
         let parent = manager.get_or_create_context("mock:default:u1");
         let err = dc
-            .spawn_delegate_async("nope", "task", &parent.session_id, 60, None)
+            .spawn_delegate_async("nope", "task", &parent.session_id, 60, None, None)
             .unwrap_err();
         assert!(err.to_string().contains("Unknown sub-agent"));
         assert!(dc.running_snapshot().is_empty());
