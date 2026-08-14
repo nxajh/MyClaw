@@ -2121,7 +2121,7 @@ mod tests {
     const USER_UID: &str = "myclaw/u/019fe342-test";
 
     fn write_mem(path: &std::path::Path, name: &str, body: &str) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(path).unwrap();
         let frontmatter = format!(
             "---\nname: \"{name}\"\ndescription: \"test entry\"\ntype: \"project\"\ninject: \"search\"\ncreated_at: \"2026-08-14\"\ntags: []\n---\n\n{body}"
         );
