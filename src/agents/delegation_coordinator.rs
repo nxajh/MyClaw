@@ -2082,6 +2082,23 @@ mod tests {
         let sub_session_id = "test/s/panic-sub".to_string();
         let parent_session_id = parent.session_id.clone();
 
+        // Production path creates a durable checkpoint before spawning;
+        // persist_terminal_checkpoint only updates an existing entry.
+        let checkpoint = crate::storage::DelegationCheckpoint {
+            parent_session_id: parent.session_id.clone(),
+            sub_session_id: sub_session_id.clone(),
+            agent_name: "coder".to_string(),
+            status: "running".to_string(),
+            started_at: chrono::Utc::now(),
+            timeout_secs: 60,
+            allowed_tools: None,
+            last_checkpoint: None,
+        };
+        dc.session_manager
+            .backend()
+            .save_delegation_checkpoint(&checkpoint)
+            .unwrap();
+
         // Set up the coordinator's internal tables just like
         // `spawn_delegate_async` does before spawning.
         let running = Arc::clone(&dc.running);
