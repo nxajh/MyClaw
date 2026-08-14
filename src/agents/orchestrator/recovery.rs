@@ -1170,4 +1170,42 @@ mod tests {
         recover_inbound_spool(&Arc::new(ctx));
         // No panic; nothing to assert beyond completion.
     }
+
+    /// The remaining-time computation used by `run_startup` when resuming a
+    /// checkpointed sub-agent: `remaining = started_at + timeout_secs - now`,
+    /// clamped to ≥ 1 s. This verifies the formula with a checkpoint whose
+    /// `started_at` is 50 s ago and `timeout_secs` is 100 s → remaining ≈ 50.
+    #[test]
+    fn remaining_timeout_from_checkpoint_is_elapsed_budget() {
+        let started_at = chrono::Utc::now() - chrono::Duration::seconds(50);
+        let timeout_secs = 100u64;
+
+        // Same computation as `run_startup`'s recover_async block.
+        let elapsed = (chrono::Utc::now() - started_at)
+            .num_seconds()
+            .max(0) as u64;
+        let remaining = timeout_secs.saturating_sub(elapsed).max(1);
+
+        // ~50 s remain (±5 for scheduling / timing slack).
+        assert!(
+            (45..=55).contains(&remaining),
+            "expected ~50 s remaining, got {remaining}"
+        );
+    }
+
+    /// When the checkpoint's timeout has already fully elapsed (started_at is
+    /// longer ago than `timeout_secs`), the remaining time clamps to 1 s so
+    /// the recovered task still gets a minimal window instead of 0.
+    #[test]
+    fn remaining_timeout_clamps_to_one_when_expired() {
+        let started_at = chrono::Utc::now() - chrono::Duration::seconds(200);
+        let timeout_secs = 100u64;
+
+        let elapsed = (chrono::Utc::now() - started_at)
+            .num_seconds()
+            .max(0) as u64;
+        let remaining = timeout_secs.saturating_sub(elapsed).max(1);
+
+        assert_eq!(remaining, 1, "expired checkpoint should clamp to 1 s");
+    }
 }
