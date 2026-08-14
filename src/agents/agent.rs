@@ -2035,7 +2035,8 @@ mod tests {
             false,
             r#"{"agent":"coder","task":"x","mode":"sync"}"#
         ));
-        // sync mode (default, omitted) → not detected
+        // mode omitted → not detected (tool rejects missing mode since
+        // 2026-08-14 — it became required; the parser treats it as non-async)
         assert!(!is_async_delegate(
             "agent_delegate",
             false,

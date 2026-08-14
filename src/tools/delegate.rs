@@ -40,7 +40,7 @@ impl Tool for AgentDelegateTool {
     fn description(&self) -> &str {
         "Delegate a task to a specialized sub-agent. Each sub-agent has its own system prompt and tool set. \
          Use this to break complex tasks into specialized sub-tasks that are handled by experts. \
-         mode='sync' (default) blocks until the sub-agent finishes; mode='async' returns the sub-agent's session id immediately \
+         mode is REQUIRED: 'sync' blocks until the sub-agent finishes; 'async' returns the sub-agent's session id immediately \
          and the sub-agent runs in the background — you will be notified when it completes."
     }
 
@@ -81,7 +81,7 @@ impl Tool for AgentDelegateTool {
                 "mode": {
                     "type": "string",
                     "enum": ["sync", "async"],
-                    "description": "Execution mode. 'sync' (default) blocks until completion. 'async' runs in the background and returns the sub-agent's session id."
+                    "description": "REQUIRED execution mode. 'sync' blocks until the sub-agent finishes and returns its result. 'async' spawns the sub-agent in the background and returns its session id immediately (results arrive later as a notification)."
                 },
                 "allowed_tools": {
                     "type": "array",
@@ -97,7 +97,7 @@ impl Tool for AgentDelegateTool {
                     "description": "Maximum wall-clock seconds for the sub-agent. Overrides the agent config default (600s). Hard ceiling is 1800s."
                 }
             },
-            "required": ["agent", "task"]
+            "required": ["agent", "task", "mode"]
         });
 
         if !agent_names.is_empty() {
@@ -122,7 +122,7 @@ impl Tool for AgentDelegateTool {
         let task = args["task"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
-        let mode = args["mode"].as_str().unwrap_or("sync");
+        let mode = resolve_mode(&args)?;
         let timeout = args["timeout"].as_u64();
         let workspace = args["workspace"].as_str();
         let allowed_tools = args["allowed_tools"].as_array().map(|arr| {
@@ -170,5 +170,97 @@ impl Tool for AgentDelegateTool {
                 }),
             }
         }
+    }
+}
+
+/// Resolve the required `mode` argument of `agent_delegate`.
+///
+/// 2026-08-14: `mode` became a mandatory parameter — there is no implicit
+/// default anymore (omitting it used to silently mean `sync`, which made
+/// model slips indistinguishable from an explicit choice). Values outside
+/// `{"sync", "async"}` are rejected here as well, mirroring the JSON schema
+/// enum at the execution layer.
+fn resolve_mode(args: &serde_json::Value) -> anyhow::Result<&str> {
+    let mode = args
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .ok_or_else(|| anyhow::anyhow!("'mode' is required ('sync' or 'async')"))?;
+    match mode {
+        "sync" | "async" => Ok(mode),
+        other => anyhow::bail!("invalid mode '{}': must be 'sync' or 'async'", other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mode_is_required_and_validated() {
+        // Both legal values pass.
+        assert_eq!(resolve_mode(&json!({"mode": "sync"})).unwrap(), "sync");
+        assert_eq!(resolve_mode(&json!({"mode": "async"})).unwrap(), "async");
+        // Omitted → error (no implicit default).
+        assert!(resolve_mode(&json!({})).is_err());
+        assert!(resolve_mode(&json!({"agent": "coder", "task": "x"})).is_err());
+        assert!(resolve_mode(&json!({"mode": null})).is_err());
+        // Values outside the enum → error.
+        assert!(resolve_mode(&json!({"mode": "SYNC"})).is_err());
+        assert!(resolve_mode(&json!({"mode": "background"})).is_err());
+        assert!(resolve_mode(&json!({"mode": "auto"})).is_err());
+    }
+
+    /// Minimal delegator stub — only `list_available` is needed by the
+    /// schema test; `delegate` is never called.
+    struct StubDelegator;
+
+    #[async_trait::async_trait]
+    impl AgentDelegator for StubDelegator {
+        async fn delegate(
+            &self,
+            _agent_name: &str,
+            _task: &str,
+            _parent_session: &crate::agents::session::Session,
+            _timeout: Option<u64>,
+            _allowed_tools: Option<Vec<String>>,
+            _workspace: Option<&str>,
+        ) -> anyhow::Result<String> {
+            Err(anyhow::anyhow!("stub"))
+        }
+
+        fn list_available(&self) -> Vec<(String, Option<String>)> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn schema_requires_mode() {
+        let tool = AgentDelegateTool::new(Arc::new(StubDelegator));
+        let schema = tool.parameters_schema();
+
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required list")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            required.contains(&"mode"),
+            "mode must be required: {required:?}"
+        );
+        assert!(required.contains(&"agent"));
+        assert!(required.contains(&"task"));
+
+        // No implicit default: `mode` has no "default" key, only the enum.
+        assert!(schema["properties"]["mode"].get("default").is_none());
+        assert_eq!(
+            schema["properties"]["mode"]["enum"],
+            json!(["sync", "async"])
+        );
+        assert!(schema["properties"]["mode"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("REQUIRED"));
     }
 }
