@@ -57,6 +57,14 @@ fn resolve_timeout(tool_timeout: Option<u64>, config_timeout: Option<u64>) -> u6
     secs.min(SUB_AGENT_TIMEOUT_MAX_SECS)
 }
 
+/// Builds the git branch name used for a sub-agent worktree.
+///
+/// Format: `subagent/{agent_name}_{worktree_id}`, where `worktree_id` is the
+/// caller-provided short identifier (typically the first 8 hex chars of a UUID).
+fn worktree_branch_name(agent_name: &str, worktree_id: &str) -> String {
+    format!("subagent/{}_{}", agent_name, worktree_id)
+}
+
 /// One entry in the coordinator's running table.
 ///
 /// Status transitions:
@@ -582,7 +590,7 @@ impl DelegationCoordinator {
                     let repo =
                         worktree_repo.expect("worktree isolation guarantees workspace above");
                     let worktree_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-                    let branch_name = format!("subagent/{}_{}", config.name, worktree_id);
+                    let branch_name = worktree_branch_name(&config.name, &worktree_id);
                     let worktree_path = self
                         .worktrees_root
                         .join(format!("{}_{}", config.name, worktree_id));
@@ -1755,5 +1763,17 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].sub_session_id, "sub");
         assert_eq!(loaded[0].status, "checkpointed");
+    }
+
+    #[test]
+    fn worktree_branch_name_uses_subagent_prefix() {
+        assert_eq!(
+            worktree_branch_name("coder", "deadbeef"),
+            "subagent/coder_deadbeef"
+        );
+        assert_eq!(
+            worktree_branch_name("main", "01234567"),
+            "subagent/main_01234567"
+        );
     }
 }
