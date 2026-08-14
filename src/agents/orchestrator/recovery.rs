@@ -459,6 +459,11 @@ async fn recover_active_session(
             }
         }
         drop(session);
+        // Fix (2026-08-15): whether the recovery turn ended clean (no
+        // re-delegation) — feeds the user-message drain below, mirroring
+        // `dispatch_turn_spawn`'s tail `!turn.has_pending` guard.
+        let turn_clean = matches!(&result, Ok(None))
+            || matches!(&result, Ok(Some(tr)) if !tr.has_pending);
         match result {
             Ok(Some(tr)) => {
                 tracing::info!(session = %sk, "startup recovery: turn completed");
@@ -482,6 +487,31 @@ async fn recover_active_session(
         };
         if let Err(e) = channel.send_message(&message).await {
             tracing::warn!(session = %sk, err = %e, "startup recovery: deliver failed");
+        }
+    }
+
+    // Fix (2026-08-15, notice-queue starvation after recovery turn): the
+    // recovery turn holds `turn_lock` WITHOUT going through
+    // `dispatch_turn_spawn`, so its end must run the same queue-drain tail —
+    // delegation notices enqueued while the recovery turn ran (`route_notice`
+    // saw a busy lock and queued for a "turn-end drain" that never came)
+    // would otherwise starve forever: the gate in `dispatch_turn_spawn`
+    // keeps queueing every user message while `has_notice_turns_in_flight()`
+    // is true, and no future turn exists to drain the notice queue
+    // (observed 2026-08-14: hot-switch recovery ended 16:13:52 without
+    // draining; "做完了吗"/"？" silently queued, typing TTL'd, never answered).
+    if session_ctx.has_queued_delegation_notices() {
+        super::delegation::drain_delegation_notices(&ctx, &session_ctx.session_id).await;
+    }
+    // Mirror the dispatch tail's user-message drain — ONE queued message,
+    // only outside a suspension sequence (notice turns just spawned keep
+    // the counter > 0; their own dispatch tails drain the rest in order).
+    if turn_clean
+        && !session_ctx.has_pending_delegations()
+        && !session_ctx.has_notice_turns_in_flight()
+    {
+        if let Some(queued) = session_ctx.take_user_message() {
+            super::inbound::dispatch(&ctx, key.account_key(), queued).await;
         }
     }
 
@@ -1207,5 +1237,51 @@ mod tests {
         let remaining = timeout_secs.saturating_sub(elapsed).max(1);
 
         assert_eq!(remaining, 1, "expired checkpoint should clamp to 1 s");
+    }
+
+    /// Fix (2026-08-15, notice-queue starvation): the recovery turn holds
+    /// `turn_lock` without going through `dispatch_turn_spawn`, so its end
+    /// must run the same drain tail — a delegation notice enqueued while the
+    /// recovery turn ran (route_notice saw a busy lock) must be drained when
+    /// the turn ends, not left to starve the dispatch gate forever
+    /// (2026-08-14 hot-switch incident: notices queued at 16:13:37/46 were
+    /// never drained; subsequent user messages were silently queued).
+    #[tokio::test]
+    async fn recovery_turn_end_drains_queued_notices() {
+        use super::super::test_support::MockChannel;
+
+        let channel = MockChannel::new();
+        let ctx = Arc::new(test_ctx(vec![(("mock".into(), "default".into()), channel)]));
+        let key = SessionKey::new("mock", "default", "u1");
+        let sk = key.to_string();
+        // Active session (get_or_create auto-activates) with a materialized
+        // context — mirrors a session mid-recovery at startup.
+        let _ = ctx.sessions.get_or_create(&sk);
+        let sctx = ctx.session_context_for(&sk);
+        // Simulate the incident: a notice enqueued while the recovery turn
+        // held `turn_lock` (silenced_override Some(false) = loud notice,
+        // exactly what route_notice records with no pending delegations).
+        sctx.enqueue_delegation_notice(DelegationNotice {
+            id: "delegation:test-sub".to_string(),
+            content: "[系统通知] 子代理已完成后台任务".to_string(),
+            silenced_override: Some(false),
+        });
+        assert!(sctx.has_queued_delegation_notices());
+
+        recover_active_session(
+            Arc::clone(&ctx),
+            key,
+            crate::channels::MessageReceiver::new("u1"),
+        )
+        .await;
+
+        assert!(
+            !sctx.has_queued_delegation_notices(),
+            "recovery turn end must drain the notice queue"
+        );
+        assert!(
+            sctx.take_delegation_notices().is_empty(),
+            "drained queue must stay empty (notices went to notice turns)"
+        );
     }
 }
