@@ -19,6 +19,7 @@
 
 use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
+use crate::agents::session_context::TerminalRecord;
 use crate::agents::turn::SubStatus;
 use crate::agents::{DelegationEvent, MessageKind, SessionContext};
 use crate::channels::ChannelInboundMessage;
@@ -240,37 +241,52 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             .registered_context_by_session_id(&parent_session_id)
             .or_else(|| ctx.sessions.load_context_by_session_id(&parent_session_id));
         if let Some(sctx) = sctx {
-            if let Some(snap) = sctx.record_terminal(
+            // 方案4 (terminal-event idempotency): only route a notice on first
+            // collection (`Recorded`). A `Duplicate` hit means the same
+            // sub_session_id was already collected (e.g. recover_suspension
+            // injected a failure before the sub-agent's natural terminal
+            // arrived); `NoSuspension` means no active suspension — in both
+            // cases the notice must NOT be re-sent.
+            match sctx.record_terminal(
                 sub_session_id.clone(),
                 status,
                 content.clone(),
                 sent_message_count,
             ) {
-                // RFC §2.3: suppressed progress reports surface as part of
-                // the result entry — append them to the injected content so
-                // the parent sees the task's interim reports together with
-                // its terminal note (they never enter the context otherwise).
-                if let Some(lines) = snap
-                    .results
-                    .iter()
-                    .rev()
-                    .find(|r| r.sub_session_id == sub_session_id)
-                    .map(|r| r.progress.as_slice())
-                    .filter(|p| !p.is_empty())
-                {
-                    let mut enriched = content;
-                    enriched.push_str("\n\n任务过程记录：\n");
-                    for line in lines {
-                        enriched.push_str(&format!("- {}\n", line));
+                TerminalRecord::Recorded(snap) => {
+                    // RFC §2.3: suppressed progress reports surface as part of
+                    // the result entry — append them to the injected content so
+                    // the parent sees the task's interim reports together with
+                    // its terminal note (they never enter the context otherwise).
+                    if let Some(lines) = snap
+                        .results
+                        .iter()
+                        .rev()
+                        .find(|r| r.sub_session_id == sub_session_id)
+                        .map(|r| r.progress.as_slice())
+                        .filter(|p| !p.is_empty())
+                    {
+                        let mut enriched = content;
+                        enriched.push_str("\n\n任务过程记录：\n");
+                        for line in lines {
+                            enriched.push_str(&format!("- {}\n", line));
+                        }
+                        content = enriched;
                     }
-                    content = enriched;
+                    tracing::info!(
+                        sub_session_id = %sub_session_id,
+                        pending = snap.pending.len(),
+                        collected = snap.results.len(),
+                        "suspension updated on terminal event"
+                    );
                 }
-                tracing::info!(
-                    sub_session_id = %sub_session_id,
-                    pending = snap.pending.len(),
-                    collected = snap.results.len(),
-                    "suspension updated on terminal event"
-                );
+                TerminalRecord::Duplicate | TerminalRecord::NoSuspension => {
+                    tracing::debug!(
+                        sub_session_id = %sub_session_id,
+                        "terminal event already recorded, skipping duplicate notice"
+                    );
+                    return;
+                }
             }
         }
     }
@@ -1116,5 +1132,59 @@ mod tests {
         let _ = sctx.take_delegation_notices();
         sctx.clear_suspension_if_collected();
         assert!(sctx.suspension_snapshot().is_none());
+    }
+
+    /// 方案4: a duplicate terminal event (same sub_session_id sent twice via
+    /// `wake`) must only deliver ONE notice. The first `record_terminal`
+    /// returns `Recorded` → route_notice fires; the second returns `Duplicate`
+    /// → `wake` returns early without routing. A second pending task keeps the
+    /// suspension alive so the second call hits the idempotent guard rather
+    /// than `NoSuspension`.
+    #[tokio::test]
+    async fn wake_dedupes_duplicate_terminal_event() {
+        let channel = MockChannel::new();
+        let ctx = test_ctx(vec![(("mock".into(), "default".into()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        // Second pending task keeps the suspension alive after t1 is collected.
+        sctx.add_pending_task("t2".to_string());
+        let sid = sctx.session_id.clone();
+
+        // First wake: record_terminal → Recorded → notice routed.
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid.clone(),
+                summary: "done".to_string(),
+                duration_secs: 1,
+                sent_message_count: 0,
+            },
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let count_after_first = channel.sent.lock().unwrap().len();
+        assert!(
+            count_after_first > 0,
+            "first wake should deliver a notice"
+        );
+
+        // Second wake (same t1): record_terminal → Duplicate → no notice.
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                summary: "done again".to_string(),
+                duration_secs: 1,
+                sent_message_count: 0,
+            },
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let count_after_second = channel.sent.lock().unwrap().len();
+        assert_eq!(
+            count_after_second, count_after_first,
+            "duplicate wake must not deliver another notice"
+        );
     }
 }
