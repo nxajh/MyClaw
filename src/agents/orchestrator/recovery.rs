@@ -146,7 +146,7 @@ fn should_recover_active_session(
 /// resumed turn. Inactive sessions are left for the normal message path.
 ///
 /// Sub-agents: resume via `run_recovery` and emit the terminal event.
-
+///
 /// Whether a persisted `DelegationCheckpoint.status` is a terminal tombstone
 /// (方案 A): the sub-agent's lifecycle already ended (Completed / Failed /
 /// TimedOut / Cancelled) and the parent side received the terminal event, so

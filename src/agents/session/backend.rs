@@ -337,7 +337,7 @@ impl SessionBackend for InMemoryBackend {
         sub_session_id: &str,
         status: &str,
     ) -> std::io::Result<()> {
-        if let Some(mut cp) = self.checkpoints.write().get_mut(sub_session_id) {
+        if let Some(cp) = self.checkpoints.write().get_mut(sub_session_id) {
             cp.status = status.to_string();
         }
         Ok(())
