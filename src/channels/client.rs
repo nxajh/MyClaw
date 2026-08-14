@@ -1585,7 +1585,7 @@ fn handle_api_request(
                     let uid = memory_user_id(ctx);
                     let scope = params["scope"].as_str();
                     let try_read = |scope_name: &str| -> Option<(String, String)> {
-                        let path = memory_scope_dir(dir, scope_name, &uid).join(&filename);
+                        let path = memory_scope_dir(dir, scope_name, &uid).join(filename);
                         std::fs::read_to_string(&path)
                             .ok()
                             .map(|content| (scope_name.to_string(), content))
