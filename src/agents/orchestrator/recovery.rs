@@ -439,7 +439,7 @@ async fn recover_active_session(
     };
     let session_ctx = ctx.session_context_for(&sk);
 
-    let text = {
+    let (text, turn_clean) = {
         let _turn_guard = session_ctx.turn_lock.lock().await;
         let mut session = session_ctx.session.lock().await;
         session.channel = Some(channel.clone());
@@ -464,7 +464,7 @@ async fn recover_active_session(
         // `dispatch_turn_spawn`'s tail `!turn.has_pending` guard.
         let turn_clean = matches!(&result, Ok(None))
             || matches!(&result, Ok(Some(tr)) if !tr.has_pending);
-        match result {
+        let text = match result {
             Ok(Some(tr)) => {
                 tracing::info!(session = %sk, "startup recovery: turn completed");
                 tr.text
@@ -477,7 +477,8 @@ async fn recover_active_session(
                 tracing::warn!(session = %sk, err = %e, "startup recovery failed");
                 crate::agents::user_messages::user_facing_error_message(&e)
             }
-        }
+        };
+        (text, turn_clean)
     };
     if !text.is_empty() {
         let message = ChannelOutboundMessage {
