@@ -516,6 +516,33 @@ fn load_context_tokens() -> HashMap<String, String> {
     }
 }
 
+fn get_updates_buf_path(account_id: &str) -> std::path::PathBuf {
+    let dir = std::env::var("HOME")
+        .map(|h| format!("{h}/.myclaw/state"))
+        .unwrap_or_else(|_| "/tmp/myclaw-state".to_string());
+    std::path::PathBuf::from(format!("{dir}/wechat_get_updates_buf_{account_id}.json"))
+}
+
+/// Persist the get_updates cursor atomically (tmp + rename): the file is
+/// rewritten on every successful poll, and a torn write would deserialize
+/// into an empty cursor (history re-pull). Fail-open like context tokens.
+fn persist_get_updates_buf(account_id: &str, buf: &str) {
+    let path = get_updates_buf_path(account_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string(buf).unwrap_or_default();
+    let tmp = path.with_extension("json.tmp");
+    let _ = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &path));
+}
+
+fn load_get_updates_buf(account_id: &str) -> String {
+    match std::fs::read_to_string(get_updates_buf_path(account_id)) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
 // ── API client ────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -524,6 +551,7 @@ struct ApiClient {
     http: Client,
     state: Arc<RwLock<SharedState>>,
     client_version: String,
+    account_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -536,7 +564,7 @@ struct UploadedMediaInfo {
 }
 
 impl ApiClient {
-    fn new(config: &WechatAccountConfig) -> Self {
+    fn new(config: &WechatAccountConfig, account_id: String) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(config.poll_timeout + 15))
             .build()
@@ -550,11 +578,16 @@ impl ApiClient {
         }
         // Restore persisted context tokens
         state.context_tokens = load_context_tokens();
+        // Restore the persisted get_updates cursor so a restart resumes
+        // polling instead of re-pulling history (kill -9 during polling
+        // used to lose the in-memory cursor entirely).
+        state.get_updates_buf = load_get_updates_buf(&account_id);
         Self {
             api_base: config.api_base.trim_end_matches('/').to_string(),
             http,
             state: Arc::new(RwLock::new(state)),
             client_version: build_client_version().to_string(),
+            account_id,
         }
     }
 
@@ -687,6 +720,7 @@ impl ApiClient {
 
         let new_buf = parsed.get_updates_buf.as_str();
         if !new_buf.is_empty() {
+            persist_get_updates_buf(&self.account_id, new_buf);
             self.state.write().get_updates_buf = new_buf.to_string();
         }
         Ok(parsed)
@@ -1306,9 +1340,9 @@ struct WechatDebounceEntry {
 }
 
 impl WechatChannel {
-    pub fn new(config: WechatAccountConfig) -> Self {
+    pub fn new(account_id: String, config: WechatAccountConfig) -> Self {
         let ch = Self {
-            api: ApiClient::new(&config),
+            api: ApiClient::new(&config, account_id),
             debounce_ms: config.debounce_ms,
             debounce_buffer: Arc::new(Mutex::new(HashMap::new())),
             allowed_groups: config.allowed_groups.clone(),

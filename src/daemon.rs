@@ -754,6 +754,7 @@ fn build_channel_accounts(
                         "wechat".to_string(),
                         account_id.clone(),
                         Arc::new(crate::channels::wechat::WechatChannel::new(
+                            account_id.clone(),
                             account_cfg.clone(),
                         )),
                     ));
