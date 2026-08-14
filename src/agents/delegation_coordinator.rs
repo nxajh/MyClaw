@@ -30,7 +30,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::agents::delegation::{
-    AgentMail, AgentMessage, DelegationEvent, DelegationStatus, DelegationTimeout, SubAgentMailbox,
+    AgentMail, AgentMessage, DelegationEvent, DelegationStatus, DelegationTimeout, MessageKind,
+    SubAgentMailbox,
 };
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::agents::SessionContext;
@@ -150,6 +151,14 @@ pub struct DelegationCoordinator {
     /// Sender for `DelegationEvent`s, set once by the daemon via
     /// `set_event_sender` when wiring the orchestrator's `delegation_rx`.
     event_tx_cell: Arc<OnceLock<mpsc::Sender<DelegationEvent>>>,
+    /// Sub → parent final messages recorded for SYNC delegations
+    /// (sub_session_id → texts). `send_to_parent` skips the broadcast for
+    /// sync sub-agents (no running-table entry — the parent is blocked
+    /// inside the tool call) and records the text here instead; the sync
+    /// completion branch attaches it to the tool result so the parent gets
+    /// the full report immediately instead of via the delayed notice
+    /// channel. Removed on read. (2026-08-14, sync notice B)
+    sent_messages: Arc<DashMap<String, std::sync::RwLock<Vec<String>>>>,
 }
 
 impl DelegationCoordinator {
@@ -170,6 +179,7 @@ impl DelegationCoordinator {
             namespace: namespace.to_string(),
             max_depth,
             event_tx_cell: Arc::new(OnceLock::new()),
+            sent_messages: Arc::new(DashMap::new()),
         }
     }
 
@@ -585,7 +595,7 @@ impl DelegationCoordinator {
                 AgentIsolation::Shared => None,
             };
 
-            let (worktree_path, cleanup_worktree, branch_name) = match config.isolation {
+            let (worktree_path, cleanup_worktree, branch_name, main_branch) = match config.isolation {
                 AgentIsolation::Worktree => {
                     let repo =
                         worktree_repo.expect("worktree isolation guarantees workspace above");
@@ -594,6 +604,37 @@ impl DelegationCoordinator {
                     let worktree_path = self
                         .worktrees_root
                         .join(format!("{}_{}", config.name, worktree_id));
+
+                    // Capture the main branch name BEFORE creating the
+                    // worktree. The daemon repo is never checked out (HEAD
+                    // stays on the main branch), so `git checkout @{-1}`
+                    // after the sub-agent finishes has no reflog entry to
+                    // resolve (bug 2026-08-14: pathspec '@{-1}' did not
+                    // match — merge silently skipped, sub-agent commits left
+                    // dangling). Deterministic fix: checkout the captured
+                    // branch name instead. Detached HEAD is a hard error —
+                    // there is no branch to merge back into.
+                    let main_branch_out = std::process::Command::new("git")
+                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                        .current_dir(repo)
+                        .output()
+                        .map_err(|e| anyhow::anyhow!("failed to detect main branch name: {}", e))?;
+                    if !main_branch_out.status.success() {
+                        anyhow::bail!(
+                            "failed to detect main branch name: {}",
+                            String::from_utf8_lossy(&main_branch_out.stderr)
+                        );
+                    }
+                    let main_branch = String::from_utf8_lossy(&main_branch_out.stdout)
+                        .trim()
+                        .to_string();
+                    if main_branch == "HEAD" {
+                        anyhow::bail!(
+                            "workspace repo is in detached HEAD state; cannot merge sub-agent branch '{}' back",
+                            branch_name
+                        );
+                    }
+                    tracing::debug!(main_branch = %main_branch, "captured main branch for worktree merge-back");
 
                     if let Some(parent) = worktree_path.parent() {
                         std::fs::create_dir_all(parent).ok();
@@ -627,9 +668,9 @@ impl DelegationCoordinator {
                         branch = %branch_name,
                         "created git worktree for sub-agent"
                     );
-                    (worktree_path, Some(worktree_id), Some(branch_name))
+                    (worktree_path, Some(worktree_id), Some(branch_name), Some(main_branch))
                 }
-                AgentIsolation::Shared => (PathBuf::new(), None, None),
+                AgentIsolation::Shared => (PathBuf::new(), None, None, None),
             };
 
             let workspace_dir = if !worktree_path.as_os_str().is_empty() {
@@ -786,6 +827,13 @@ impl DelegationCoordinator {
             if let Some(ref branch_name) = branch_name {
                 let repo =
                     worktree_repo.expect("worktree isolation guarantees workspace for merge");
+                // `branch_name` is Some ⟺ Worktree isolation, where
+                // `main_branch` was captured before the worktree was created.
+                // Borrowed (not moved) — `branch_name` is used again below by
+                // the worktree cleanup.
+                let Some(main_branch) = main_branch.as_deref() else {
+                    anyhow::bail!("worktree delegation missing captured main branch");
+                };
                 let diff = std::process::Command::new("git")
                     .args(["log", "--oneline", "HEAD..", branch_name])
                     .current_dir(repo)
@@ -797,9 +845,13 @@ impl DelegationCoordinator {
                 };
 
                 if has_commits {
-                    // Switch back to the previous branch.
+                    // Switch back to the main branch — captured deterministically
+                    // before the worktree was created. `@{-1}` fails here: the
+                    // daemon repo is never checked out, so reflog has no previous
+                    // branch to resolve (bug 2026-08-14: pathspec '@{-1}' did
+                    // not match, merge silently skipped).
                     let checkout = std::process::Command::new("git")
-                        .args(["checkout", "@{-1}"])
+                        .args(["checkout", main_branch])
                         .current_dir(repo)
                         .output();
 
@@ -870,11 +922,30 @@ impl DelegationCoordinator {
                                 }
                             }
                         } else {
-                            tracing::warn!(
+                            // Fail-fast: without the main branch checked out
+                            // the merge cannot run and the sub-agent's commits
+                            // would be orphaned (dangling). Abort the delegation
+                            // with a clear error so the parent can recover the
+                            // branch manually.
+                            tracing::error!(
                                 branch = %branch_name,
+                                main_branch = %main_branch,
                                 stderr = %String::from_utf8_lossy(&co.stderr),
-                                "failed to checkout previous branch"
+                                "failed to checkout main branch for merge"
                             );
+                            if !is_async_delegation {
+                                self.persist_terminal_checkpoint(&sub_session_id, DelegationStatus::Failed);
+                            }
+                            return Err(anyhow::anyhow!(
+                                "sub-agent '{}' completed but checkout of main branch '{}' failed: {}. \
+                                 Sub-agent branch '{}' has commits that were NOT merged; \
+                                 recover manually (worktree preserved at {})",
+                                config.name,
+                                main_branch,
+                                String::from_utf8_lossy(&co.stderr),
+                                branch_name,
+                                worktree_path.display()
+                            ));
                         }
                     }
                 } else {
@@ -927,23 +998,39 @@ impl DelegationCoordinator {
                     None => Vec::new(),
                 }
             };
+            // B (2026-08-14): sync delegations — the sub-agent's final
+            // messages were recorded in `sent_messages` (see
+            // `send_to_parent`: sync skips the broadcast and records the text
+            // instead). Attach them to the tool result so the parent receives
+            // the full report immediately, not via the delayed notice channel.
+            // Removed on read — each sync delegation consumes its own entries.
+            let sent_messages: Vec<String> = self
+                .sent_messages
+                .remove(&sub_session_id)
+                .map(|(_, v)| v.into_inner().unwrap_or_default())
+                .unwrap_or_default();
             let result = match result {
                 Ok(text) => {
-                    if undelivered.is_empty() {
-                        Ok(text)
-                    } else {
+                    let mut parts = vec![text];
+                    if !sent_messages.is_empty() {
+                        parts.push(format!(
+                            "[子代理消息]：\n{}",
+                            sent_messages.join("\n---\n")
+                        ));
+                    }
+                    if !undelivered.is_empty() {
                         tracing::warn!(
                             sub_session_id = %sub_session_id,
                             count = undelivered.len(),
                             "sub-agent finished with unread parent messages; attaching to result"
                         );
-                        Ok(format!(
-                            "{}\n\n[主 agent 有 {} 条消息在任务结束后到达，未处理]：\n{}",
-                            text,
+                        parts.push(format!(
+                            "[主 agent 有 {} 条消息在任务结束后到达，未处理]：\n{}",
                             undelivered.len(),
                             undelivered.join("\n---\n")
-                        ))
+                        ));
                     }
+                    Ok(parts.join("\n\n"))
                 }
                 Err(e) => {
                     if undelivered.is_empty() {
@@ -1441,6 +1528,25 @@ impl crate::agents::AgentMessenger for DelegationCoordinator {
     }
 
     async fn send_to_parent(&self, event: AgentMessage) -> bool {
+        // Sync delegations have no running-table entry (the parent is blocked
+        // inside the tool call awaiting the result), so there is no notice
+        // consumer on the event channel: the message must ride back in the
+        // tool result instead of a delayed notice. Record the final text for
+        // the sync completion branch and skip the broadcast — the
+        // `[子代理消息]` injection path is async-only (2026-08-14, B).
+        if self.running.get(&event.sub_session_id).is_none() {
+            if event.kind != MessageKind::Progress {
+                if let Some(msgs) = self.sent_messages.get(&event.sub_session_id) {
+                    msgs.write().unwrap().push(event.text.clone());
+                } else {
+                    self.sent_messages.insert(
+                        event.sub_session_id.clone(),
+                        std::sync::RwLock::new(vec![event.text.clone()]),
+                    );
+                }
+            }
+            return true;
+        }
         match self.event_sender() {
             Some(tx) => {
                 let sub_session_id = event.sub_session_id.clone();
@@ -1504,6 +1610,105 @@ mod tests {
             max_depth,
         );
         (dc, manager)
+    }
+
+    #[tokio::test]
+    async fn sync_send_to_parent_records_text_without_broadcast() {
+        let (dc, manager) = coordinator(3);
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let (tx, mut rx) = mpsc::channel(8);
+        dc.set_event_sender(tx);
+
+        // No running-table entry ⇒ sync delegation: final messages are
+        // recorded for the tool-result merge (B, 2026-08-14), NOT broadcast
+        // as DelegationEvent::Message — the parent is blocked in the tool
+        // call and receives them via the returned result instead.
+        assert!(dc
+            .send_to_parent(AgentMessage {
+                msg_id: "m1".to_string(),
+                sender_name: "coder".to_string(),
+                sub_session_id: "test/s/sync-sub".to_string(),
+                parent_session_id: parent.session_id.clone(),
+                text: "detailed final report".to_string(),
+                kind: MessageKind::Final,
+            })
+            .await);
+        assert!(
+            rx.try_recv().is_err(),
+            "sync delegation message must not be broadcast as DelegationEvent::Message"
+        );
+        let stored = dc
+            .sent_messages
+            .get("test/s/sync-sub")
+            .map(|v| v.read().unwrap().clone())
+            .unwrap_or_default();
+        assert_eq!(stored, vec!["detailed final report"]);
+
+        // Progress messages are never recorded (RFC §3.4: progress is
+        // dropped for the parent context).
+        assert!(dc
+            .send_to_parent(AgentMessage {
+                msg_id: "m2".to_string(),
+                sender_name: "coder".to_string(),
+                sub_session_id: "test/s/sync-sub".to_string(),
+                parent_session_id: parent.session_id.clone(),
+                text: "progress 50%".to_string(),
+                kind: MessageKind::Progress,
+            })
+            .await);
+        let stored = dc
+            .sent_messages
+            .get("test/s/sync-sub")
+            .map(|v| v.read().unwrap().clone())
+            .unwrap_or_default();
+        assert_eq!(stored, vec!["detailed final report"], "progress must be skipped");
+    }
+
+    #[tokio::test]
+    async fn async_send_to_parent_broadcasts_and_counts() {
+        let (dc, manager) = coordinator(3);
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let (tx, mut rx) = mpsc::channel(8);
+        dc.set_event_sender(tx);
+
+        // Fake running entry ⇒ async path: broadcast + count, and nothing
+        // recorded in the sync buffer.
+        let sub_session_id = "test/s/async-sub".to_string();
+        dc.running.insert(
+            sub_session_id.clone(),
+            RunningEntry {
+                handle: tokio::spawn(async {}),
+                status: std::sync::RwLock::new(DelegationStatus::Running),
+                agent_name: "coder".to_string(),
+                parent_session_id: parent.session_id.clone(),
+                spawned_at: std::time::Instant::now(),
+                messages_sent: std::sync::atomic::AtomicU64::new(0),
+            },
+        );
+        assert!(dc
+            .send_to_parent(AgentMessage {
+                msg_id: "m1".to_string(),
+                sender_name: "coder".to_string(),
+                sub_session_id: sub_session_id.clone(),
+                parent_session_id: parent.session_id.clone(),
+                text: "working".to_string(),
+                kind: MessageKind::Final,
+            })
+            .await);
+        match rx.try_recv().expect("async message must be broadcast") {
+            DelegationEvent::Message(m) => assert_eq!(m.text, "working"),
+            other => panic!("expected Message event, got {:?}", other),
+        }
+        let count = dc
+            .running
+            .get(&sub_session_id)
+            .map(|e| e.messages_sent.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        assert_eq!(count, 1);
+        assert!(
+            dc.sent_messages.get(&sub_session_id).is_none(),
+            "async messages must not touch the sync buffer"
+        );
     }
 
     #[test]
