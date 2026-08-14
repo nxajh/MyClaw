@@ -482,7 +482,9 @@ impl SessionContext {
                 sent_message_count,
                 progress,
             });
-            guard.clone()
+            guard
+                .clone()
+                .expect("record_terminal: suspension exists after NoSuspension guard")
         };
         // Persist after the guard drops — persist_suspension re-locks the
         // same std Mutex (not reentrant).
