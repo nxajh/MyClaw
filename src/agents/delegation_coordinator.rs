@@ -1581,6 +1581,7 @@ impl crate::agents::AgentMessenger for DelegationCoordinator {
 mod tests {
     use super::*;
     use crate::agents::session::SessionManager;
+    use crate::agents::AgentMessenger;
     use crate::agents::AgentRegistry;
     use crate::config::sub_agent::SubAgentConfig;
 
