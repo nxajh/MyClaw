@@ -16,3 +16,4 @@
 ## 分支命名
 
 - 子代理 worktree 分支命名规则：`subagent/{agent_name}_{8位hex}`。
+- 子代理必须在其注入的 worktree 工作区内操作（相对路径基准），不得直接修改主仓库
