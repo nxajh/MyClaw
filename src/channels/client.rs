@@ -2120,12 +2120,15 @@ mod tests {
     const USER_KEY: &str = "client:default:web-user:default";
     const USER_UID: &str = "myclaw/u/019fe342-test";
 
+    fn mem_body(name: &str, body: &str) -> String {
+        format!(
+            "---\nname: \"{name}\"\ndescription: \"test entry\"\ntype: \"project\"\ninject: \"search\"\ncreated_at: \"2026-08-14\"\ntags: []\n---\n\n{body}"
+        )
+    }
+
     fn write_mem(path: &std::path::Path, name: &str, body: &str) {
         std::fs::create_dir_all(path).unwrap();
-        let frontmatter = format!(
-            "---\nname: \"{name}\"\ndescription: \"test entry\"\ntype: \"project\"\ninject: \"search\"\ncreated_at: \"2026-08-14\"\ntags: []\n---\n\n{body}"
-        );
-        std::fs::write(path.join(format!("{name}.md")), frontmatter).unwrap();
+        std::fs::write(path.join(format!("{name}.md")), mem_body(name, body)).unwrap();
     }
 
     fn test_workspace() -> tempfile::TempDir {
@@ -2215,25 +2218,26 @@ mod tests {
         // No scope: agent layer wins over user layer.
         let resp = api(
             "memory.read",
-            serde_json::json!({ "name": "shared_name" }),
+            serde_json::json!({ "name": "shared_name.md" }),
             tmp.path(),
         );
-        assert_eq!(resp["result"]["content"], "AGENT version");
+        assert_eq!(resp["result"]["content"], mem_body("shared_name", "AGENT version"));
         assert_eq!(resp["result"]["scope"], "agent");
         // Explicit user scope.
         let resp = api(
             "memory.read",
-            serde_json::json!({ "name": "shared_name", "scope": "user" }),
+            serde_json::json!({ "name": "shared_name.md", "scope": "user" }),
             tmp.path(),
         );
-        assert_eq!(resp["result"]["content"], "USER version");
+        assert_eq!(resp["result"]["content"], mem_body("shared_name", "USER version"));
         assert_eq!(resp["result"]["scope"], "user");
         // User-only entry found via fallback.
         let resp = api(
             "memory.read",
-            serde_json::json!({ "name": "user_only" }),
+            serde_json::json!({ "name": "user_only.md" }),
             tmp.path(),
         );
+        assert_eq!(resp["result"]["content"], mem_body("user_only", "user body"));
         assert_eq!(resp["result"]["scope"], "user");
         // Missing entry.
         let resp = api(
@@ -2270,7 +2274,13 @@ mod tests {
             tmp.path(),
         );
         assert_eq!(resp["type"], "api_response");
-        assert!(!user_path.exists());
+        assert!(!tmp
+            .path()
+            .join("users")
+            .join(USER_UID)
+            .join("memory")
+            .join("default_scope.md")
+            .exists());
         assert!(tmp.path().join("memory").join("default_scope.md").exists());
     }
 
@@ -2280,7 +2290,7 @@ mod tests {
         // Explicit user scope removes the user-layer copy only.
         let resp = api(
             "memory.delete",
-            serde_json::json!({ "name": "shared_name", "scope": "user" }),
+            serde_json::json!({ "name": "shared_name.md", "scope": "user" }),
             tmp.path(),
         );
         assert_eq!(resp["type"], "api_response");
@@ -2295,7 +2305,7 @@ mod tests {
         // Default fallback removes the agent-layer copy.
         let resp = api(
             "memory.delete",
-            serde_json::json!({ "name": "agent_only" }),
+            serde_json::json!({ "name": "agent_only.md" }),
             tmp.path(),
         );
         assert_eq!(resp["type"], "api_response");
