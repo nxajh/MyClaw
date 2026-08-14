@@ -91,6 +91,14 @@ pub struct RunningEntry {
     /// whether the `Completed` note can skip the summary (④ summary
     /// de-duplication).
     pub messages_sent: std::sync::atomic::AtomicU64,
+    /// The effective timeout (seconds) requested for this delegation.
+    /// Used by `checkpoint_and_cancel_all`'s fallback when no durable
+    /// checkpoint exists, so the resumed task gets the same budget
+    /// instead of a hardcoded 600 s default.
+    pub timeout_secs: Option<u64>,
+    /// Wall-clock UTC timestamp when the task was spawned. Used together
+    /// with `timeout_secs` to compute remaining time on recovery.
+    pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Snapshot view of a running-table entry for `agent_list` / logging.
@@ -330,8 +338,8 @@ impl DelegationCoordinator {
                     sub_session_id: sub_session_id.clone(),
                     agent_name: entry.agent_name.clone(),
                     status: "checkpointed".to_string(),
-                    started_at: chrono::Utc::now(),
-                    timeout_secs: SUB_AGENT_TIMEOUT_DEFAULT_SECS,
+                    started_at: entry.started_at,
+                    timeout_secs: entry.timeout_secs.unwrap_or(SUB_AGENT_TIMEOUT_DEFAULT_SECS),
                     allowed_tools: None,
                     last_checkpoint: Some(chrono::Utc::now()),
                 });
@@ -1198,18 +1206,76 @@ impl DelegationCoordinator {
         let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
 
-            let result = sub_delegator
-                .delegate_with_parent(
-                    &agent_name_owned,
-                    &task_owned,
-                    &parent_session_id_owned,
-                    sub_ctx,
-                    timeout_secs,
-                    Some(mailbox),
-                    allowed_tools,
-                    workspace_owned.as_deref(),
-                )
-                .await;
+            // ── Two-layer spawn (panic safety net) ──────────────────────
+            //
+            // The sub-agent body runs in an *inner* `tokio::spawn` so a panic
+            // is surfaced as a `JoinError` (is_panic) instead of propagating
+            // uncaught through the outer task. Without this, a panic skips
+            // the running-table cleanup, event dispatch, and checkpoint
+            // settlement below — the parent agent hangs on its terminal event
+            // forever.
+            //
+            // The inner handle returns `anyhow::Result<String>`; the outer
+            // converts `JoinError` outcomes into the same type so the existing
+            // collection logic handles them uniformly.
+            let sub_delegator_inner = sub_delegator.clone();
+            let parent_session_id_inner = parent_session_id_owned.clone();
+            let inner_handle: tokio::task::JoinHandle<anyhow::Result<String>> =
+                tokio::spawn(async move {
+                    sub_delegator_inner
+                        .delegate_with_parent(
+                            &agent_name_owned,
+                            &task_owned,
+                            &parent_session_id_inner,
+                            sub_ctx,
+                            timeout_secs,
+                            Some(mailbox),
+                            allowed_tools,
+                            workspace_owned.as_deref(),
+                        )
+                        .await
+                });
+
+            let result = match inner_handle.await {
+                Ok(r) => r,
+                Err(je) if je.is_panic() => {
+                    let payload = je.into_panic();
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    };
+                    tracing::error!(
+                        sub_session_id = %sub_session_id_clone,
+                        panic = %msg,
+                        "sub-agent task panicked"
+                    );
+                    Err(anyhow::anyhow!("sub-agent panicked: {}", msg))
+                }
+                Err(je) if je.is_cancelled() => {
+                    // Abort path (cancel / checkpoint_and_cancel_all) already
+                    // persisted a checkpoint tombstone. Clean up the running
+                    // table and mailbox, then return without emitting an event
+                    // — the caller (cancel / shutdown) owns the terminal event.
+                    tracing::debug!(
+                        sub_session_id = %sub_session_id_clone,
+                        "sub-agent task cancelled (abort); cleaning up without event"
+                    );
+                    running.remove(&running_sub_session_id);
+                    mailboxes.remove(&running_sub_session_id);
+                    return;
+                }
+                Err(je) => {
+                    tracing::error!(
+                        sub_session_id = %sub_session_id_clone,
+                        err = %je,
+                        "sub-agent task join error"
+                    );
+                    Err(anyhow::anyhow!("sub-agent task join error: {}", je))
+                }
+            };
 
             let duration_secs = start_time.elapsed().as_secs();
 
@@ -1315,6 +1381,8 @@ impl DelegationCoordinator {
                 parent_session_id: parent_session_id.to_string(),
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: Some(timeout_secs),
+                started_at: chrono::Utc::now(),
             },
         );
         Ok(sub_session_id)
@@ -1431,6 +1499,8 @@ impl DelegationCoordinator {
                 parent_session_id,
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: Some(timeout_secs),
+                started_at: chrono::Utc::now(),
             },
         );
     }
@@ -1684,6 +1754,8 @@ mod tests {
                 parent_session_id: parent.session_id.clone(),
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: Some(60),
+                started_at: chrono::Utc::now(),
             },
         );
         assert!(dc
@@ -1822,6 +1894,8 @@ mod tests {
                 parent_session_id: parent.session_id.clone(),
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: Some(60),
+                started_at: chrono::Utc::now(),
             },
         );
 
@@ -1934,6 +2008,8 @@ mod tests {
                 parent_session_id: "parent".to_string(),
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: Some(60),
+                started_at: chrono::Utc::now(),
             },
         );
         assert_eq!(dc.running_count(), 1);
@@ -1981,5 +2057,235 @@ mod tests {
             worktree_branch_name("main", "01234567"),
             "subagent/main_01234567"
         );
+    }
+
+    // ── Two-layer spawn panic safety net ───────────────────────────────
+
+    /// Verifies that when the inner sub-agent task panics, the outer spawn
+    /// catches it and converts the JoinError into a `DelegationEvent::Failed`
+    /// whose error message contains "panicked". The running table and mailbox
+    /// must also be cleaned so the parent agent does not hang.
+    ///
+    /// Because `spawn_delegate_async` calls `delegate_with_parent` (which
+    /// returns `Err`, not a panic, when no runtime is installed), this test
+    /// exercises the two-layer pattern directly: it spawns an outer task
+    /// whose inner task panics, using the coordinator's real `running`,
+    /// `mailboxes`, and event-channel infrastructure — the same code path
+    /// `spawn_delegate_async` uses after the fix.
+    #[tokio::test]
+    async fn panic_in_inner_task_emits_failed_and_cleans_running() {
+        let (dc, manager) = coordinator(3);
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let (tx, mut rx) = mpsc::channel(8);
+        dc.set_event_sender(tx);
+
+        let sub_session_id = "test/s/panic-sub".to_string();
+        let parent_session_id = parent.session_id.clone();
+
+        // Set up the coordinator's internal tables just like
+        // `spawn_delegate_async` does before spawning.
+        let running = Arc::clone(&dc.running);
+        let mailboxes = Arc::clone(&dc.mailboxes);
+        let event_tx = dc.event_sender();
+        let running_sub_session_id = sub_session_id.clone();
+        let sub_session_id_clone = sub_session_id.clone();
+        let sub_delegator = dc.clone();
+
+        let handle = tokio::spawn(async move {
+            let start_time = std::time::Instant::now();
+
+            // Inner task that panics — simulates a sub-agent whose body
+            // panics during execution.
+            let inner_handle: tokio::task::JoinHandle<anyhow::Result<String>> =
+                tokio::spawn(async {
+                    panic!("inner task exploded");
+                });
+
+            let result = match inner_handle.await {
+                Ok(r) => r,
+                Err(je) if je.is_panic() => {
+                    let payload = je.into_panic();
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    };
+                    tracing::error!(panic = %msg, "sub-agent panicked");
+                    Err(anyhow::anyhow!("sub-agent panicked: {}", msg))
+                }
+                Err(je) if je.is_cancelled() => {
+                    running.remove(&running_sub_session_id);
+                    mailboxes.remove(&running_sub_session_id);
+                    return;
+                }
+                Err(je) => Err(anyhow::anyhow!("join error: {}", je)),
+            };
+
+            // ── Collection logic (mirrors spawn_delegate_async) ───────
+            let duration_secs = start_time.elapsed().as_secs();
+            let timed_out_secs = result
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<DelegationTimeout>())
+                .map(|t| t.secs);
+            let sent_message_count = running
+                .get(&running_sub_session_id)
+                .map(|e| e.messages_sent.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
+
+            if let Some(tx) = &event_tx {
+                match (&result, timed_out_secs) {
+                    (Ok(summary), _) => {
+                        let _ = tx
+                            .send(DelegationEvent::Completed {
+                                sub_session_id: sub_session_id_clone.clone(),
+                                parent_session_id: parent_session_id.clone(),
+                                summary: summary.clone(),
+                                duration_secs,
+                                sent_message_count,
+                            })
+                            .await;
+                    }
+                    (Err(_), Some(secs)) => {
+                        let _ = tx
+                            .send(DelegationEvent::TimedOut {
+                                sub_session_id: sub_session_id_clone.clone(),
+                                parent_session_id: parent_session_id.clone(),
+                                timeout_secs: secs,
+                                duration_secs,
+                            })
+                            .await;
+                    }
+                    (Err(e), None) => {
+                        let _ = tx
+                            .send(DelegationEvent::Failed {
+                                sub_session_id: sub_session_id_clone.clone(),
+                                parent_session_id: parent_session_id.clone(),
+                                error: e.to_string(),
+                            })
+                            .await;
+                    }
+                }
+            }
+
+            let terminal = if timed_out_secs.is_some() {
+                DelegationStatus::TimedOut
+            } else if result.is_ok() {
+                DelegationStatus::Completed
+            } else {
+                DelegationStatus::Failed
+            };
+            if let Some(entry) = running.get(&running_sub_session_id) {
+                if let Ok(mut status) = entry.status.write() {
+                    *status = terminal;
+                }
+            }
+            running.remove(&running_sub_session_id);
+            mailboxes.remove(&running_sub_session_id);
+            if terminal == DelegationStatus::Completed {
+                let _ = sub_delegator
+                    .session_manager
+                    .backend()
+                    .delete_delegation_checkpoint(&running_sub_session_id);
+            } else {
+                sub_delegator.persist_terminal_checkpoint(&running_sub_session_id, terminal);
+            }
+        });
+
+        dc.running.insert(
+            sub_session_id.clone(),
+            RunningEntry {
+                handle,
+                status: std::sync::RwLock::new(DelegationStatus::Running),
+                agent_name: "coder".to_string(),
+                parent_session_id: parent_session_id.clone(),
+                spawned_at: std::time::Instant::now(),
+                messages_sent: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: Some(60),
+                started_at: chrono::Utc::now(),
+            },
+        );
+
+        // Wait for the Failed event (panic path → no DelegationTimeout →
+        // falls into the generic Err branch).
+        let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timed out waiting for event")
+            .expect("event channel closed");
+        match event {
+            DelegationEvent::Failed { error, .. } => {
+                assert!(
+                    error.contains("panicked"),
+                    "error should mention panic: {error}"
+                );
+            }
+            other => panic!("expected Failed event, got {other:?}"),
+        }
+
+        // Give the cleanup tail a chance to run on the current_thread
+        // runtime, then verify the running table and checkpoint tombstone.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert!(
+            dc.running.get(&sub_session_id).is_none(),
+            "running table should be cleaned up after panic"
+        );
+        let cp = dc
+            .session_manager
+            .backend()
+            .load_delegation_checkpoint(&sub_session_id);
+        assert!(
+            cp.is_some_and(|c| c.status == "failed"),
+            "checkpoint should carry a 'failed' tombstone after panic"
+        );
+    }
+
+    // ── RunningEntry timeout_secs / started_at checkpoint fallback ──────
+
+    /// `checkpoint_and_cancel_all`'s fallback (no existing durable
+    /// checkpoint) must use the `RunningEntry`'s actual `timeout_secs` and
+    /// `started_at` instead of hardcoded defaults (600 s / now).
+    #[tokio::test]
+    async fn checkpoint_fallback_uses_running_entry_timeout_and_started_at() {
+        let (dc, manager) = coordinator(3);
+        let backend = manager.backend();
+
+        let started = chrono::Utc::now() - chrono::Duration::seconds(100);
+        let sub_session_id = "test/s/fallback-sub".to_string();
+        dc.running.insert(
+            sub_session_id.clone(),
+            RunningEntry {
+                handle: tokio::spawn(async {}),
+                status: std::sync::RwLock::new(DelegationStatus::Running),
+                agent_name: "coder".to_string(),
+                parent_session_id: "parent".to_string(),
+                spawned_at: std::time::Instant::now(),
+                messages_sent: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: Some(42),
+                started_at: started,
+            },
+        );
+
+        // No pre-existing checkpoint → triggers the fallback branch.
+        assert!(backend
+            .load_delegation_checkpoint(&sub_session_id)
+            .is_none());
+
+        dc.checkpoint_and_cancel_all();
+
+        let cp = backend
+            .load_delegation_checkpoint(&sub_session_id)
+            .expect("checkpoint should be written");
+        assert_eq!(
+            cp.timeout_secs, 42,
+            "fallback should use entry's timeout_secs"
+        );
+        assert_eq!(
+            cp.started_at, started,
+            "fallback should use entry's started_at, not Utc::now()"
+        );
+        assert_eq!(cp.status, "checkpointed");
     }
 }
