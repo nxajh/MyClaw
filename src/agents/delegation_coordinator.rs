@@ -99,6 +99,10 @@ pub struct RunningEntry {
     /// Wall-clock UTC timestamp when the task was spawned. Used together
     /// with `timeout_secs` to compute remaining time on recovery.
     pub started_at: chrono::DateTime<chrono::Utc>,
+    /// Tool allowlist requested for this delegation; used by the
+    /// `checkpoint_and_cancel_all` fallback so a resumed task keeps the
+    /// same toolset instead of `None`.
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 /// Snapshot view of a running-table entry for `agent_list` / logging.
@@ -245,57 +249,6 @@ impl DelegationCoordinator {
         self.running.len()
     }
 
-    /// Wait for all background sub-agents to finish, or until `timeout` elapses.
-    /// Called during hot switch drain so sub-agent sessions persist cleanly
-    /// instead of being killed mid-turn by fork+execv.
-    ///
-    /// Unlike `TurnTracker::drain` which uses an atomic counter + Notify,
-    /// this drains the `DashMap` of JoinHandles directly. Each handle is
-    /// awaited with the remaining budget, so total wait is bounded by `timeout`.
-    pub async fn drain(&self, timeout: std::time::Duration) {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            // Take ownership of handles by removing from the map. The sub-agent
-            // task body normally self-removes on completion, but during drain we
-            // need to own the handles to await them.
-            let handles: Vec<(String, JoinHandle<()>)> = self
-                .running
-                .iter()
-                .map(|e| e.key().clone())
-                .collect::<Vec<_>>()
-                .into_iter()
-                .filter_map(|id| {
-                    self.running
-                        .remove(&id)
-                        .map(|(_, entry)| (id, entry.handle))
-                })
-                .collect();
-            if handles.is_empty() {
-                tracing::debug!("sub-agent drain: no running sub-agents");
-                return;
-            }
-            let remaining = handles.len();
-            let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if budget.is_zero() {
-                tracing::warn!(
-                    active_sub_agents = remaining,
-                    "sub-agent drain timed out — proceeding to hot switch with running sub-agents"
-                );
-                return;
-            }
-            tracing::info!(
-                active_sub_agents = remaining,
-                "waiting for sub-agents to finish before hot switch"
-            );
-            let futs: Vec<_> = handles.into_iter().map(|(_, h)| h).collect();
-            let _ = tokio::time::timeout_at(
-                deadline,
-                futures_util::future::join_all(futs),
-            )
-            .await;
-        }
-    }
-
     /// Checkpoint all running tasks to durable storage and cancel them.
     ///
     /// Called during daemon shutdown (before hot-switch fork or process exit).
@@ -340,7 +293,7 @@ impl DelegationCoordinator {
                     status: "checkpointed".to_string(),
                     started_at: entry.started_at,
                     timeout_secs: entry.timeout_secs.unwrap_or(SUB_AGENT_TIMEOUT_DEFAULT_SECS),
-                    allowed_tools: None,
+                    allowed_tools: entry.allowed_tools.clone(),
                     last_checkpoint: Some(chrono::Utc::now()),
                 });
             if let Err(e) = backend.save_delegation_checkpoint(&checkpoint) {
@@ -1191,6 +1144,7 @@ impl DelegationCoordinator {
         let agent_name_owned = agent_name.to_string();
         let running = Arc::clone(&self.running);
         let running_sub_session_id = sub_session_id.clone();
+        let allowed_tools_entry = allowed_tools.clone();
 
         // RFC agent-messaging §3: register the sub-agent's inbox so the
         // parent's `send_message(recipient=sub_session_id)` can reach it.
@@ -1301,7 +1255,7 @@ impl DelegationCoordinator {
                 match (&result, timed_out_secs) {
                     (Ok(summary), _) => {
                         tracing::info!(sub_session_id = %sub_session_id_clone, duration_secs, sent_message_count, "sub-agent completed successfully");
-                        let _ = tx
+                        if let Err(send_err) = tx
                             .send(DelegationEvent::Completed {
                                 sub_session_id: sub_session_id_clone.clone(),
                                 parent_session_id: parent_session_id_final,
@@ -1309,28 +1263,37 @@ impl DelegationCoordinator {
                                 duration_secs,
                                 sent_message_count,
                             })
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(sub_session_id = %sub_session_id_clone, err = %send_err, "terminal event channel closed; parent may hang until restart");
+                        }
                     }
                     (Err(_), Some(secs)) => {
                         tracing::warn!(sub_session_id = %sub_session_id_clone, timeout_secs = secs, duration_secs, "sub-agent timed out");
-                        let _ = tx
+                        if let Err(send_err) = tx
                             .send(DelegationEvent::TimedOut {
                                 sub_session_id: sub_session_id_clone.clone(),
                                 parent_session_id: parent_session_id_final,
                                 timeout_secs: secs,
                                 duration_secs,
                             })
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(sub_session_id = %sub_session_id_clone, err = %send_err, "terminal event channel closed; parent may hang until restart");
+                        }
                     }
                     (Err(e), None) => {
                         tracing::warn!(sub_session_id = %sub_session_id_clone, duration_secs, err = %e, "sub-agent failed");
-                        let _ = tx
+                        if let Err(send_err) = tx
                             .send(DelegationEvent::Failed {
                                 sub_session_id: sub_session_id_clone.clone(),
                                 parent_session_id: parent_session_id_final,
                                 error: e.to_string(),
                             })
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(sub_session_id = %sub_session_id_clone, err = %send_err, "terminal event channel closed; parent may hang until restart");
+                        }
                     }
                 }
             }
@@ -1383,6 +1346,7 @@ impl DelegationCoordinator {
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
                 timeout_secs: Some(timeout_secs),
                 started_at: chrono::Utc::now(),
+                allowed_tools: allowed_tools_entry,
             },
         );
         Ok(sub_session_id)
@@ -1421,6 +1385,7 @@ impl DelegationCoordinator {
         };
 
         let agent_name_clone = agent_name.clone();
+        let allowed_tools_entry = allowed_tools.clone();
         let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
 
@@ -1452,13 +1417,19 @@ impl DelegationCoordinator {
             if let Some(tx) = event_tx {
                 match (&result, timed_out_secs) {
                     (Ok(summary), _) => {
-                        let _ = tx.send(DelegationEvent::Completed { sub_session_id: sub_session_id_clone, parent_session_id: parent_session_id_final, summary: summary.clone(), duration_secs, sent_message_count }).await;
+                        if let Err(send_err) = tx.send(DelegationEvent::Completed { sub_session_id: sub_session_id_clone.clone(), parent_session_id: parent_session_id_final, summary: summary.clone(), duration_secs, sent_message_count }).await {
+                            tracing::warn!(sub_session_id = %sub_session_id_clone, err = %send_err, "terminal event channel closed; parent may hang until restart");
+                        }
                     }
                     (Err(_), Some(secs)) => {
-                        let _ = tx.send(DelegationEvent::TimedOut { sub_session_id: sub_session_id_clone, parent_session_id: parent_session_id_final, timeout_secs: secs, duration_secs }).await;
+                        if let Err(send_err) = tx.send(DelegationEvent::TimedOut { sub_session_id: sub_session_id_clone.clone(), parent_session_id: parent_session_id_final, timeout_secs: secs, duration_secs }).await {
+                            tracing::warn!(sub_session_id = %sub_session_id_clone, err = %send_err, "terminal event channel closed; parent may hang until restart");
+                        }
                     }
                     (Err(e), None) => {
-                        let _ = tx.send(DelegationEvent::Failed { sub_session_id: sub_session_id_clone, parent_session_id: parent_session_id_final, error: e.to_string() }).await;
+                        if let Err(send_err) = tx.send(DelegationEvent::Failed { sub_session_id: sub_session_id_clone.clone(), parent_session_id: parent_session_id_final, error: e.to_string() }).await {
+                            tracing::warn!(sub_session_id = %sub_session_id_clone, err = %send_err, "terminal event channel closed; parent may hang until restart");
+                        }
                     }
                 }
             }
@@ -1501,6 +1472,7 @@ impl DelegationCoordinator {
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
                 timeout_secs: Some(timeout_secs),
                 started_at: chrono::Utc::now(),
+                allowed_tools: allowed_tools_entry,
             },
         );
     }
@@ -1756,6 +1728,7 @@ mod tests {
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
                 timeout_secs: Some(60),
                 started_at: chrono::Utc::now(),
+                allowed_tools: None,
             },
         );
         assert!(dc
@@ -1912,6 +1885,7 @@ mod tests {
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
                 timeout_secs: Some(60),
                 started_at: chrono::Utc::now(),
+                allowed_tools: None,
             },
         );
 
@@ -2046,6 +2020,7 @@ mod tests {
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
                 timeout_secs: Some(60),
                 started_at: chrono::Utc::now(),
+                allowed_tools: None,
             },
         );
         assert_eq!(dc.running_count(), 1);
@@ -2258,6 +2233,7 @@ mod tests {
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
                 timeout_secs: Some(60),
                 started_at: chrono::Utc::now(),
+                allowed_tools: None,
             },
         );
 
@@ -2318,6 +2294,7 @@ mod tests {
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
                 timeout_secs: Some(42),
                 started_at: started,
+                allowed_tools: None,
             },
         );
 
