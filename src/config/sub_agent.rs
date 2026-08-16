@@ -176,6 +176,7 @@ mod tests {
             model: None,
             isolation: AgentIsolation::default(),
             timeout: None,
+            max_timeout: None,
         };
         assert_eq!(config.isolation, AgentIsolation::Shared);
     }
@@ -193,6 +194,7 @@ mod tests {
             model: None,
             isolation: AgentIsolation::default(),
             timeout: None,
+            max_timeout: None,
         };
         assert!(config.allows_skill("anything"));
         assert!(config.allows_mcp("anything"));
@@ -214,6 +216,7 @@ mod tests {
             model: None,
             isolation: AgentIsolation::default(),
             timeout: None,
+            max_timeout: None,
         };
         assert!(config.allows_tool("shell"));
         assert!(config.allows_tool("file_read"));
