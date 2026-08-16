@@ -237,6 +237,7 @@ impl SessionManager {
             channel: None,
             turn_stream: None,
             sub_agent_inbox: None,
+            delegation_deadline: None,
             turn_injections: Vec::new(),
             turn_silenced: false,
             turn_tool_allowlist: None,
