@@ -84,6 +84,7 @@ pub fn parse_agent_file(path: &Path) -> Result<SubAgentConfig> {
         model,
         isolation,
         timeout: None,
+        max_timeout: None,
     })
 }
 
@@ -320,6 +321,7 @@ You are an expert programmer. Write clean, idiomatic code.
                 model: None,
                 isolation: AgentIsolation::default(),
                 timeout: None,
+                max_timeout: None,
             },
             SubAgentConfig {
                 name: "coder".into(),
@@ -332,6 +334,7 @@ You are an expert programmer. Write clean, idiomatic code.
                 model: None,
                 isolation: AgentIsolation::default(),
                 timeout: None,
+                max_timeout: None,
             },
         ];
         let warnings = validate_agents(&agents, &[]);
@@ -354,6 +357,7 @@ You are an expert programmer. Write clean, idiomatic code.
             model: None,
             isolation: AgentIsolation::default(),
             timeout: None,
+            max_timeout: None,
         }];
         let warnings = validate_agents(&agents, &["shell"]);
         assert!(warnings.iter().any(|w| w.contains("nonexistent_tool")));

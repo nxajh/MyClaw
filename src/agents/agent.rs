@@ -312,6 +312,19 @@ impl Agent {
                 }
             }
 
+            // Time-awareness: sub-agent sessions carry a wall-clock kill
+            // deadline. Inject the remaining budget as a transient
+            // `<system-reminder>` before every LLM request (not persisted —
+            // same consumption model as the inbox below) so the sub-agent
+            // can pace itself and, at ≤20% remaining, is told to wrap up
+            // instead of being killed mid-flight with nothing delivered.
+            if let Some(deadline) = session.delegation_deadline {
+                let remaining = deadline.remaining_secs();
+                if remaining > 0 {
+                    messages.push(ChatMessage::user_text(deadline.render_reminder()));
+                }
+            }
+
             // RFC agent-messaging §3.4/§3.7: drain the sub-agent inbox before
             // this LLM request so parent → sub messages are visible on the
             // next tool round. Injected as a `<system-reminder>` user message
@@ -1794,6 +1807,7 @@ mod tests {
             model: None,
             isolation: Default::default(),
             timeout: None,
+            max_timeout: None,
         }
     }
 

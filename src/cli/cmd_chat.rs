@@ -103,6 +103,7 @@ pub async fn run(
         max_tool_calls: None,
         isolation: Default::default(),
         timeout: None,
+        max_timeout: None,
     };
     let agent_obj = myclaw::Agent::new(main_config);
 

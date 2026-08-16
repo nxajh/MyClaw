@@ -18,6 +18,61 @@ pub struct SummaryMetadata {
     pub up_to_message: i64,
 }
 
+/// Wall-clock delegation deadline carried on a sub-agent session.
+///
+/// `Agent::run` renders the remaining budget as a transient
+/// `<system-reminder>` before every LLM request; at ≤20% remaining the
+/// reminder escalates to a wrap-up instruction (stop starting new work,
+/// deliver, end turn) so the sub-agent finishes *something* useful before
+/// the coordinator's kill timer fires.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DelegationDeadline {
+    /// Absolute kill time (unix seconds, UTC).
+    pub deadline_unix: i64,
+    /// Total budget the deadline was derived from (for "X of Y" rendering).
+    pub total_secs: u64,
+}
+
+impl DelegationDeadline {
+    /// Build a deadline `total_secs` from now.
+    pub fn from_now(total_secs: u64) -> Self {
+        Self {
+            deadline_unix: chrono::Utc::now().timestamp() + total_secs as i64,
+            total_secs,
+        }
+    }
+
+    /// Seconds left until the deadline (0 once past — never negative).
+    pub fn remaining_secs(&self) -> u64 {
+        let now = chrono::Utc::now().timestamp();
+        (self.deadline_unix - now).max(0) as u64
+    }
+
+    /// True when ≤20% of the total budget remains.
+    pub fn is_low(&self) -> bool {
+        self.total_secs > 0 && self.remaining_secs() * 5 <= self.total_secs
+    }
+
+    /// Render the `<system-reminder>` countdown text.
+    pub fn render_reminder(&self) -> String {
+        let remaining = self.remaining_secs();
+        if self.is_low() {
+            format!(
+                "<system-reminder>Delegation deadline warning: only {remaining}s remain of the {}s wall-clock budget. \
+STOP starting new work. Wrap up NOW: finish the current step, write the summary/deliverable for the parent agent, \
+and end your turn. Anything unfinished at the deadline is lost.</system-reminder>",
+                self.total_secs
+            )
+        } else {
+            format!(
+                "<system-reminder>Delegation budget: {remaining}s remaining of the {}s wall-clock budget. \
+The delegation is killed at the deadline — plan to finish and deliver before it runs out.</system-reminder>",
+                self.total_secs
+            )
+        }
+    }
+}
+
 /// Per-session conversation state.
 ///
 /// Per RFC v2 §三.A the Session holds:
@@ -98,6 +153,13 @@ pub struct Session {
     /// §3.7: batches over the per-round budget keep only the newest
     /// complete messages; the older remainder is re-queued via `tx`.
     pub sub_agent_inbox: Option<Arc<SubAgentMailbox>>,
+    /// Wall-clock kill deadline for this delegation (sub-agent sessions
+    /// only). Set by the DelegationCoordinator at spawn/recover from the
+    /// same budget that drives the kill timer, so the injected countdown
+    /// can never disagree with the actual timeout. `Agent::run` renders a
+    /// transient `<system-reminder>` countdown before every LLM request;
+    /// below 20% remaining the reminder escalates to a wrap-up instruction.
+    pub delegation_deadline: Option<DelegationDeadline>,
     /// Per-turn injected context (RFC §3.5/§4.3): rendered reminders for
     /// the user-level mailbox (cross-user messages, 注入即消费) and pending
     /// friend requests. Stashed by `dispatch_turn` (the only place with the
@@ -147,6 +209,7 @@ impl Clone for Session {
             channel: self.channel.clone(),
             turn_stream: None,
             sub_agent_inbox: self.sub_agent_inbox.clone(),
+            delegation_deadline: self.delegation_deadline,
             turn_injections: self.turn_injections.clone(),
             turn_silenced: self.turn_silenced,
             turn_tool_allowlist: self.turn_tool_allowlist.clone(),
@@ -198,6 +261,7 @@ impl Session {
             channel: None,
             turn_stream: None,
             sub_agent_inbox: None,
+            delegation_deadline: None,
             turn_injections: Vec::new(),
             turn_silenced: false,
             turn_tool_allowlist: None,
@@ -521,5 +585,63 @@ impl Session {
         self.history.drain(..boundary);
         self.message_ids.drain(..boundary);
         self.compact_version = version;
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::DelegationDeadline;
+
+    #[test]
+    fn deadline_remaining_and_low_threshold() {
+        let d = DelegationDeadline::from_now(1000);
+        assert!(d.remaining_secs() <= 1000);
+        assert!(d.remaining_secs() >= 995, "fresh deadline must have ~full budget");
+        // 1000s total, 20% threshold = 200s.
+        assert!(!d.is_low());
+
+        let low = DelegationDeadline {
+            deadline_unix: chrono::Utc::now().timestamp() + 150,
+            total_secs: 1000,
+        };
+        assert!(low.is_low());
+
+        let edge = DelegationDeadline {
+            deadline_unix: chrono::Utc::now().timestamp() + 200,
+            total_secs: 1000,
+        };
+        // Exactly 20% counts as low (≤).
+        assert!(edge.is_low());
+    }
+
+    #[test]
+    fn deadline_past_never_negative() {
+        let past = DelegationDeadline {
+            deadline_unix: chrono::Utc::now().timestamp() - 500,
+            total_secs: 600,
+        };
+        assert_eq!(past.remaining_secs(), 0);
+        assert!(past.is_low());
+    }
+
+    #[test]
+    fn deadline_render_branches() {
+        let normal = DelegationDeadline {
+            deadline_unix: chrono::Utc::now().timestamp() + 600,
+            total_secs: 1000,
+        };
+        let t = normal.render_reminder();
+        assert!(t.contains("<system-reminder>"));
+        assert!(t.contains("600s remaining"));
+        assert!(!t.contains("Wrap up NOW"));
+
+        let low = DelegationDeadline {
+            deadline_unix: chrono::Utc::now().timestamp() + 100,
+            total_secs: 1000,
+        };
+        let t = low.render_reminder();
+        assert!(t.contains("deadline warning"));
+        assert!(t.contains("Wrap up NOW"));
+        assert!(t.contains("100s remain"));
     }
 }

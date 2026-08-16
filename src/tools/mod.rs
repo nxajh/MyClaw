@@ -5,12 +5,13 @@
 //! **Core:** ShellTool, ShellPollTool, FileReadTool, FileWriteTool, FileEditTool, GlobSearchTool, ContentSearchTool
 //! **Web:** HttpRequestTool (subsumes web_fetch via `strip_html` param), WebSearchTool
 //! **Utility:** CalculatorTool, AskUserTool
-//! **Multi-Agent:** AgentDelegateTool, AgentListTool, AgentKillTool, SessionsYieldTool
+//! **Multi-Agent:** AgentDelegateTool, AgentListTool, AgentKillTool, AgentResumeTool, SessionsYieldTool
 //! **Planning:** TaskCreateTool, TaskListTool, TaskUpdateTool, TaskDeleteTool
 //! **Discovery:** ToolSearchTool, ListDirTool
 
 mod agent_kill;
 mod agent_list;
+mod agent_resume;
 mod ask_user;
 mod calculator;
 mod cronjob_tool;
@@ -44,6 +45,7 @@ mod web_search;
 // Re-export tools.
 pub use agent_kill::AgentKillTool;
 pub use agent_list::AgentListTool;
+pub use agent_resume::AgentResumeTool;
 pub use ask_user::AskUserTool;
 pub use calculator::CalculatorTool;
 pub use cronjob_tool::CronJobTool;

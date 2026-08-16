@@ -89,9 +89,15 @@ pub struct SubAgentConfig {
 
     /// Maximum wall-clock seconds a delegation may run before being killed.
     /// If unset, falls back to the system default (600s); the hard ceiling
-    /// is 1800s regardless of what the tool caller or this config requests.
+    /// is the per-agent `max_timeout` (or the global 1800s) regardless of
+    /// what the tool caller or this config requests.
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// Per-agent hard ceiling for delegation wall-clock time. Overrides the
+    /// global 1800s clamp for this agent only (e.g. coder waiting on CI
+    /// feedback loops may want 3600s+). None = global clamp applies.
+    #[serde(default)]
+    pub max_timeout: Option<u64>,
 }
 
 impl SubAgentConfig {

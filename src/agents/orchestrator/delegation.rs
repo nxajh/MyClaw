@@ -187,7 +187,8 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             );
             let content = format!(
                 "[系统通知] 子代理后台任务超时 (session_id: {}, 超时上限: {}s, 已运行: {}s)，任务已中止。\
-                 如需重试请重新委托，或先用 agent_list 确认无残留任务。",
+                 子会话的已完成工作已保留：如需继续该任务，用 agent_resume 工具以其 session_id 恢复\
+                 （会获得新的时间预算并从断点继续）；如需重做，重新委托即可。",
                 sub_session_id, timeout_secs, duration_secs
             );
             let synthetic_id = format!("delegation:{}", sub_session_id);

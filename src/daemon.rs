@@ -1162,7 +1162,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         parent_tools.register(Arc::new(crate::tools::AgentKillTool::new(Arc::clone(
             &delegator_arc,
         ))));
-        tracing::debug!("agent_list / agent_kill tools registered (multi-agent mode)");
+        // agent_resume (timeout layer 3): revive a timed-out sub-agent with a
+        // fresh budget — continues the preserved sub-session instead of
+        // re-delegating from scratch.
+        parent_tools.register(Arc::new(crate::tools::AgentResumeTool::new(Arc::clone(
+            &delegator_arc,
+        ))));
+        tracing::debug!("agent_list / agent_kill / agent_resume tools registered (multi-agent mode)");
 
         // sessions_yield (RFC delegation-notice-queue §3): deterministic turn
         // hand-off for the parent agent after spawning async sub-agents.
@@ -1768,6 +1774,7 @@ mod tests {
             model: None,
             isolation: AgentIsolation::default(),
             timeout: None,
+            max_timeout: None,
         };
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(NamedTool("shell")));

@@ -93,6 +93,7 @@ fn empty_config() -> SubAgentConfig {
         model: None,
         isolation: Default::default(),
         timeout: None,
+        max_timeout: None,
     }
 }
 

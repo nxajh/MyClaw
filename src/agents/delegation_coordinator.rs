@@ -39,11 +39,14 @@ use crate::config::sub_agent::AgentIsolation;
 use crate::ids::{Fqid, TYPE_SESSION};
 
 /// Default wall-clock timeout for a sub-agent when neither the tool caller
-/// nor the SubAgentConfig specifies one.
-const SUB_AGENT_TIMEOUT_DEFAULT_SECS: u64 = 600;
+/// nor the SubAgentConfig specifies one. Sized to cover ~2 CI rounds
+/// (5-7 min each) plus margin — shorter defaults starve code-modifying
+/// sub-agents on CI-only hosts.
+const SUB_AGENT_TIMEOUT_DEFAULT_SECS: u64 = 1200;
 
-/// Hard ceiling: no delegation may run longer than this regardless of what
-/// the tool caller or SubAgentConfig requests.
+/// Hard ceiling: no delegation may run longer than this unless the agent's
+/// config raises it via `max_timeout` (per-agent override). The global clamp
+/// still bounds every agent that does not opt in.
 const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
 
 /// Capacity of each running sub-agent's inbox (parent → sub messages).
@@ -52,10 +55,12 @@ const SUB_AGENT_INBOX_CAPACITY: usize = 64;
 /// Resolve the effective timeout.
 ///
 /// Priority: `tool_timeout` > `config_timeout` > `SUB_AGENT_TIMEOUT_DEFAULT_SECS`,
-/// clamped to `SUB_AGENT_TIMEOUT_MAX_SECS`.
-fn resolve_timeout(tool_timeout: Option<u64>, config_timeout: Option<u64>) -> u64 {
+/// clamped to the agent's `max_timeout` when configured, else the global
+/// `SUB_AGENT_TIMEOUT_MAX_SECS`. Per-agent ceilings let long-running agents
+/// (e.g. coder waiting on CI feedback loops) opt into larger budgets.
+fn resolve_timeout(tool_timeout: Option<u64>, config_timeout: Option<u64>, max_timeout: Option<u64>) -> u64 {
     let secs = tool_timeout.or(config_timeout).unwrap_or(SUB_AGENT_TIMEOUT_DEFAULT_SECS);
-    secs.min(SUB_AGENT_TIMEOUT_MAX_SECS)
+    secs.min(max_timeout.unwrap_or(SUB_AGENT_TIMEOUT_MAX_SECS))
 }
 
 /// Builds the git branch name used for a sub-agent worktree.
@@ -696,6 +701,12 @@ impl DelegationCoordinator {
                     session.sub_agent_inbox = Some(Arc::new(mailbox));
                 }
                 session.turn_tool_allowlist = allowed_tools;
+                // Time-awareness: the sub-agent sees its wall-clock budget as
+                // a per-LLM-request countdown reminder. Derived from the same
+                // `timeout_secs` that drives the kill timer below, so the
+                // injected countdown can never disagree with the actual kill.
+                session.delegation_deadline =
+                    Some(crate::agents::session::DelegationDeadline::from_now(timeout_secs));
             }
             let allowlist_clone = {
                 let session = sub_ctx.session.lock().await;
@@ -1352,6 +1363,105 @@ impl DelegationCoordinator {
         Ok(sub_session_id)
     }
 
+    /// Layer-3 resumability: revive a timed-out delegation with a fresh budget.
+    ///
+    /// The kill timer ends the *task*, not the *work* — the sub-session
+    /// history (and its incomplete-turn state, re-detected on load) survives
+    /// on disk, so `run_recovery` continues from the breakpoint. This method:
+    /// 1. validates the durable checkpoint is a `timed_out` tombstone (the
+    ///    only resumable terminal — Completed checkpoints are deleted, and
+    ///    Failed/Cancelled carry no continuable-turn guarantee),
+    /// 2. re-arms the parent's suspension `pending` (idempotent) BEFORE
+    ///    spawning, so the eventual terminal event records cleanly instead
+    ///    of hitting the `Duplicate` drop path (TimedOut was already
+    ///    collected once) — and, if the parent turn is still running, it
+    ///    suspends awaiting the result like a fresh async delegation,
+    /// 3. rewrites the checkpoint (`running`, `started_at = now`, new
+    ///    budget) so a crash during the resumed run recovers with the
+    ///    *resumed* budget, then drives `recover_async` (the same path as
+    ///    daemon-restart recovery).
+    pub fn resume_timed_out(
+        &self,
+        sub_session_id: &str,
+        extra_secs: Option<u64>,
+    ) -> anyhow::Result<String> {
+        use anyhow::Context as _;
+        if self.running.contains_key(sub_session_id) {
+            anyhow::bail!("sub-agent '{}' is already running", sub_session_id);
+        }
+        let backend = self.session_manager.backend();
+        let cp = backend
+            .load_delegation_checkpoint(sub_session_id)
+            .with_context(|| format!("no delegation checkpoint for '{}'", sub_session_id))?;
+        if cp.status != "timed_out" {
+            anyhow::bail!(
+                "sub-agent '{}' is not resumable (checkpoint status: '{}'; only timed_out delegations can be resumed)",
+                sub_session_id,
+                cp.status
+            );
+        }
+        let requested = extra_secs.unwrap_or(cp.timeout_secs);
+        let max_timeout = self.find_agent(&cp.agent_name).and_then(|a| a.config.max_timeout);
+        let budget = requested.min(max_timeout.unwrap_or(SUB_AGENT_TIMEOUT_MAX_SECS)).max(1);
+
+        // Re-arm the parent side. Registered (active) context first; the
+        // fallback load covers a parent that switched away or whose turn
+        // already ended — `add_pending_task` re-creates the suspension in
+        // that case, keeping the parent turn-suspended awaiting the result.
+        let parent_ctx = self
+            .session_manager
+            .registered_context_by_session_id(&cp.parent_session_id)
+            .or_else(|| {
+                self.session_manager
+                    .load_context_by_session_id(&cp.parent_session_id)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "parent session '{}' not found for sub-agent '{}'",
+                    cp.parent_session_id,
+                    sub_session_id
+                )
+            })?;
+        parent_ctx.add_pending_task(sub_session_id.to_string());
+
+        // Sub-sessions are never registered — always a fresh load (same as
+        // daemon-restart recovery). Loading re-detects the incomplete turn
+        // from the history tail, which `run_recovery` continues from.
+        let sub_ctx = self
+            .session_manager
+            .load_context_by_session_id(sub_session_id)
+            .with_context(|| format!("sub-agent session '{}' not found", sub_session_id))?;
+
+        let resumed = crate::storage::DelegationCheckpoint {
+            parent_session_id: cp.parent_session_id.clone(),
+            sub_session_id: sub_session_id.to_string(),
+            agent_name: cp.agent_name.clone(),
+            status: "running".to_string(),
+            started_at: chrono::Utc::now(),
+            timeout_secs: budget,
+            allowed_tools: cp.allowed_tools.clone(),
+            last_checkpoint: None,
+        };
+        if let Err(e) = backend.save_delegation_checkpoint(&resumed) {
+            tracing::warn!(sub_session_id, err = %e, "persist resumed delegation checkpoint failed");
+        }
+        tracing::info!(
+            sub_session_id,
+            budget_secs = budget,
+            "resuming timed-out delegation with fresh budget"
+        );
+
+        self.recover_async(
+            sub_session_id.to_string(),
+            cp.agent_name.clone(),
+            cp.parent_session_id.clone(),
+            sub_ctx,
+            budget,
+            cp.allowed_tools.clone(),
+        );
+        Ok(sub_session_id.to_string())
+    }
+
     pub fn recover_async(
         &self,
         sub_session_id: String,
@@ -1393,6 +1503,12 @@ impl DelegationCoordinator {
                 let mut session = sub_ctx.session.lock().await;
                 session.sub_agent_inbox = Some(Arc::new(mailbox));
                 session.turn_tool_allowlist = allowed_tools;
+                // Time-awareness on recovery: same budget as the kill timer
+                // below (the caller already discounted time spent before the
+                // restart when computing `timeout_secs`), so the countdown
+                // the sub-agent sees matches the actual remaining budget.
+                session.delegation_deadline =
+                    Some(crate::agents::session::DelegationDeadline::from_now(timeout_secs));
             }
 
             let turn_future = async {
@@ -1494,10 +1610,10 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         allowed_tools: Option<Vec<String>>,
         workspace: Option<&str>,
     ) -> anyhow::Result<String> {
-        let config_timeout = self
-            .find_agent(agent_name)
-            .and_then(|a| a.config.timeout);
-        let timeout_secs = resolve_timeout(timeout, config_timeout);
+        let config = self.find_agent(agent_name);
+        let config_timeout = config.as_ref().and_then(|a| a.config.timeout);
+        let config_max = config.as_ref().and_then(|a| a.config.max_timeout);
+        let timeout_secs = resolve_timeout(timeout, config_timeout, config_max);
         // Create the sub-session context up front — the sub-session id is
         // the agent's identity, created before the delegation starts (same
         // unified path as the async `spawn_delegate_async`).
@@ -1526,10 +1642,10 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         allowed_tools: Option<Vec<String>>,
         workspace: Option<&str>,
     ) -> anyhow::Result<String> {
-        let config_timeout = self
-            .find_agent(agent_name)
-            .and_then(|a| a.config.timeout);
-        let timeout_secs = resolve_timeout(timeout, config_timeout);
+        let config = self.find_agent(agent_name);
+        let config_timeout = config.as_ref().and_then(|a| a.config.timeout);
+        let config_max = config.as_ref().and_then(|a| a.config.max_timeout);
+        let timeout_secs = resolve_timeout(timeout, config_timeout, config_max);
         self.spawn_delegate_async(
             agent_name,
             task,
@@ -1639,6 +1755,7 @@ mod tests {
             model: None,
             isolation: AgentIsolation::Shared,
             timeout: None,
+            max_timeout: None,
         }
     }
 
@@ -1759,18 +1876,23 @@ mod tests {
 
     #[test]
     fn resolve_timeout_priority_fallback_and_clamp() {
-        // default: system fallback 600s
-        assert_eq!(resolve_timeout(None, None), 600);
+        // default: system fallback 1200s
+        assert_eq!(resolve_timeout(None, None, None), 1200);
         // tool value wins over config regardless of ordering
-        assert_eq!(resolve_timeout(Some(100), Some(50)), 100);
-        assert_eq!(resolve_timeout(Some(100), Some(200)), 100);
+        assert_eq!(resolve_timeout(Some(100), Some(50), None), 100);
+        assert_eq!(resolve_timeout(Some(100), Some(200), None), 100);
         // config used when tool doesn't specify
-        assert_eq!(resolve_timeout(None, Some(300)), 300);
-        // hard ceiling 1800s
-        assert_eq!(resolve_timeout(Some(5000), None), 1800);
-        assert_eq!(resolve_timeout(Some(5000), Some(9000)), 1800);
+        assert_eq!(resolve_timeout(None, Some(300), None), 300);
+        // global hard ceiling 1800s when no per-agent max
+        assert_eq!(resolve_timeout(Some(5000), None, None), 1800);
+        assert_eq!(resolve_timeout(Some(5000), Some(9000), None), 1800);
+        // per-agent max_timeout overrides the global clamp
+        assert_eq!(resolve_timeout(Some(5000), None, Some(3600)), 3600);
+        assert_eq!(resolve_timeout(Some(5000), Some(9000), Some(7200)), 5000);
+        // per-agent max below requested value clamps down too
+        assert_eq!(resolve_timeout(Some(3000), None, Some(900)), 900);
         // 0 passes through (no lower clamp)
-        assert_eq!(resolve_timeout(Some(0), None), 0);
+        assert_eq!(resolve_timeout(Some(0), None, None), 0);
     }
 
     #[test]
@@ -1778,6 +1900,127 @@ mod tests {
         let (dc, _m) = coordinator(3);
         assert_eq!(dc.session_depth("no-such-session"), 1);
         assert!(dc.check_depth("no-such-session").is_ok());
+    }
+
+    // ── resume_timed_out (timeout layer 3) ─────────────────────────────────
+
+    /// Coordinator over a real JsonFileBackend so delegation checkpoints
+    /// round-trip (the in-memory backend no-ops them). Runtime is NOT
+    /// installed: `recover_async` logs an error and returns without spawning
+    /// — everything resume validates/mutates before that point is observable.
+    fn coordinator_with_backend(
+    ) -> (DelegationCoordinator, Arc<SessionManager>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn crate::storage::SessionBackend> = Arc::new(
+            crate::storage::JsonFileBackend::open(dir.path()).unwrap(),
+        );
+        let manager = Arc::new(SessionManager::new(backend));
+        let registry = Arc::new(AgentRegistry::from_vec(vec![coder_config()]));
+        let dc = DelegationCoordinator::new(
+            registry,
+            Arc::clone(&manager),
+            PathBuf::new(),
+            "test",
+            3,
+        );
+        (dc, manager, dir)
+    }
+
+    fn checkpoint_for(
+        sub_session_id: &str,
+        parent_session_id: &str,
+        status: &str,
+        timeout_secs: u64,
+    ) -> crate::storage::DelegationCheckpoint {
+        crate::storage::DelegationCheckpoint {
+            parent_session_id: parent_session_id.to_string(),
+            sub_session_id: sub_session_id.to_string(),
+            agent_name: "coder".to_string(),
+            status: status.to_string(),
+            started_at: chrono::Utc::now(),
+            timeout_secs,
+            allowed_tools: Some(vec!["shell".to_string()]),
+            last_checkpoint: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_timed_out_rejects_missing_and_non_timeout_checkpoints() {
+        let (dc, manager, _dir) = coordinator_with_backend();
+
+        // No checkpoint at all → error.
+        let err = dc.resume_timed_out("test/s/ghost", None).unwrap_err();
+        assert!(format!("{:#}", err).contains("no delegation checkpoint"));
+
+        // Real parent + sub sessions, but the tombstone says "failed" →
+        // only timed_out is resumable.
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let sub = manager.create_sub_session(&parent.session_id, "coder").unwrap();
+        manager
+            .backend()
+            .save_delegation_checkpoint(&checkpoint_for(
+                &sub.id,
+                &parent.session_id,
+                "failed",
+                600,
+            ))
+            .unwrap();
+        let err = dc.resume_timed_out(&sub.id, None).unwrap_err();
+        assert!(format!("{:#}", err).contains("not resumable"));
+        assert!(format!("{:#}", err).contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn resume_timed_out_rewrites_checkpoint_and_rearms_parent() {
+        let (dc, manager, _dir) = coordinator_with_backend();
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let sub = manager.create_sub_session(&parent.session_id, "coder").unwrap();
+        let backend = manager.backend();
+        backend
+            .save_delegation_checkpoint(&checkpoint_for(
+                &sub.id,
+                &parent.session_id,
+                "timed_out",
+                600,
+            ))
+            .unwrap();
+
+        // Parent turn already ended (no suspension) — resume must re-arm it.
+        assert!(!parent.has_pending_delegations());
+
+        let resumed = dc.resume_timed_out(&sub.id, Some(9999)).unwrap();
+        assert_eq!(resumed, sub.id);
+
+        // Fresh budget clamped to the global 1800s ceiling (coder has no
+        // max_timeout configured) and checkpoint flipped back to running.
+        let cp = backend.load_delegation_checkpoint(&sub.id).unwrap();
+        assert_eq!(cp.status, "running");
+        assert_eq!(cp.timeout_secs, 1800);
+        assert_eq!(cp.allowed_tools.as_deref(), Some(&["shell".to_string()][..]));
+
+        // Parent suspension re-armed so the eventual terminal event records
+        // (instead of hitting the Duplicate drop path).
+        assert!(parent.has_pending_delegations());
+
+        // Second resume while the first holds the slot → already running.
+        // (recover_async returned early without inserting a RunningEntry
+        // because no runtime is installed in tests, so simulate the entry.)
+        dc.running.insert(
+            sub.id.clone(),
+            RunningEntry {
+                handle: tokio::spawn(async {}),
+                status: std::sync::RwLock::new(DelegationStatus::Running),
+                agent_name: "coder".to_string(),
+                parent_session_id: parent.session_id.clone(),
+                spawned_at: std::time::Instant::now(),
+                messages_sent: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: Some(1800),
+                started_at: chrono::Utc::now(),
+                allowed_tools: None,
+            },
+        );
+        let err = dc.resume_timed_out(&sub.id, None).unwrap_err();
+        assert!(format!("{:#}", err).contains("already running"));
     }
 
     #[test]
