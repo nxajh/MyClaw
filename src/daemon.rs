@@ -1435,7 +1435,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // SessionContext created from here on resolves channels via
     // `Session::resolve_channel()`.
     orchestrator.ctx().sessions.set_channel_registry(
-        orchestrator.ctx().channels.clone(),
+        orchestrator.ctx().channels.clone().into(),
     );
 
     // H57: AgentLoop is gone; the ClientChannel's previous loop_registry +
