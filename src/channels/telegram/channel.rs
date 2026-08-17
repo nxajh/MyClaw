@@ -103,6 +103,8 @@ pub struct TelegramChannel {
     stall_messages: ReactionTracker,
     /// Streaming preview mode for this channel.
     streaming_mode: crate::config::channel::StreamingMode,
+    /// Per-account auto-TTS switch (default off).
+    tts: bool,
     /// Targets with active streams; stall watchdog skips these to avoid
     /// redundant "still thinking" messages alongside the live preview.
     streaming_targets: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -140,6 +142,7 @@ impl TelegramChannel {
             typing_started_at: Arc::new(Mutex::new(std::collections::HashMap::new())),
             stall_messages: Arc::new(Mutex::new(std::collections::HashMap::new())),
             streaming_mode: config.streaming_mode,
+            tts: config.tts,
             streaming_targets: Arc::new(Mutex::new(std::collections::HashSet::new())),
             data_dir: directories::ProjectDirs::from("", "", "myclaw")
                 .map(|d| d.data_dir().to_path_buf())
@@ -1762,6 +1765,10 @@ impl Channel for TelegramChannel {
         &TELEGRAM_CAPS
     }
 
+    fn tts_enabled(&self) -> bool {
+        self.tts
+    }
+
     fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
         use crate::channels::{AllowList, ChannelSecurityPolicy, GroupAuthMode};
         let allowed_users = if self.allowed_users.iter().any(|s| s == "*") {
@@ -2907,6 +2914,7 @@ mod tests {
             debounce_ms: 0,        // disabled in tests
             stall_timeout_secs: 0, // disabled in tests
             streaming_mode: crate::config::channel::StreamingMode::Partial,
+            tts: false,
         }
     }
 

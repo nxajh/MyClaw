@@ -33,6 +33,10 @@ pub struct WechatAccountConfig {
     /// Whether this account is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Whether replies on this account are synthesized to voice (TTS).
+    /// Effective gate: `[agent] auto_tts` AND this flag. Default off.
+    #[serde(default)]
+    pub tts: bool,
 }
 
 fn default_wechat_debounce_ms() -> u64 {
@@ -58,6 +62,7 @@ impl Default for WechatAccountConfig {
             allowed_groups: None,
             debounce_ms: default_wechat_debounce_ms(),
             enabled: true,
+            tts: false,
         }
     }
 }
@@ -136,6 +141,10 @@ pub struct TelegramAccountConfig {
     /// Streaming preview mode: `"progress"` (default), `"partial"`, or `"off"`.
     #[serde(default)]
     pub streaming_mode: StreamingMode,
+    /// Whether replies on this account are synthesized to voice (TTS).
+    /// Effective gate: `[agent] auto_tts` AND this flag. Default off.
+    #[serde(default)]
+    pub tts: bool,
 }
 
 fn default_debounce_ms() -> u64 {
@@ -215,6 +224,10 @@ pub struct QQBotAccountConfig {
     /// Debounce separator inserted between merged texts.
     #[serde(default = "default_debounce_separator")]
     pub debounce_separator: String,
+    /// Whether replies on this account are synthesized to voice (TTS).
+    /// Effective gate: `[agent] auto_tts` AND this flag. Default off.
+    #[serde(default)]
+    pub tts: bool,
 }
 
 fn default_debounce_separator() -> String {
@@ -295,6 +308,10 @@ pub struct ClientConfig {
     pub max_connections: u32,
     /// Authentication token (Bearer). None = no auth required.
     pub auth_token: Option<String>,
+    /// Whether replies on this channel are synthesized to voice (TTS).
+    /// Effective gate: `[agent] auto_tts` AND this flag. Default off.
+    #[serde(default)]
+    pub tts: bool,
 }
 
 fn default_client_bind() -> String {
@@ -312,6 +329,7 @@ impl Default for ClientConfig {
             bind: default_client_bind(),
             max_connections: default_max_connections(),
             auth_token: None,
+            tts: false,
         }
     }
 }
@@ -335,6 +353,24 @@ allowed_users = ["wxid_abc123"]
         assert_eq!(config.bot_token.as_deref(), Some("${WECHAT_BOT_TOKEN}"));
         assert_eq!(config.poll_timeout, 45);
         assert!(config.enabled);
+        assert!(!config.tts, "wechat tts must default to off");
+    }
+
+    #[test]
+    fn deserialize_tts_flags_default_off() {
+        let tg: TelegramAccountConfig = toml::from_str("bot_token = \"t\"").unwrap();
+        assert!(!tg.tts, "telegram tts must default to off");
+        let tg_on: TelegramAccountConfig =
+            toml::from_str("bot_token = \"t\"\ntts = true").unwrap();
+        assert!(tg_on.tts);
+        let wx = toml::from_str::<WechatAccountConfig>("api_base = \"x\"");
+        assert!(!wx.unwrap().tts);
+        let qq = toml::from_str::<QQBotAccountConfig>(
+            "app_id = \"a\"\nclient_secret = \"s\"",
+        );
+        assert!(!qq.unwrap().tts, "qqbot tts must default to off");
+        let cl = toml::from_str::<ClientConfig>("enabled = true");
+        assert!(!cl.unwrap().tts, "client tts must default to off");
     }
 
     #[test]

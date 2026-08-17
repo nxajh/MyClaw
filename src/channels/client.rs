@@ -995,6 +995,10 @@ impl Channel for ClientChannel {
         &CLIENT_CAPS
     }
 
+    fn tts_enabled(&self) -> bool {
+        self.config.tts
+    }
+
     async fn send_message(
         &self,
         msg: &ChannelOutboundMessage,

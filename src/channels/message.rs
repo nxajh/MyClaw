@@ -540,6 +540,14 @@ pub trait Channel: Send + Sync {
         &MINIMAL_CAPABILITIES
     }
 
+    /// Whether auto-TTS is enabled for this channel instance (per-account
+    /// `tts` config flag, default off). `SessionContext::process_turn`
+    /// consults this together with the global `[agent] auto_tts` master
+    /// switch before synthesizing a reply to voice.
+    fn tts_enabled(&self) -> bool {
+        false
+    }
+
     /// Measure text length in the unit declared by `capabilities()`.
     /// Used for chunking and "is this within platform limits" checks.
     fn message_len(&self, text: &str) -> usize {

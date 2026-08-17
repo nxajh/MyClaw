@@ -1582,6 +1582,10 @@ impl Channel for WechatChannel {
         &WECHAT_CAPS
     }
 
+    fn tts_enabled(&self) -> bool {
+        self.config.tts
+    }
+
     async fn on_status(&self, recipient: &str, status: ProcessingStatus) {
         match status {
             ProcessingStatus::Thinking => {

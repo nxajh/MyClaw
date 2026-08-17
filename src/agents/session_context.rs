@@ -1079,7 +1079,10 @@ impl SessionContext {
                 // ── Auto TTS ──────────────────────────────────────────────
                 // If auto_tts is enabled and a TTS provider is available,
                 // synthesize the reply text to audio and send as a voice message.
+                // Gate: global `[agent] auto_tts` master switch AND the
+                // per-account channel `tts` flag (default off).
                 if runtime.defaults.auto_tts
+                    && channel_for_send.as_ref().is_some_and(|ch| ch.tts_enabled())
                     && !silenced
                     && !turn_result.has_pending
                     && !turn_result.text.trim().is_empty()

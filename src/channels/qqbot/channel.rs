@@ -1753,6 +1753,10 @@ impl Channel for QQBotChannel {
         &QQBOT_CAPS
     }
 
+    fn tts_enabled(&self) -> bool {
+        self.config.tts
+    }
+
     fn group_stats(&self) -> Vec<crate::channels::GroupStat> {
         let history = self.group_history.lock();
         history
@@ -2948,6 +2952,7 @@ mod tests {
             group_config: gc,
             debounce_window_ms: 0,
             debounce_separator: "\n\n---\n\n".to_string(),
+            tts: false,
         };
         QQBotChannel::new("test".to_string(), config)
     }
