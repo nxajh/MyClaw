@@ -1,8 +1,8 @@
 //! Startup recovery: resume turns interrupted by a previous crash / SIGKILL.
 //!
 //! User sessions with incomplete turns are resumed through the normal turn
-//! path (`dispatch_turn` → `process_turn`) so `session.channel` is reinstalled
-//! and channel-scoped tools (e.g. `send_message`) stay available. Only the
+//! path (`dispatch_turn` → `process_turn`) so channel-scoped tools (e.g.
+//! `send_message`) stay available via `Session::resolve_channel()`. Only the
 //! routing key's active session is recovered; inactive sessions resume when
 //! the user switches back.
 //!
@@ -142,9 +142,9 @@ fn should_recover_active_session(
 /// Resume all incomplete user sessions and sub-agents found on disk.
 ///
 /// User sessions: dispatch active sessions through the normal turn path
-/// (`dispatch_turn` → `process_turn`) so `session.channel` is reinstalled and
-/// channel-scoped tools (e.g. `send_message`) remain available during the
-/// resumed turn. Inactive sessions are left for the normal message path.
+/// (`dispatch_turn` → `process_turn`) so channel-scoped tools (e.g.
+/// `send_message`) remain available via `Session::resolve_channel()` during
+/// the resumed turn. Inactive sessions are left for the normal message path.
 ///
 /// Sub-agents: resume via `run_recovery` and emit the terminal event.
 ///
@@ -418,10 +418,12 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
 /// the existing history — no synthetic user message is appended to history and
 /// no restart notice is injected. Zero user confirmation, zero notification.
 ///
-/// Phase 1 (holds `turn_lock` + session lock, like `spawn_recovery`): install
-/// `session.channel` so channel-scoped tools work, run `run_recovery`, capture
-/// the recovered text + `pending_retry`, clear `incomplete_turn`, uninstall
-/// the channel. The text is delivered OUTSIDE the locks.
+/// Phase 1 (holds `turn_lock` + session lock, like `spawn_recovery`): run
+/// `run_recovery` — channel-scoped tools resolve their channel via
+/// `Session::resolve_channel()` (RFC channel-role-split §1.2, wired by
+/// SessionManager at materialization), so there is no handle to install or
+/// uninstall here. Capture the recovered text + `pending_retry`, clear
+/// `incomplete_turn`. The text is delivered OUTSIDE the locks.
 ///
 /// Phase 2 (lock-free): replay Pending spooled entries for the key — AFTER the
 /// recovery turn so the incomplete history is resolved before the next user
@@ -433,6 +435,8 @@ async fn recover_active_session(
     reply_target: MessageReceiver,
 ) {
     let sk = key.to_string();
+    // Delivery handle for the recovered text — resolved from the live
+    // registry (same channel the session's tools would resolve).
     let Some(channel) = ctx.channel(&key.account_key()) else {
         tracing::warn!(session = %sk, "startup recovery: channel gone; skipping session recovery");
         return;
@@ -442,14 +446,12 @@ async fn recover_active_session(
     let (text, turn_clean) = {
         let _turn_guard = session_ctx.turn_lock.lock().await;
         let mut session = session_ctx.session.lock().await;
-        session.channel = Some(channel.clone());
         let resolved = ResolvedTurn::resolve(&session, &ctx.runtime);
         let turn_ctx = resolved.turn_context();
         let result = session_ctx
             .agent
             .run_recovery(&mut session, turn_ctx, &ctx.runtime)
             .await;
-        session.channel = None;
         session.incomplete_turn = false;
         // Stash `pending_retry` while the session lock is held (same pattern
         // as process_turn's tail) so a later retry button keeps working.

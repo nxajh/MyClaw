@@ -65,6 +65,13 @@ pub struct SessionManager {
     /// (profile, memory). Held here so `list_sessions_for_user` and
     /// future per-user lookups don't need to take it as a parameter.
     resolver: Arc<UserResolver>,
+    /// RFC channel-role-split §1.2: the live channel registry, injected by
+    /// the composition root after the Orchestrator builds it (the manager is
+    /// constructed first — circular dep). Shared `Arc` with
+    /// `OrchestratorCtx.channels` so config hot-reloads (registry rebuilds)
+    /// are visible to every session. Wired onto each Session at
+    /// SessionContext materialization (same place as the persist hook).
+    channels: RwLock<Option<Arc<crate::agents::orchestrator::ctx::ChannelRegistry>>>,
 }
 
 impl SessionManager {
@@ -74,6 +81,7 @@ impl SessionManager {
             contexts: RwLock::new(HashMap::new()),
             agents: Arc::new(AgentRegistry::new()),
             resolver: Arc::new(UserResolver::new()),
+            channels: RwLock::new(None),
         }
     }
 
@@ -97,6 +105,50 @@ impl SessionManager {
     /// Borrow the installed resolver.
     pub fn resolver(&self) -> &Arc<UserResolver> {
         &self.resolver
+    }
+
+    /// RFC channel-role-split §1.2: install the live channel registry shared
+    /// with `OrchestratorCtx.channels`. Called by the composition root once
+    /// the Orchestrator has built the registry (the manager is constructed
+    /// first — circular dep); every SessionContext materialized afterwards
+    /// wires it onto the Session. Already-materialized contexts are refreshed
+    /// too, so their sessions can resolve channels without waiting for a
+    /// drop_context/rebuild cycle.
+    pub fn set_channel_registry(
+        &self,
+        channels: Arc<crate::agents::orchestrator::ctx::ChannelRegistry>,
+    ) {
+        for ctx in self.contexts.read().values() {
+            if let Ok(mut session) = ctx.session.try_lock() {
+                if session.channels.is_none() {
+                    session.channels = Some(Arc::clone(&channels));
+                }
+            }
+        }
+        *self.channels.write() = Some(channels);
+    }
+
+    /// RFC channel-role-split §1.2: parse the routing key's
+    /// `(channel_type, account_id)` account pair. Headless keys — cron
+    /// (`_cron_*`), heartbeat (`_heartbeat_*`) and sub-agent session ids —
+    /// resolve to `None` (no delivery target). Ordinary user keys look like
+    /// `channel:account:sender`.
+    fn account_key_for_routing_key(routing_key: &str) -> Option<(String, String)> {
+        // Sub-agent session ids look like "myclaw/s/<uuid>" (no colons) —
+        // they never resolve to a delivery channel (RFC §1.2).
+        if routing_key.starts_with("_cron_")
+            || routing_key.starts_with("_heartbeat_")
+            || routing_key.starts_with("myclaw/s/")
+        {
+            return None;
+        }
+        let mut parts = routing_key.split(':');
+        let channel_type = parts.next()?.to_string();
+        let account = parts.next()?.to_string();
+        if channel_type.is_empty() || account.is_empty() {
+            return None;
+        }
+        Some((channel_type, account))
     }
 
     pub fn in_memory() -> Self {
@@ -642,6 +694,15 @@ impl SessionManager {
         // the same hook every turn; process_turn no longer needs to
         // pull it from AgentRuntime.
         session.persist = Some(self.build_persist_hook());
+        // RFC channel-role-split §1.2: wire the live channel registry + the
+        // routing key's account pair in the same place, so per-turn tools
+        // (ask_user / send_message / approval routing / on_tool_event) can
+        // resolve the delivery channel via `Session::resolve_channel()`
+        // instead of holding a turn-installed handle.
+        if let Some(ref registry) = *self.channels.read() {
+            session.channels = Some(Arc::clone(registry));
+            session.channel_account = Self::account_key_for_routing_key(routing_key);
+        }
         let agent = self.build_agent_for_session(&session);
         let ctx = Arc::new(SessionContext::new(session, agent));
         self.contexts

@@ -171,7 +171,7 @@ impl ToolExecutor {
             Some(r) => r,
             None => return ApprovalDecision::Skipped,
         };
-        let channel = match session.channel.as_ref() {
+        let channel = match session.resolve_channel() {
             Some(c) => c,
             None => return ApprovalDecision::Skipped,
         };

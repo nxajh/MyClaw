@@ -13,23 +13,26 @@ use super::{OrchestratorCtx, is_silent_ok};
 use crate::channels::ChannelInboundMessage;
 
 /// Run a scheduled turn for `session_key` with `prompt`, forcing Background
-/// run_mode and applying an optional per-call model override. Returns the
-/// turn's text; delivery is handled by the caller.
+/// run_mode on the synthetic message and applying an optional per-call model
+/// override. Returns the turn's text; delivery is handled by the caller.
 pub(crate) async fn run_scheduled_turn(
     orch: &OrchestratorCtx,
     session_key: &str,
     prompt: &str,
     model_override: Option<String>,
 ) -> anyhow::Result<String> {
-    // Get-or-create the SessionContext, forcing Background run_mode on
-    // first materialization. Per-call model override is applied on
-    // every invocation so cron jobs that change `model` mid-stream are
+    // Get-or-create the SessionContext, applying the per-call model override
+    // on every invocation so cron jobs that change `model` mid-stream are
     // honored on the next turn.
+    //
+    // RFC channel-role-split §1.4-2: no session-level
+    // `session_override.run_mode = Background` write — run_mode now travels
+    // on the synthetic message below (turn-scoped). Writing it here poisoned
+    // the user's session when an Inject-mode cron reused it.
     let model_for_init = model_override.clone();
     let session_ctx = orch
         .sessions
         .get_or_create_context_with(session_key, move |session| {
-            session.session_override.run_mode = Some(crate::config::agent::RunMode::Background);
             if let Some(m) = model_for_init {
                 session.session_override.model = Some(m);
             }
@@ -42,6 +45,9 @@ pub(crate) async fn run_scheduled_turn(
     // Synthetic ChannelInboundMessage so process_turn drives the same code path
     // as user inbound turns. No channel — scheduled output is delivered
     // by the caller via `send_to_target_internal` after process_turn returns.
+    // RFC channel-role-split §1.1: run_mode = Background marks the turn as
+    // headless (ask_user errors instead of hanging; prompt rules switch to
+    // the autonomous section for THIS turn only).
     let inbound = ChannelInboundMessage {
         id: format!("scheduled:{}", session_key),
         sender: crate::channels::MessageSender::new(format!("scheduler:{}", session_key)),
@@ -50,6 +56,7 @@ pub(crate) async fn run_scheduled_turn(
         timestamp: chrono::Utc::now().timestamp() as u64,
         interruption_scope_id: None,
         silenced_override: None,
+        run_mode: crate::config::agent::RunMode::Background,
     };
     let runtime = orch.runtime.clone();
     session_ctx
@@ -162,33 +169,23 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
     };
 
     // Send output to target channel (on success with non-empty output).
-    // For Inject mode, the output is already in the user's session, so we
-    // only send if the session is not active (user will see it on /switch).
-    // For Isolated mode, always send to channel.
+    // RFC channel-role-split §1.4-1: `send_to_target_internal` is the ONLY
+    // delivery exit for scheduled turns (run_scheduled_turn passes
+    // channel=None, so the turn itself delivers nothing). The former
+    // ffa0317 `should_send = !is_active` gate is removed — it starved
+    // Inject-mode crons doubly (turn had no channel AND send was skipped
+    // because the user's session was active), leaving output only in the
+    // session history (2026-08-14 weekly digest never delivered).
     if let Ok(ref response) = result {
         if !response.trim().is_empty() {
-            let should_send = if context_policy == crate::config::scheduler::ContextPolicy::Inject {
-                // Check if the user's session is currently active.
-                let routing_key = resolve_user_routing_key(&orch, target_channel.as_deref(), target_recipient.as_deref()).await;
-                let is_active = routing_key.as_ref().is_some_and(|key| {
-                    orch.sessions.active_session_id(key).is_some()
-                });
-                // Only send to channel if session is not active (user won't see it otherwise).
-                !is_active
-            } else {
-                true
-            };
-
-            if should_send {
-                send_to_target_internal(
-                    &orch,
-                    target_channel.clone(),
-                    target_account.clone(),
-                    target_recipient.clone(),
-                    response,
-                )
-                .await;
-            }
+            send_to_target_internal(
+                &orch,
+                target_channel.clone(),
+                target_account.clone(),
+                target_recipient.clone(),
+                response,
+            )
+            .await;
         }
     }
 

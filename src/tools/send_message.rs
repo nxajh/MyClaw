@@ -475,7 +475,12 @@ impl Tool for SendMessageTool {
                 .await;
         }
 
-        let channel = match session.channel.as_ref() {
+        // RFC channel-role-split §1.2: resolve via the live registry. On a
+        // headless (scheduled) turn this may still be Some when the routing
+        // key maps to a real channel — sending an intermediate notice from a
+        // background turn is a legitimate capability (the coupling that used
+        // to disable it was the bug, cf. RFC §0).
+        let channel = match session.resolve_channel() {
             Some(c) => c,
             None => {
                 return Ok(ToolResult {

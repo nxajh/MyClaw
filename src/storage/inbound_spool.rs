@@ -355,6 +355,7 @@ mod tests {
             timestamp: 0,
             interruption_scope_id: None,
             silenced_override: None,
+            run_mode: Default::default(),
         }
     }
 
@@ -367,6 +368,7 @@ mod tests {
             timestamp: 0,
             interruption_scope_id: None,
             silenced_override: None,
+            run_mode: Default::default(),
         }
     }
 

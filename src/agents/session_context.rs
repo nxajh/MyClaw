@@ -570,10 +570,15 @@ impl SessionContext {
     /// send via `channel.send`; scheduled paths route through the
     /// scheduler's `send_to_target_internal`.
     ///
-    /// `channel` is `Some` when an originating channel exists (user
-    /// turn or scheduler turn with a "last channel" handle). It's
-    /// stored on `session.channel` so per-turn tools like `ask_user`
-    /// can reach it; `None` means tools requiring a channel will error.
+    /// RFC channel-role-split §1.3: `channel` is a **pure delivery
+    /// handle** for this turn engine's own output — streaming fold,
+    /// fallback send, TTS, cancel/error notices. It does NOT mark
+    /// interactivity: the "is a human present" marker travels on
+    /// `inbound_msg.run_mode` (→ `session.turn_headless`), and
+    /// per-turn tools resolve their channel via
+    /// `Session::resolve_channel()` (registry lookup), not from this
+    /// parameter. Callers: user/wake/recovery turns pass `Some`,
+    /// scheduled turns pass `None`.
     ///
     /// On `Ok(TurnResult)`, the caller may inspect `text` /
     /// `pending_retry`. The latter is also stashed on
@@ -594,6 +599,11 @@ impl SessionContext {
         // silence intent; capture before `inbound_msg` is moved. User-message
         // turns leave it None → live snapshot decides below.
         let silenced_intent = inbound_msg.silenced_override;
+        // RFC channel-role-split §1.1: capture the turn-scoped
+        // interactivity marker BEFORE `inbound_msg` is moved. User /
+        // recovery / delegation-wake messages default to Interactive;
+        // cron/heartbeat synthesized messages carry Background.
+        let turn_run_mode = inbound_msg.run_mode;
         // 单 preview (2026-08-12): RAII guard — a delegation-notice turn
         // (silenced_intent = Some) decrements `notice_turns_in_flight` on
         // EVERY exit path (normal / early return / error). `finish()` is
@@ -687,6 +697,14 @@ impl SessionContext {
         // The turn does NOT end. Also disables `ask_user` for this turn.
         let silenced = decide_silenced(silenced_intent, self.suspension_snapshot());
         session.turn_silenced = silenced;
+        // RFC channel-role-split §1.1: the headless marker is turn-scoped,
+        // derived from the inbound message (never from a session-level
+        // override — Inject crons must not poison the user's session).
+        // Cleared at turn end like `turn_silenced`.
+        session.turn_headless = matches!(
+            turn_run_mode,
+            crate::config::agent::RunMode::Background
+        );
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
         // Channels that don't support streaming return None; the
         // fallback send block below covers them (delivery == Pending always
@@ -739,7 +757,6 @@ impl SessionContext {
                 stream.final_takeover();
             }
         }
-        session.channel = channel;
 
         // Create a fresh cancellation token for this turn. A clone goes to
         // SessionContext (for `/stop`) and another to the session (for
@@ -753,9 +770,12 @@ impl SessionContext {
         if let Some(pm) = session_override.permission_mode {
             prompt_config.permission_mode = pm;
         }
-        if let Some(rm) = session_override.run_mode {
-            prompt_config.run_mode = rm;
-        }
+        // RFC channel-role-split §1.1: run_mode is turn-scoped and travels
+        // on the inbound message (Interactive for user/wake/recovery turns,
+        // Background for cron/heartbeat). No longer read from
+        // session_override — Inject crons must not poison the user's
+        // subsequent interactive turns.
+        prompt_config.run_mode = turn_run_mode;
 
         // Sub-agent delegations set `system_prompt_override` to bypass
         // the full SystemPromptBuilder (sub-agents want a minimal
@@ -816,9 +836,9 @@ impl SessionContext {
                 || history_looks_incomplete(&session.history);
             if !has_open {
                 let msg = crate::agents::user_messages::MSG_BARE_CONTINUE.to_string();
-                // Tear down stream/channel without running the agent.
+                // Tear down stream without running the agent.
                 let turn_stream = session.turn_stream.take();
-                session.channel = None;
+                session.turn_headless = false;
                 if let Some(s) = turn_stream {
                     s.abort().await;
                 }
@@ -901,11 +921,14 @@ impl SessionContext {
         }
 
         let result = self.agent.run(&mut session, turn_ctx, &runtime).await;
-        // Per-turn channel + turn_stream are transient. Consume the
-        // stream first (RFC §7.6): finish on success delivers FinalDelivered;
-        // abort on error cancels the WS transport.
+        // Per-turn turn_stream is transient. Consume the stream first
+        // (RFC §7.6): finish on success delivers FinalDelivered; abort on
+        // error cancels the WS transport.
         let turn_stream = session.turn_stream.take();
-        session.channel = None;
+        // RFC channel-role-split §1.1: the headless marker is turn-scoped —
+        // always cleared at turn end so the next turn starts Interactive
+        // unless its own message says otherwise.
+        session.turn_headless = false;
         session.cancel_token = None;
 
         match (result, turn_stream) {
@@ -1927,6 +1950,7 @@ mod suspension_tests {
             timestamp: 0,
             interruption_scope_id: None,
             silenced_override: None,
+            run_mode: Default::default(),
         }
     }
 

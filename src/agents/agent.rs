@@ -737,8 +737,10 @@ impl Agent {
                 }
 
                 // Notify channel of tool call start (for reply progress).
+                // RFC channel-role-split §1.2: resolved from the live
+                // registry, not a turn-installed handle.
                 if let (Some(ch), Some(rt)) =
-                    (session.channel.as_ref(), session.reply_target())
+                    (session.resolve_channel(), session.reply_target())
                 {
                     ch.on_tool_event(
                         rt,
@@ -845,8 +847,10 @@ impl Agent {
                 .await;
 
                 // Notify channel of tool call completion (for reply progress).
+                // RFC channel-role-split §1.2: resolved from the live
+                // registry, not a turn-installed handle.
                 if let (Some(ch), Some(rt)) =
-                    (session.channel.as_ref(), session.reply_target())
+                    (session.resolve_channel(), session.reply_target())
                 {
                     ch.on_tool_event(
                         rt,
@@ -1130,16 +1134,22 @@ fn filter_turn_scoped_tools(
                 // RFC agent-messaging §3: sub-agent sessions get the tool
                 // even without a channel — `recipient` targeting reaches the
                 // parent agent via the DelegationEvent channel.
+                // RFC channel-role-split §1.2: main-agent visibility is now
+                // `resolve_channel().is_some() || parent_session_id.is_some()`
+                // — a headless (scheduled) turn whose routing key resolves to
+                // a real channel keeps the tool (sending intermediate notices
+                // from background turns is legitimate, not a coupling bug).
                 if session.parent_session_id.is_some() {
                     true
-                } else {
-                    let Some(channel) = session.channel.as_ref() else {
-                        return false;
-                    };
+                } else if session.resolve_channel().is_some() {
                     let has_receiver = session.reply_target().is_some();
                     let has_text_send = has_receiver;
-                    let has_file_send = channel.capabilities().supports_file_send;
+                    let has_file_send = session
+                        .resolve_channel()
+                        .is_some_and(|ch| ch.capabilities().supports_file_send);
                     has_text_send || has_file_send
+                } else {
+                    false
                 }
             }
             "send_media" => false,
@@ -1947,6 +1957,7 @@ mod tests {
             timestamp: 0,
             interruption_scope_id: None,
             silenced_override: None,
+            run_mode: Default::default(),
         });
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(NamedTool("send_message")),
@@ -2160,7 +2171,10 @@ mod tests {
     fn session_persist_field_default_none() {
         let session = Session::new("s".into());
         assert!(session.persist.is_none());
-        assert!(session.channel.is_none());
+        assert!(session.channels.is_none());
+        assert!(session.channel_account.is_none());
+        assert!(!session.turn_headless);
+        assert!(session.resolve_channel().is_none());
     }
 
     fn events_to_stream(

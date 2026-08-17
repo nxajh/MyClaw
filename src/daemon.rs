@@ -514,9 +514,10 @@ async fn build_tools(
         tools.register(tool);
     }
 
-    // AskUserTool reads `session.channel` at execute time — no per-tool
-    // channels map. Bound to the shared `AskRouter` so Orchestrator's
-    // inbound dispatch can fulfill its waits via the same router instance.
+    // AskUserTool resolves the channel via `Session::resolve_channel()` at
+    // execute time — no per-tool channels map. Bound to the shared
+    // `AskRouter` so Orchestrator's inbound dispatch can fulfill its waits
+    // via the same router instance.
     tools.register(Arc::new(crate::tools::AskUserTool::new(ask_router)));
 
     // Register additional built-in tools.
@@ -1426,6 +1427,16 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Friend tools need the live channel registry for §4.3 peer
     // notifications (framework template push, zero LLM tokens).
     friend_ctx.set_channels(orchestrator.ctx().channels.clone());
+
+    // RFC channel-role-split §1.2: back-fill the live channel registry into
+    // the SessionManager (built before the Orchestrator existed — circular
+    // dep, same reason friend_ctx gets it after construction). Sessions
+    // materialized BEFORE this point have no registry wired; every
+    // SessionContext created from here on resolves channels via
+    // `Session::resolve_channel()`.
+    orchestrator.ctx().sessions.set_channel_registry(
+        orchestrator.ctx().channels.clone(),
+    );
 
     // H57: AgentLoop is gone; the ClientChannel's previous loop_registry +
     // evict_loop dance to flush stale per-session AgentLoop instances on

@@ -134,11 +134,24 @@ pub struct Session {
     /// load time. `None` for tests and the in-memory CLI mode. C18's
     /// `Agent.run` reaches through this to persist per-turn state.
     pub persist: Option<Arc<dyn PersistHook>>,
-    /// Transient channel handle installed by the Orchestrator. `None` for
-    /// sub-sessions that piggyback on the parent, and for tests.
-    /// `Agent.run` uses `session.turn_stream` to stream turn events to the
-    /// originating UI (see `TurnStream` / RFC §7.6).
-    pub channel: Option<Arc<dyn Channel>>,
+    /// RFC channel-role-split §1.2: live channel registry (runtime-built,
+    /// rebuilt on config hot-reload — the single source of truth). Sessions
+    /// hold only the `Arc` reference so no stale channel handle can outlive
+    /// a registry rebuild. Wired by SessionManager at SessionContext
+    /// materialization (same place as `persist`). `None` for tests and
+    /// in-memory CLI mode.
+    pub channels: Option<Arc<crate::agents::orchestrator::ctx::ChannelRegistry>>,
+    /// RFC channel-role-split §1.2: the `(channel_type, account_id)` key this
+    /// session's outbound delivery resolves through. Parsed from the routing
+    /// key at SessionContext materialization; headless keys (`_cron_*` /
+    /// `_heartbeat_*` / sub-agent session ids) resolve to `None`.
+    pub channel_account: Option<(String, String)>,
+    /// RFC channel-role-split §1.1: true while the current turn was triggered
+    /// by a `Background` run-mode message (cron/heartbeat) — no human user to
+    /// ask questions of. Set by `process_turn` from
+    /// `ChannelInboundMessage::run_mode` before `Agent::run`; cleared at turn
+    /// end (same lifecycle as `turn_silenced`). Never persisted.
+    pub turn_headless: bool,
     /// Per-turn streaming output handle. Installed by
     /// `SessionContext::process_turn` via `channel.create_stream(rt)`
     /// before `Agent::run`; consumed by `finish` / `abort` after.
@@ -206,7 +219,9 @@ impl Clone for Session {
             token_tracker: self.token_tracker.clone(),
             attachments: self.attachments.clone(),
             persist: self.persist.clone(),
-            channel: self.channel.clone(),
+            channels: self.channels.clone(),
+            channel_account: self.channel_account.clone(),
+            turn_headless: self.turn_headless,
             turn_stream: None,
             sub_agent_inbox: self.sub_agent_inbox.clone(),
             delegation_deadline: self.delegation_deadline,
@@ -232,7 +247,9 @@ impl std::fmt::Debug for Session {
             .field("incomplete_turn", &self.incomplete_turn)
             .field("has_last_message", &self.last_message.is_some())
             .field("has_persist", &self.persist.is_some())
-            .field("has_channel", &self.channel.is_some())
+            .field("has_channels", &self.channels.is_some())
+            .field("channel_account", &self.channel_account)
+            .field("turn_headless", &self.turn_headless)
             .field("has_turn_stream", &self.turn_stream.is_some())
             .field("has_sub_agent_inbox", &self.sub_agent_inbox.is_some())
             .field("turn_silenced", &self.turn_silenced)
@@ -258,7 +275,9 @@ impl Session {
             token_tracker: TokenTracker::new(),
             attachments: AttachmentManager::new(),
             persist: None,
-            channel: None,
+            channels: None,
+            channel_account: None,
+            turn_headless: false,
             turn_stream: None,
             sub_agent_inbox: None,
             delegation_deadline: None,
@@ -275,10 +294,28 @@ impl Session {
         self
     }
 
-    /// Install a channel handle on this session. Returns `self` for chaining.
-    pub fn with_channel(mut self, channel: Arc<dyn Channel>) -> Self {
-        self.channel = Some(channel);
+    /// Install the channel registry + account key on this session
+    /// (RFC channel-role-split §1.2). Returns `self` for chaining.
+    pub fn with_channels(
+        mut self,
+        channels: Arc<crate::agents::orchestrator::ctx::ChannelRegistry>,
+        channel_account: Option<(String, String)>,
+    ) -> Self {
+        self.channels = Some(channels);
+        self.channel_account = channel_account;
         self
+    }
+
+    /// RFC channel-role-split §1.2: resolve the live channel handle for this
+    /// session's `(channel_type, account_id)`, querying the registry at call
+    /// time. The registry is the runtime-built single source of truth — this
+    /// can never return a handle from before a config hot-reload. `None`
+    /// when no registry is wired (tests / in-memory CLI) or the session's
+    /// routing key is headless (`_cron_*` / `_heartbeat_*` / sub-agent ids).
+    pub fn resolve_channel(&self) -> Option<Arc<dyn Channel>> {
+        let registry = self.channels.as_ref()?;
+        let account = self.channel_account.as_ref()?;
+        registry.get(account)
     }
 
     /// Persist the session's per-turn metadata to disk via the installed

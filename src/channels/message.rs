@@ -312,6 +312,29 @@ pub struct ChannelInboundMessage {
     /// snapshot at turn start. Runtime-only; never persisted (see
     /// `to_persisted`).
     pub silenced_override: Option<bool>,
+    /// RFC channel-role-split §1.1: turn-scoped "is there a human user
+    /// present?" marker. `Interactive` (default) for user messages, daemon
+    /// recovery synthetic messages and delegation-wake notices; `Background`
+    /// for cron/heartbeat synthesized turns (scheduled.rs). Drives
+    /// `Session::turn_headless` + `prompt_config.run_mode` inside
+    /// `process_turn` — NOT a delivery handle (that's the channel registry).
+    /// Runtime-only; never persisted.
+    pub run_mode: crate::config::agent::RunMode,
+}
+
+impl Default for ChannelInboundMessage {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            sender: MessageSender::new(String::new()),
+            receiver: MessageReceiver::new(String::new()),
+            content: ChannelMessageContent::text(String::new()),
+            timestamp: 0,
+            interruption_scope_id: None,
+            silenced_override: None,
+            run_mode: crate::config::agent::RunMode::default(),
+        }
+    }
 }
 
 impl ChannelInboundMessage {
@@ -355,6 +378,7 @@ impl PersistedChannelMessage {
             timestamp: self.timestamp,
             interruption_scope_id: self.interruption_scope_id.clone(),
             silenced_override: None,
+            run_mode: crate::config::agent::RunMode::default(),
         }
     }
 }

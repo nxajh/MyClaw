@@ -402,6 +402,7 @@ pub(super) async fn route_notice(
                     status: meta.status.map(|s| substatus_str(s).to_string()),
                     content: content.clone(),
                     silenced_override,
+                    // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
                     sent_message_count: meta.sent_message_count,
                     enqueued_at: chrono::Utc::now().timestamp() as u64,
                     delivery_state: crate::storage::DeliveryState::Pending,
@@ -461,6 +462,8 @@ pub(super) async fn route_notice(
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 interruption_scope_id: None,
                 silenced_override,
+                // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
+                run_mode: Default::default(),
             };
             super::inbound::dispatch_turn(ctx, &key, synthetic).await;
         }
@@ -552,6 +555,8 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 interruption_scope_id: None,
                 silenced_override,
+                // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
+                run_mode: Default::default(),
             };
             // Sync spawn (no await): awaiting `dispatch_turn` here would
             // create a cyclic Send-proving graph (the block `dispatch_turn`
@@ -568,6 +573,8 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
                 session_id,
                 &notice.content,
                 silenced_override,
+                // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
+                run_mode: Default::default(),
                 Some(notice.id),
             )
             .await;
@@ -627,6 +634,8 @@ pub(super) async fn process_non_active(
             timestamp: chrono::Utc::now().timestamp() as u64,
             interruption_scope_id: None,
             silenced_override,
+            // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
+            run_mode: Default::default(),
         };
 
         match session_ctx.process_turn(synthetic, None, runtime).await {

@@ -157,5 +157,6 @@ pub(crate) fn inbound_msg(sender: &str, content: &str) -> ChannelInboundMessage 
         timestamp: 0,
         interruption_scope_id: None,
         silenced_override: None,
+        run_mode: Default::default(),
     }
 }

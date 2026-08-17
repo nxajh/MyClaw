@@ -747,6 +747,7 @@ impl QQBotChannel {
                         .as_secs(),
                     interruption_scope_id: None,
                     silenced_override: None,
+                    run_mode: Default::default(),
                 })
             }
             _ => {
@@ -780,6 +781,7 @@ impl QQBotChannel {
                 .as_secs(),
             interruption_scope_id: None,
             silenced_override: None,
+            run_mode: Default::default(),
         })
     }
 
@@ -807,6 +809,7 @@ impl QQBotChannel {
                 .as_secs(),
             interruption_scope_id: None,
             silenced_override: None,
+            run_mode: Default::default(),
         })
     }
 
@@ -2990,6 +2993,7 @@ mod tests {
             timestamp: 0,
             interruption_scope_id: None,
             silenced_override: None,
+            run_mode: Default::default(),
         };
         ch.inject_group_history(&mut msg, "grp1");
 
@@ -3029,6 +3033,7 @@ mod tests {
             timestamp: 0,
             interruption_scope_id: None,
             silenced_override: None,
+            run_mode: Default::default(),
         };
         let original = msg.content.text.clone();
         ch.inject_group_history(&mut msg, "grp1");

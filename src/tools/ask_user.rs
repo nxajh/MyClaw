@@ -1,6 +1,6 @@
 //! Ask user tool — pauses the agent to ask the user a question and waits for a reply.
 //!
-//! Reads the active channel from `session.channel` (the transient handle
+//! Reads the active channel via `Session::resolve_channel()` (registry
 //! installed by `SessionContext::process_turn`), so there is no per-tool
 //! channel map and no need to parse `session.owner`. The tool is wired
 //! with the global `AskRouter` at construction; orchestrator's inbound
@@ -87,7 +87,19 @@ impl Tool for AskUserTool {
             });
         }
 
-        let channel = match session.channel.as_ref() {
+        // RFC channel-role-split §1.1: headless turns (cron/heartbeat) have
+        // no human on the other end — asking would hang the turn forever.
+        // Report as a tool error instead (mirrors the silenced-turn guard).
+        if session.turn_headless {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("后台轮无用户可提问：本轮由定时任务触发，没有对话对端。请基于现有信息自行决策，或把问题写入最终输出"
+                    .to_string()),
+            });
+        }
+
+        let channel = match session.resolve_channel() {
             Some(c) => c,
             None => {
                 return Ok(ToolResult {
