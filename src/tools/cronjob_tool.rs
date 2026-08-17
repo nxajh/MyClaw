@@ -583,21 +583,50 @@ impl CronJobTool {
             None => return Ok(err_result("Missing required field: id")),
         };
 
+        // Snapshot for pre-flight checks and reporting.
         let jobs = self.scheduler.jobs();
-        let job = jobs.iter().find(|j| j.id == id);
-        match job {
-            Some(job) => {
-                let name = job.name.as_deref().unwrap_or(&job.id);
+        let job = match jobs.iter().find(|j| j.id == id) {
+            Some(j) => j.clone(),
+            None => return Ok(err_result(&format!("Job '{}' not found.", id))),
+        };
+        let name = job.name.clone().unwrap_or_else(|| job.id.clone());
+
+        // Force the job due now; the next scheduler tick (≤30s) fires it
+        // through the regular execution path (run accounting, retry,
+        // failure alerts, delete_after_run all apply).
+        match self.scheduler.update_job(
+            &id,
+            scheduler::JobUpdate {
+                trigger_now: true,
+                ..Default::default()
+            },
+        ) {
+            Ok(true) => {
+                let mut note = String::new();
+                if !scheduler::is_active_hours(
+                    &job.active_hours,
+                    job.tz.as_deref().unwrap_or("Asia/Shanghai"),
+                ) {
+                    note = format!(
+                        "\nNote: active_hours ({}) excludes the current time — it stays queued until the window opens.",
+                        job.active_hours.as_deref().unwrap_or("?")
+                    );
+                }
                 Ok(ToolResult {
                     success: true,
                     output: format!(
-                        "Job '{}' ({}) triggered for immediate execution.\nSchedule: {}\nTarget: {}",
-                        name, job.id, job.schedule, job.target
+                        "Job '{}' ({}) scheduled for immediate execution: fires on the next scheduler tick (within ~30s).\nSchedule: {}\nTarget: {}{}",
+                        name, job.id, job.schedule, job.target, note
                     ),
                     error: None,
                 })
             }
-            None => Ok(err_result(&format!("Job '{}' not found.", id))),
+            Ok(false) => Ok(err_result(&format!("Job '{}' not found.", id))),
+            Err(e) => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Failed to trigger job: {}", e)),
+            }),
         }
     }
 

@@ -145,6 +145,9 @@ pub struct JobUpdate {
     pub delete_after_run: Option<bool>,
     pub model: Option<Option<String>>,
     pub provider: Option<Option<String>>,
+    /// Force the job due now: sets `next_run_at` to the current time so the
+    /// next scheduler tick fires it. Requires the job to be enabled.
+    pub trigger_now: bool,
 }
 
 /// The top-level JSON structure of `jobs.json`.
@@ -547,6 +550,14 @@ impl Scheduler {
             }
             if let Some(provider) = update.provider {
                 job.provider = provider;
+            }
+            // Manual trigger: force due-now AFTER the field updates above so
+            // a schedule recompute in this same update cannot overwrite it.
+            if update.trigger_now {
+                if !job.enabled {
+                    anyhow::bail!("job '{}' is paused; resume it first", id);
+                }
+                job.next_run_at = Some(chrono::Utc::now().to_rfc3339());
             }
             self.save_to_disk_inner(&data)?;
             Ok(true)
@@ -1652,6 +1663,86 @@ fn ok_response(status: StatusCode, body: &str) -> anyhow::Result<Response<Full<B
 mod tests {
     use super::*;
     use crate::agents::orchestrator::is_silent_ok;
+
+    fn test_scheduler(dir: &std::path::Path) -> SharedScheduler {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        Scheduler::new(
+            dir.join("jobs.json"),
+            "test",
+            "UTC".to_string(),
+            None,
+            None,
+            tx,
+            dir.join("last_channel"),
+            dir.join("last_recipient"),
+        )
+    }
+
+    fn test_entry(schedule: &str) -> JobEntry {
+        JobEntry {
+            id: String::new(),
+            schedule: schedule.to_string(),
+            prompt: "p".to_string(),
+            target: "last".to_string(),
+            name: None,
+            tz: None,
+            active_hours: None,
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            created_at: None,
+            delivery: None,
+            last_runs: Vec::new(),
+            enabled_tools: None,
+            disabled_tools: None,
+            schedule_kind: None,
+            retry: None,
+            failure_alert: None,
+            consecutive_errors: 0,
+            consecutive_skipped: 0,
+            max_runs: None,
+            completed_runs: 0,
+            delete_after_run: false,
+            model: None,
+            provider: None,
+            last_failure_alert_at: None,
+            context_policy: crate::config::scheduler::ContextPolicy::Inject,
+        }
+    }
+
+    #[test]
+    fn trigger_now_forces_next_run_due() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
+        let id = sched.add_job(test_entry("0 0 10 * * 5")).unwrap();
+        let before = sched
+            .jobs()
+            .iter()
+            .find(|j| j.id == id)
+            .unwrap()
+            .next_run_at
+            .clone();
+        assert!(before.is_some());
+
+        sched
+            .update_job(&id, JobUpdate { trigger_now: true, ..Default::default() })
+            .unwrap();
+
+        let after = sched.jobs().iter().find(|j| j.id == id).unwrap().next_run_at.clone();
+        let after = chrono::DateTime::parse_from_rfc3339(&after.unwrap()).unwrap();
+        assert!(after <= chrono::Utc::now() + chrono::Duration::seconds(2));
+    }
+
+    #[test]
+    fn trigger_now_rejected_for_paused_job() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
+        let id = sched.add_job(test_entry("0 0 10 * * 5")).unwrap();
+        sched.set_enabled(&id, false).unwrap();
+        assert!(sched
+            .update_job(&id, JobUpdate { trigger_now: true, ..Default::default() })
+            .is_err());
+    }
 
     #[test]
     fn parse_interval_minutes() {
