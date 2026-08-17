@@ -573,8 +573,6 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
                 session_id,
                 &notice.content,
                 silenced_override,
-                // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
-                run_mode: Default::default(),
                 Some(notice.id),
             )
             .await;
