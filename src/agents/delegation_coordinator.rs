@@ -759,7 +759,14 @@ impl DelegationCoordinator {
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 interruption_scope_id: None,
                 silenced_override: None,
-                run_mode: Default::default(),
+                // RFC channel-role-split §1.1: run_mode now travels on the
+                // message and process_turn reads ONLY the message — the
+                // `session_override.run_mode = Background` write below is no
+                // longer consulted. Carry Background here explicitly so
+                // sub-agents keep their pre-RFC autonomous prompt rules
+                // (SECTION_AUTONOMOUS_RULES) and `ask_user` reports the
+                // headless error instead of the channel-missing one.
+                run_mode: crate::config::agent::RunMode::Background,
             };
 
             tracing::debug!(agent = %config.name, "sub-agent started");
