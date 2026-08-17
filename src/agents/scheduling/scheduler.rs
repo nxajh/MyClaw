@@ -422,7 +422,8 @@ impl Scheduler {
                             if let Some(job) = data.jobs.iter_mut().find(|j| j.id == *id) {
                                 let now = chrono::Utc::now().to_rfc3339();
                                 job.last_run_at = Some(now);
-                                job.next_run_at = compute_next_run(
+                                job.next_run_at = compute_next_run_full(
+                                    job.schedule_kind.as_ref(),
                                     &job.schedule,
                                     job.last_run_at.as_deref(),
                                     job.tz.as_deref().unwrap_or(&self.timezone),
@@ -458,7 +459,8 @@ impl Scheduler {
         if entry.created_at.is_none() {
             entry.created_at = Some(chrono::Utc::now().to_rfc3339());
         }
-        entry.next_run_at = compute_next_run(
+        entry.next_run_at = compute_next_run_full(
+            entry.schedule_kind.as_ref(),
             &entry.schedule,
             None,
             entry.tz.as_deref().unwrap_or(&self.timezone),
@@ -481,7 +483,8 @@ impl Scheduler {
             }
             if let Some(schedule) = update.schedule {
                 job.schedule = schedule;
-                job.next_run_at = compute_next_run(
+                job.next_run_at = compute_next_run_full(
+                    job.schedule_kind.as_ref(),
                     &job.schedule,
                     job.last_run_at.as_deref(),
                     job.tz.as_deref().unwrap_or(&self.timezone),
@@ -495,7 +498,8 @@ impl Scheduler {
             }
             if let Some(tz) = update.tz {
                 job.tz = Some(tz);
-                job.next_run_at = compute_next_run(
+                job.next_run_at = compute_next_run_full(
+                    job.schedule_kind.as_ref(),
                     &job.schedule,
                     job.last_run_at.as_deref(),
                     job.tz.as_deref().unwrap_or(&self.timezone),
@@ -509,7 +513,8 @@ impl Scheduler {
                 if !enabled {
                     job.next_run_at = None;
                 } else {
-                    job.next_run_at = compute_next_run(
+                    job.next_run_at = compute_next_run_full(
+                        job.schedule_kind.as_ref(),
                         &job.schedule,
                         job.last_run_at.as_deref(),
                         job.tz.as_deref().unwrap_or(&self.timezone),
@@ -581,7 +586,8 @@ impl Scheduler {
         let mut data = self.jobs.write();
         if let Some(job) = data.jobs.iter_mut().find(|j| j.id == id) {
             job.last_run_at = Some(record.run_at.clone());
-            job.next_run_at = compute_next_run(
+            job.next_run_at = compute_next_run_full(
+                job.schedule_kind.as_ref(),
                 &job.schedule,
                 job.last_run_at.as_deref(),
                 job.tz.as_deref().unwrap_or(&self.timezone),
