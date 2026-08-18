@@ -25,7 +25,14 @@ mod tests {
         tags: &str,
         content: &str,
     ) {
-        let memory_dir = dir.join("memory");
+        // P1-B2: Cargo.lock	 dist		    myclaw.prev		 scripts
+Cargo.toml	 docs		    myclaw.toml.example  src
+add_override.py  dump_93_94.py	    patch1.py		 symbols.txt
+build.rs	 dump_history.py    patch2.py		 update_missing.py
+check_deploy.sh  dump_range.py	    patch3.py		 verify_doc.py
+check_doc.py	 dump_t1_traces.py  recover_async.rs	 workspace
+clients		 myclaw.old2	    rust-toolchain.toml IS the knowledge dir (flat memory pool).
+        let memory_dir = dir;
         std::fs::create_dir_all(&memory_dir).unwrap();
         std::fs::write(
             memory_dir.join(format!("{name}.md")),
@@ -193,7 +200,11 @@ mod tests {
     #[tokio::test]
     async fn memory_manage_empty_type_defaults_or_preserves() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = MemoryManageTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+        let tool = MemoryManageTool::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Arc::new(UserResolver::new()),
+        );
         let session = session();
 
         let result = tool
@@ -247,7 +258,11 @@ mod tests {
     #[tokio::test]
     async fn memory_manage_default_and_user_scope_write_user_layer() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = MemoryManageTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+        let tool = MemoryManageTool::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Arc::new(UserResolver::new()),
+        );
         let session = session();
 
         // Explicit scope=user.
@@ -277,19 +292,25 @@ mod tests {
         .await;
         assert!(out["success"].as_bool().unwrap_or(false));
 
-        let user_mem = dir.path().join("users").join("test-user").join("memory");
-        assert!(user_mem.join("scope-user-test.md").exists());
-        assert!(user_mem.join("scope-default-test.md").exists());
-        // Nothing leaked into the global agent layer.
-        let global_mem = dir.path().join("memory");
-        assert!(!global_mem.join("scope-user-test.md").exists());
-        assert!(!global_mem.join("scope-default-test.md").exists());
+        // P1-B2: flat knowledge dir — user-scope files land in the same
+        // dir, marked scope=user + user_id in frontmatter.
+        let user_file = std::fs::read_to_string(dir.path().join("scope-user-test.md")).unwrap();
+        assert!(user_file.contains("scope: user"));
+        assert!(user_file.contains("user_id: test-user"));
+        let default_file =
+            std::fs::read_to_string(dir.path().join("scope-default-test.md")).unwrap();
+        assert!(default_file.contains("scope: user"));
+        assert!(!default_file.contains("scope: agent"));
     }
 
     #[tokio::test]
     async fn memory_manage_agent_scope_writes_global_layer() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = MemoryManageTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+        let tool = MemoryManageTool::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Arc::new(UserResolver::new()),
+        );
         let session = session();
 
         let out = manage(
@@ -305,16 +326,19 @@ mod tests {
         .await;
         assert!(out["success"].as_bool().unwrap_or(false));
 
-        let global_mem = dir.path().join("memory");
-        assert!(global_mem.join("scope-agent-test.md").exists());
-        let user_mem = dir.path().join("users").join("test-user").join("memory");
-        assert!(!user_mem.join("scope-agent-test.md").exists());
+        let agent_file = std::fs::read_to_string(dir.path().join("scope-agent-test.md")).unwrap();
+        assert!(agent_file.contains("scope: agent"));
+        assert!(!agent_file.contains("user_id"));
     }
 
     #[tokio::test]
     async fn memory_manage_agent_scope_rejects_pii() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = MemoryManageTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+        let tool = MemoryManageTool::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Arc::new(UserResolver::new()),
+        );
         let session = session();
 
         let pii_cases: &[(&str, &str)] = &[
@@ -364,15 +388,20 @@ mod tests {
     #[tokio::test]
     async fn memory_manage_replace_is_scope_scoped() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = MemoryManageTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+        let tool = MemoryManageTool::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Arc::new(UserResolver::new()),
+        );
         let session = session();
 
-        // Same name in both layers: user scope has one, agent scope has another.
+        // P1-B2: flat dir — a name is unique, so a user-scope add followed
+        // by an agent-scope add of the SAME name is rejected (duplicate).
         let out = manage(
             &tool,
             json!({
                 "action": "add",
-                "name": "same-name",
+                "name": "scoped-replace",
                 "scope": "user",
                 "content": "user-layer content"
             }),
@@ -384,7 +413,38 @@ mod tests {
             &tool,
             json!({
                 "action": "add",
-                "name": "same-name",
+                "name": "scoped-replace",
+                "scope": "agent",
+                "content": "agent-layer content"
+            }),
+            &session,
+        )
+        .await;
+        assert!(!out["success"].as_bool().unwrap_or(true));
+
+        // replace without scope targets the user layer (default) and keeps
+        // the ownership frontmatter.
+        let out = manage(
+            &tool,
+            json!({
+                "action": "replace",
+                "name": "scoped-replace",
+                "content": "user-layer updated"
+            }),
+            &session,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+        let user_file = std::fs::read_to_string(dir.path().join("scoped-replace.md")).unwrap();
+        assert!(user_file.contains("user-layer updated"));
+        assert!(user_file.contains("scope: user"));
+
+        // A distinct agent-scope entry replace works and stays agent-owned.
+        let out = manage(
+            &tool,
+            json!({
+                "action": "add",
+                "name": "agent-owned",
                 "scope": "agent",
                 "content": "agent-layer content"
             }),
@@ -392,30 +452,11 @@ mod tests {
         )
         .await;
         assert!(out["success"].as_bool().unwrap_or(false));
-
-        // replace without scope targets the user layer (default).
         let out = manage(
             &tool,
             json!({
                 "action": "replace",
-                "name": "same-name",
-                "content": "user-layer updated"
-            }),
-            &session,
-        )
-        .await;
-        assert!(out["success"].as_bool().unwrap_or(false));
-        let user_file =
-            std::fs::read_to_string(dir.path().join("users/test-user/memory/same-name.md"))
-                .unwrap();
-        assert!(user_file.contains("user-layer updated"));
-
-        // replace with scope=agent targets the agent layer and leaves the user file intact.
-        let out = manage(
-            &tool,
-            json!({
-                "action": "replace",
-                "name": "same-name",
+                "name": "agent-owned",
                 "scope": "agent",
                 "content": "agent-layer updated"
             }),
@@ -423,12 +464,9 @@ mod tests {
         )
         .await;
         assert!(out["success"].as_bool().unwrap_or(false));
-        let agent_file = std::fs::read_to_string(dir.path().join("memory/same-name.md")).unwrap();
+        let agent_file = std::fs::read_to_string(dir.path().join("agent-owned.md")).unwrap();
         assert!(agent_file.contains("agent-layer updated"));
-        let user_file =
-            std::fs::read_to_string(dir.path().join("users/test-user/memory/same-name.md"))
-                .unwrap();
-        assert!(user_file.contains("user-layer updated"));
+        assert!(agent_file.contains("scope: agent"));
 
         // Missing entry reports the scope in the error.
         let out = manage(
@@ -444,5 +482,109 @@ mod tests {
         .await;
         assert!(!out["success"].as_bool().unwrap_or(true));
         assert!(out["error"].as_str().unwrap().contains("agent scope"));
+    }
+
+    // ── P1-B2 scope-by-frontmatter isolation (acceptance) ─────────────────
+
+    fn session_for(owner: &str) -> Session {
+        let mut session = Session::new(format!("session-{owner}"));
+        session.owner = owner.to_string();
+        session
+    }
+
+    #[tokio::test]
+    async fn memory_isolation_user_sees_own_and_agent_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = Arc::new(UserResolver::new());
+        let manage_tool = MemoryManageTool::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            Arc::clone(&resolver),
+        );
+        let list_tool = MemoryListTool::new(dir.path().to_path_buf(), Arc::clone(&resolver));
+        let search_tool =
+            MemorySearchTool::new(dir.path().to_path_buf(), Arc::clone(&resolver));
+
+        let alice = session_for("alice");
+        let bob = session_for("bob");
+
+        // Agent-layer entry.
+        let out = manage(
+            &manage_tool,
+            json!({"action": "add", "name": "agent-fact", "scope": "agent", "content": "shared methodology"}),
+            &alice,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+        // Alice's private entry.
+        let out = manage(
+            &manage_tool,
+            json!({"action": "add", "name": "alice-fact", "content": "alice private"}),
+            &alice,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+        // Bob's private entry.
+        let out = manage(
+            &manage_tool,
+            json!({"action": "add", "name": "bob-fact", "content": "bob private"}),
+            &bob,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+
+        // Alice lists: agent + own user layer, NOT bob's.
+        let result = list_tool.execute(json!({}), &alice).await.unwrap();
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        let names: Vec<&str> = output["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"agent-fact"));
+        assert!(names.contains(&"alice-fact"));
+        assert!(!names.contains(&"bob-fact"));
+        assert_eq!(names.len(), 2);
+
+        // Bob lists: agent + own only.
+        let result = list_tool.execute(json!({}), &bob).await.unwrap();
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        let names: Vec<&str> = output["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"agent-fact"));
+        assert!(names.contains(&"bob-fact"));
+        assert!(!names.contains(&"alice-fact"));
+        assert_eq!(names.len(), 2);
+
+        // Alice cannot search bob's private entry.
+        let result = search_tool
+            .execute(json!({"query": "bob private"}), &alice)
+            .await
+            .unwrap();
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["count"], 0);
+
+        // Bob cannot replace alice's entry via user scope.
+        let out = manage(
+            &manage_tool,
+            json!({"action": "replace", "name": "alice-fact", "content": "hijack"}),
+            &bob,
+        )
+        .await;
+        assert!(!out["success"].as_bool().unwrap_or(true));
+        // …nor remove it.
+        let out = manage(
+            &manage_tool,
+            json!({"action": "remove", "name": "alice-fact", "confirm": true}),
+            &bob,
+        )
+        .await;
+        assert!(!out["success"].as_bool().unwrap_or(true));
+        assert!(dir.path().join("alice-fact.md").exists());
     }
 }

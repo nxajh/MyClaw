@@ -178,6 +178,9 @@ pub struct ClientChannel {
     tool_specs: Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
     /// Workspace directory for memory API (set once after construction).
     workspace_dir: Arc<OnceLock<std::path::PathBuf>>,
+    /// Knowledge dir ({data_dir}/memory) — single flat memory pool where
+    /// ownership is a frontmatter attribute (set once after construction).
+    knowledge_dir: Arc<OnceLock<std::path::PathBuf>>,
     /// Config file path for config read/write API (set once after construction).
     config_path: Arc<OnceLock<std::path::PathBuf>>,
     /// Skill manager for skills API (set once after construction). The
@@ -205,6 +208,7 @@ impl ClientChannel {
             session_manager: Arc::new(OnceLock::new()),
             tool_specs: Arc::new(RwLock::new(Vec::new())),
             workspace_dir: Arc::new(OnceLock::new()),
+            knowledge_dir: Arc::new(OnceLock::new()),
             config_path: Arc::new(OnceLock::new()),
             skill_manager: Arc::new(OnceLock::new()),
             provider_registry: Arc::new(OnceLock::new()),
@@ -231,6 +235,11 @@ impl ClientChannel {
     /// Set the workspace directory (called from daemon.rs after construction).
     pub fn set_workspace_dir(&self, dir: std::path::PathBuf) {
         let _ = self.workspace_dir.set(dir);
+    }
+
+    /// Set the knowledge dir (called from daemon.rs after construction).
+    pub fn set_knowledge_dir(&self, dir: std::path::PathBuf) {
+        let _ = self.knowledge_dir.set(dir);
     }
 
     /// Set the config file path (called from daemon.rs after construction).
@@ -293,6 +302,7 @@ impl ClientChannel {
         let session_manager = self.session_manager.clone();
         let tool_specs = self.tool_specs.clone();
         let workspace_dir = self.workspace_dir.clone();
+        let knowledge_dir = self.knowledge_dir.clone();
         let config_path = self.config_path.clone();
         let skill_manager = self.skill_manager.clone();
         let provider_registry = self.provider_registry.clone();
@@ -381,6 +391,7 @@ impl ClientChannel {
                         let session_manager_clone = session_manager.clone();
                         let tool_specs_clone = tool_specs.clone();
                         let workspace_dir_clone = workspace_dir.clone();
+                        let knowledge_dir_clone = knowledge_dir.clone();
                         let config_path_clone = config_path.clone();
                         let skill_manager_clone = skill_manager.clone();
                         let provider_registry_clone = provider_registry.clone();
@@ -893,6 +904,7 @@ impl ClientChannel {
                                                     session_manager: &session_manager_clone,
                                                     tool_specs: &tool_specs_clone,
                                                     workspace_dir: &workspace_dir_clone,
+                                                    knowledge_dir: &knowledge_dir_clone,
                                                     config_path: &config_path_clone,
                                                     skill_manager: &skill_manager_clone,
                                                     provider_registry: &provider_registry_clone,
@@ -1195,27 +1207,40 @@ struct ApiContext<'a> {
     session_manager: &'a Arc<OnceLock<Arc<crate::agents::SessionManager>>>,
     tool_specs: &'a Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
     workspace_dir: &'a Arc<OnceLock<std::path::PathBuf>>,
+    knowledge_dir: &'a Arc<OnceLock<std::path::PathBuf>>,
     config_path: &'a Arc<OnceLock<std::path::PathBuf>>,
     skill_manager: &'a Arc<OnceLock<Arc<RwLock<crate::agents::SkillManager>>>>,
     provider_registry: &'a Arc<OnceLock<Arc<dyn crate::providers::ProviderRegistry>>>,
     user_resolver: &'a Arc<OnceLock<Arc<crate::agents::UserResolver>>>,
 }
 
-/// Resolve the memory directory for a scope:
-/// - "agent" → `{workspace}/memory` (shared, cross-user layer)
-/// - "user"  → `{workspace}/users/{uid}/memory` (per-user layer)
+/// Resolve the memory directory for a scope.
+/// P1-B2: single flat knowledge dir for both scopes — ownership is a
+/// frontmatter attribute (`scope` + `user_id`), not a path segment.
+/// Falls back to the legacy `{workspace}/memory` when the knowledge dir
+/// handle was not installed (older embedders / tests).
 fn memory_scope_dir(
     workspace: &std::path::Path,
     scope: &str,
     uid: &str,
+    knowledge_dir: Option<&std::path::Path>,
 ) -> std::path::PathBuf {
-    if scope == "user" {
-        workspace
-            .join("users")
-            .join(uid)
-            .join(crate::memory::MEMORY_DIR_NAME)
+    let _ = (scope, uid);
+    match knowledge_dir {
+        Some(kd) => kd.to_path_buf(),
+        None => workspace.join(crate::memory::MEMORY_DIR_NAME),
+    }
+}
+
+/// Whether a memory file belongs to the given scope (frontmatter-based).
+/// Missing `scope` is treated as the agent layer; `scope=user` requires an
+/// exact `user_id` match.
+fn memory_file_in_scope(f: &crate::memory::MemoryFile, scope: &str, uid: &str) -> bool {
+    let f_scope = f.scope.as_deref().unwrap_or("agent");
+    if scope == "agent" {
+        f_scope == "agent"
     } else {
-        workspace.join(crate::memory::MEMORY_DIR_NAME)
+        f_scope == "user" && f.user_id.as_deref() == Some(uid)
     }
 }
 
@@ -1451,22 +1476,29 @@ fn handle_api_request(
 
         "memory.list" => {
             let scope = params["scope"].as_str().unwrap_or("all");
-            match ctx.workspace_dir.get() {
+            match ctx.knowledge_dir.get().or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME))) {
                 Some(dir) => {
+                    let dir = dir.as_path();
                     let uid = memory_user_id(ctx);
                     // Collect (scope, file) rows; agent layer first so a
                     // same-named agent entry wins dedup (matches scan_merged).
                     let mut rows: Vec<(&str, crate::memory::MemoryFile)> = Vec::new();
                     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                     if scope == "all" || scope == "agent" {
-                        for f in crate::memory::scan_memory_files(&memory_scope_dir(dir, "agent", &uid)) {
+                        for f in crate::memory::scan_memory_files(&memory_scope_dir(dir, "agent", &uid, Some(dir)))
+                            .into_iter()
+                            .filter(|f| memory_file_in_scope(f, "agent", &uid))
+                        {
                             if seen.insert(f.name.clone()) {
                                 rows.push(("agent", f));
                             }
                         }
                     }
                     if scope == "all" || scope == "user" {
-                        for f in crate::memory::scan_memory_files(&memory_scope_dir(dir, "user", &uid)) {
+                        for f in crate::memory::scan_memory_files(&memory_scope_dir(dir, "user", &uid, Some(dir)))
+                            .into_iter()
+                            .filter(|f| memory_file_in_scope(f, "user", &uid))
+                        {
                             if seen.insert(f.name.clone()) {
                                 rows.push(("user", f));
                             }
@@ -1520,13 +1552,52 @@ fn handle_api_request(
                 _ => "agent",
             };
             let content = params["content"].as_str().unwrap_or("");
-            match ctx.workspace_dir.get() {
+            let dir_opt = ctx
+                .knowledge_dir
+                .get()
+                .or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME)));
+            match dir_opt {
                 Some(dir) => {
                     let uid = memory_user_id(ctx);
-                    let memory_dir = memory_scope_dir(dir, scope, &uid);
+                    let memory_dir = memory_scope_dir(&dir, scope, &uid, Some(&dir));
                     let _ = std::fs::create_dir_all(&memory_dir);
+                    // P1-B2: write ownership into frontmatter. If the payload
+                    // already starts with frontmatter containing scope, trust
+                    // it as-is (raw mgmt-API write); otherwise prepend a
+                    // minimal ownership header before any existing frontmatter
+                    // keys would break parsing — simplest correct form: write
+                    // body-only content under a generated frontmatter.
                     let path = memory_dir.join(filename);
-                    match std::fs::write(&path, content) {
+                    let body = if content.trim_start().starts_with("---") {
+                        // Caller-supplied frontmatter: inject/patch scope keys.
+                        let trimmed = content.trim_start();
+                        let rest = &trimmed[3..];
+                        let rest = rest.trim_start_matches(['\r', '\n']);
+                        if let Some(end) = rest.find("\n---") {
+                            let fm = &rest[..end];
+                            let body = &rest[end + 4..];
+                            if fm.lines().any(|l| l.trim().starts_with("scope:")) {
+                                content.to_string()
+                            } else {
+                                let extra = if scope == "user" {
+                                    format!("scope: user\nuser_id: {}", uid)
+                                } else {
+                                    "scope: agent".to_string()
+                                };
+                                format!("---\n{}\n{}\n---{}", fm, extra, body)
+                            }
+                        } else {
+                            content.to_string()
+                        }
+                    } else {
+                        let extra = if scope == "user" {
+                            format!("scope: user\nuser_id: {}\n", uid)
+                        } else {
+                            "scope: agent\n".to_string()
+                        };
+                        format!("---\n{}---\n\n{}", extra, content)
+                    };
+                    match std::fs::write(&path, body) {
                         Ok(()) => serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string(),
                         Err(e) => serde_json::json!({ "type": "api_error", "id": id, "error": format!("failed to write file: {}", e) }).to_string(),
                     }
@@ -1544,22 +1615,61 @@ fn handle_api_request(
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid filename" }).to_string();
             }
             let scope = params["scope"].as_str();
-            match ctx.workspace_dir.get() {
+            let dir_opt = ctx
+                .knowledge_dir
+                .get()
+                .or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME)));
+            match dir_opt {
                 Some(dir) => {
                     let uid = memory_user_id(ctx);
-                    let try_delete = |scope_name: &str| -> Result<(), String> {
-                        let path = memory_scope_dir(dir, scope_name, &uid).join(filename);
-                        std::fs::remove_file(&path)
-                            .map_err(|e| format!("failed to delete file: {}", e))
+                    // P1-B2: single flat dir — scope matching is done on
+                    // parsed frontmatter, not by path.
+                    let candidates = crate::memory::scan_memory_files(&memory_scope_dir(
+                        &dir,
+                        "all",
+                        &uid,
+                        Some(&dir),
+                    ));
+                    let stem = filename.strip_suffix(".md").unwrap_or(&filename);
+                    let matches_scope = |f: &crate::memory::MemoryFile, scope_name: &str| {
+                        f.name == stem && memory_file_in_scope(f, scope_name, &uid)
                     };
                     let result = match scope {
-                        Some("user") => try_delete("user"),
-                        Some("agent") => try_delete("agent"),
-                        _ => try_delete("agent").or_else(|_| try_delete("user")),
+                        Some("user") => candidates
+                            .iter()
+                            .find(|f| matches_scope(f, "user"))
+                            .map(|f| std::fs::remove_file(&f.path))
+                            .unwrap_or_else(|| {
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::NotFound,
+                                    "file not found in user scope",
+                                ))
+                            }),
+                        Some("agent") => candidates
+                            .iter()
+                            .find(|f| matches_scope(f, "agent"))
+                            .map(|f| std::fs::remove_file(&f.path))
+                            .unwrap_or_else(|| {
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::NotFound,
+                                    "file not found in agent scope",
+                                ))
+                            }),
+                        _ => candidates
+                            .iter()
+                            .find(|f| matches_scope(f, "agent"))
+                            .or_else(|| candidates.iter().find(|f| matches_scope(f, "user")))
+                            .map(|f| std::fs::remove_file(&f.path))
+                            .unwrap_or_else(|| {
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::NotFound,
+                                    "file not found",
+                                ))
+                            }),
                     };
                     match result {
                         Ok(()) => serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string(),
-                        Err(e) => serde_json::json!({ "type": "api_error", "id": id, "error": e }).to_string(),
+                        Err(e) => serde_json::json!({ "type": "api_error", "id": id, "error": format!("failed to delete file: {}", e) }).to_string(),
                     }
                 }
                 None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
@@ -1585,23 +1695,50 @@ fn handle_api_request(
                     "error": "invalid filename"
                 }).to_string();
             }
-            match ctx.workspace_dir.get() {
+            let dir_opt = ctx
+                .knowledge_dir
+                .get()
+                .or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME)));
+            match dir_opt {
                 Some(dir) => {
                     let uid = memory_user_id(ctx);
                     let scope = params["scope"].as_str();
-                    let try_read = |scope_name: &str| -> Option<(String, String)> {
-                        let path = memory_scope_dir(dir, scope_name, &uid).join(filename);
-                        std::fs::read_to_string(&path)
-                            .ok()
-                            .map(|content| (scope_name.to_string(), content))
+                    // P1-B2: single flat dir — scope routing via frontmatter.
+                    let candidates = crate::memory::scan_memory_files(&memory_scope_dir(
+                        &dir,
+                        "all",
+                        &uid,
+                        Some(&dir),
+                    ));
+                    let stem = filename.strip_suffix(".md").unwrap_or(&filename);
+                    let matches_scope = |f: &crate::memory::MemoryFile, scope_name: &str| {
+                        f.name == stem && memory_file_in_scope(f, scope_name, &uid)
                     };
                     let found = match scope {
-                        Some("user") => try_read("user"),
-                        Some("agent") => try_read("agent"),
+                        Some("user") => candidates
+                            .iter()
+                            .find(|f| matches_scope(f, "user"))
+                            .map(|f| ("user".to_string(), std::fs::read_to_string(&f.path).ok())),
+                        Some("agent") => candidates
+                            .iter()
+                            .find(|f| matches_scope(f, "agent"))
+                            .map(|f| ("agent".to_string(), std::fs::read_to_string(&f.path).ok())),
                         // Backwards-compatible default: agent layer first,
                         // fall back to the per-user layer.
-                        _ => try_read("agent").or_else(|| try_read("user")),
-                    };
+                        _ => candidates
+                            .iter()
+                            .find(|f| matches_scope(f, "agent"))
+                            .or_else(|| candidates.iter().find(|f| matches_scope(f, "user")))
+                            .map(|f| {
+                                let s = if memory_file_in_scope(f, "agent", &uid) {
+                                    "agent"
+                                } else {
+                                    "user"
+                                };
+                                (s.to_string(), std::fs::read_to_string(&f.path).ok())
+                            }),
+                    }
+                    .and_then(|(s, content)| content.map(|c| (s, c)));
                     match found {
                         Some((s, content)) => serde_json::json!({
                             "type": "api_response",
@@ -2124,10 +2261,18 @@ mod tests {
 
     const USER_KEY: &str = "client:default:web-user:default";
     const USER_UID: &str = "myclaw/u/019fe342-test";
+    const OTHER_UID: &str = "myclaw/u/019fe342-other";
 
     fn mem_body(name: &str, body: &str) -> String {
+        // No `scope` field → agent layer (matches legacy agent files).
         format!(
             "---\nname: \"{name}\"\ndescription: \"test entry\"\ntype: \"project\"\ninject: \"search\"\ncreated_at: \"2026-08-14\"\ntags: []\n---\n\n{body}"
+        )
+    }
+
+    fn user_mem_body(name: &str, body: &str, uid: &str) -> String {
+        format!(
+            "---\nname: \"{name}\"\nscope: \"user\"\nuser_id: \"{uid}\"\ndescription: \"test entry\"\ntype: \"project\"\ninject: \"search\"\ncreated_at: \"2026-08-14\"\ntags: []\n---\n\n{body}"
         )
     }
 
@@ -2136,16 +2281,28 @@ mod tests {
         std::fs::write(path.join(format!("{name}.md")), mem_body(name, body)).unwrap();
     }
 
+    fn write_user_mem(path: &std::path::Path, name: &str, body: &str, uid: &str) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(
+            path.join(format!("{name}.md")),
+            user_mem_body(name, body, uid),
+        )
+        .unwrap();
+    }
+
     fn test_workspace() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
-        // agent (shared) layer
-        write_mem(&ws.join("memory"), "agent_only", "agent body");
-        write_mem(&ws.join("memory"), "shared_name", "AGENT version");
-        // per-user layer
-        let user_mem = ws.join("users").join(USER_UID).join("memory");
-        write_mem(&user_mem, "user_only", "user body");
-        write_mem(&user_mem, "shared_name", "USER version");
+        // P1-B2: single flat memory dir; ownership via frontmatter.
+        // (A name is unique in the flat dir — the old two-layer
+        // same-name-in-both-scopes case no longer exists.)
+        let mem = ws.join("memory");
+        write_mem(&mem, "agent_only", "agent body");
+        write_mem(&mem, "agent_second", "second agent body");
+        write_user_mem(&mem, "user_only", "user body", USER_UID);
+        write_user_mem(&mem, "user_second", "second user body", USER_UID);
+        // Another user's private entry — must be invisible to USER_UID.
+        write_user_mem(&mem, "other_user_only", "other body", OTHER_UID);
         tmp
     }
 
@@ -2163,11 +2320,14 @@ mod tests {
         let _ = ur.set(resolver);
         let _ = sm.set(Arc::new(SessionManager::in_memory()));
         let _ = wd.set(ws.to_path_buf());
+        let kd: Arc<OnceLock<std::path::PathBuf>> = Arc::new(OnceLock::new());
+        let _ = kd.set(ws.join("memory"));
         let ctx = ApiContext {
             user_id: USER_KEY,
             session_manager: &sm,
             tool_specs: &ts,
             workspace_dir: &wd,
+            knowledge_dir: &kd,
             config_path: &cp,
             skill_manager: &sk,
             provider_registry: &pr,
@@ -2187,13 +2347,20 @@ mod tests {
         let resp = api("memory.list", serde_json::json!({}), tmp.path());
         assert_eq!(resp["type"], "api_response");
         let r = rows(&resp);
-        // agent_only + user_only + shared_name (agent wins) = 3
-        assert_eq!(r.len(), 3);
-        let shared = r.iter().find(|x| x["mem_name"] == "shared_name").unwrap();
-        assert_eq!(shared["scope"], "agent");
-        assert_eq!(shared["content"], "AGENT version");
+        // agent(2) + own user(2) = 4; other user's entry invisible
+        assert_eq!(r.len(), 4);
+        let agent = r.iter().find(|x| x["mem_name"] == "agent_only").unwrap();
+        assert_eq!(agent["scope"], "agent");
+        assert_eq!(agent["content"], "agent body");
         let user_only = r.iter().find(|x| x["mem_name"] == "user_only").unwrap();
         assert_eq!(user_only["scope"], "user");
+        // Missing-scope fixture files count as agent layer.
+        assert_eq!(
+            r.iter()
+                .filter(|x| x["scope"] == "agent")
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -2220,30 +2387,37 @@ mod tests {
     #[test]
     fn memory_read_scope_routing() {
         let tmp = test_workspace();
-        // No scope: agent layer wins over user layer.
+        // No scope: agent entry resolves to agent layer.
         let resp = api(
             "memory.read",
-            serde_json::json!({ "name": "shared_name.md" }),
+            serde_json::json!({ "name": "agent_only.md" }),
             tmp.path(),
         );
-        assert_eq!(resp["result"]["content"], mem_body("shared_name", "AGENT version"));
+        assert_eq!(resp["result"]["content"], mem_body("agent_only", "agent body"));
         assert_eq!(resp["result"]["scope"], "agent");
-        // Explicit user scope.
+        // Explicit user scope on a user-owned file.
         let resp = api(
             "memory.read",
-            serde_json::json!({ "name": "shared_name.md", "scope": "user" }),
+            serde_json::json!({ "name": "user_only.md", "scope": "user" }),
             tmp.path(),
         );
-        assert_eq!(resp["result"]["content"], mem_body("shared_name", "USER version"));
+        assert_eq!(resp["result"]["content"], user_mem_body("user_only", "user body", USER_UID));
         assert_eq!(resp["result"]["scope"], "user");
-        // User-only entry found via fallback.
+        // User-only entry found via fallback (agent miss → user hit).
         let resp = api(
             "memory.read",
             serde_json::json!({ "name": "user_only.md" }),
             tmp.path(),
         );
-        assert_eq!(resp["result"]["content"], mem_body("user_only", "user body"));
+        assert_eq!(resp["result"]["content"], user_mem_body("user_only", "user body", USER_UID));
         assert_eq!(resp["result"]["scope"], "user");
+        // Asking for user scope on an agent file misses.
+        let resp = api(
+            "memory.read",
+            serde_json::json!({ "name": "agent_only.md", "scope": "user" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["type"], "api_error");
         // Missing entry.
         let resp = api(
             "memory.read",
@@ -2262,51 +2436,43 @@ mod tests {
             tmp.path(),
         );
         assert_eq!(resp["type"], "api_response");
-        let user_path = tmp
-            .path()
-            .join("users")
-            .join(USER_UID)
-            .join("memory")
-            .join("fresh_user.md");
-        assert_eq!(
-            std::fs::read_to_string(&user_path).unwrap(),
-            "new user body"
+        let user_path = tmp.path().join("memory").join("fresh_user.md");
+        let written = std::fs::read_to_string(&user_path).unwrap();
+        assert!(written.contains("scope: user"));
+        assert!(written.contains(&format!("user_id: \"{}\"", USER_UID)));
+        assert!(written.contains("new user body"));
+        // Visible to this user via scope=user listing…
+        let resp = api(
+            "memory.list",
+            serde_json::json!({ "scope": "user" }),
+            tmp.path(),
         );
-        // Default scope (agent) does not land in the user dir.
+        let r = rows(&resp);
+        assert!(r.iter().any(|x| x["mem_name"] == "fresh_user"));
+        // Default scope (agent) writes the agent marker instead.
         let resp = api(
             "memory.write",
             serde_json::json!({ "name": "default_scope.md", "content": "body" }),
             tmp.path(),
         );
         assert_eq!(resp["type"], "api_response");
-        assert!(!tmp
-            .path()
-            .join("users")
-            .join(USER_UID)
-            .join("memory")
-            .join("default_scope.md")
-            .exists());
-        assert!(tmp.path().join("memory").join("default_scope.md").exists());
+        let agent_written =
+            std::fs::read_to_string(tmp.path().join("memory").join("default_scope.md")).unwrap();
+        assert!(agent_written.contains("scope: agent"));
+        assert!(!agent_written.contains("user_id"));
     }
 
     #[test]
     fn memory_delete_scope_routing() {
         let tmp = test_workspace();
-        // Explicit user scope removes the user-layer copy only.
+        // Explicit user scope removes the user-owned file.
         let resp = api(
             "memory.delete",
-            serde_json::json!({ "name": "shared_name.md", "scope": "user" }),
+            serde_json::json!({ "name": "user_second.md", "scope": "user" }),
             tmp.path(),
         );
         assert_eq!(resp["type"], "api_response");
-        assert!(!tmp
-            .path()
-            .join("users")
-            .join(USER_UID)
-            .join("memory")
-            .join("shared_name.md")
-            .exists());
-        assert!(tmp.path().join("memory").join("shared_name.md").exists());
+        assert!(!tmp.path().join("memory").join("user_second.md").exists());
         // Default fallback removes the agent-layer copy.
         let resp = api(
             "memory.delete",
@@ -2314,6 +2480,33 @@ mod tests {
             tmp.path(),
         );
         assert_eq!(resp["type"], "api_response");
-        assert!(!tmp.path().join("memory").join("agent_only.md").exists());
+        assert!(!tmp.path().join("memory").join("agent_only.md").exists());        // Another user's entry is not deletable via any scope param.
+        let resp = api(
+            "memory.delete",
+            serde_json::json!({ "name": "other_user_only.md", "scope": "user" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["type"], "api_error");
+        assert!(tmp.path().join("memory").join("other_user_only.md").exists());
+    }
+
+    #[test]
+    fn memory_user_isolation_flat_dir() {
+        let tmp = test_workspace();
+        // This user sees: agent layer (2) + own user layer (2) — NOT the
+        // other user's private entry.
+        let resp = api("memory.list", serde_json::json!({}), tmp.path());
+        let r = rows(&resp);
+        assert_eq!(r.len(), 4);
+        assert!(r.iter().any(|x| x["mem_name"] == "agent_only"));
+        assert!(r.iter().any(|x| x["mem_name"] == "user_only"));
+        assert!(!r.iter().any(|x| x["mem_name"] == "other_user_only"));
+        // Read cannot reach the other user's entry either.
+        let resp = api(
+            "memory.read",
+            serde_json::json!({ "name": "other_user_only.md", "scope": "user" }),
+            tmp.path(),
+        );
+        assert_eq!(resp["type"], "api_error");
     }
 }
