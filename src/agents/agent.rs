@@ -249,7 +249,7 @@ impl Agent {
                 &model_id,
                 Arc::clone(&provider),
                 &tool_specs,
-                runtime.task_state.as_ref(),
+                runtime.task_boards.as_ref(),
                 false,
             )
             .await
@@ -461,7 +461,7 @@ impl Agent {
                         &model_id,
                         Arc::clone(&provider),
                         &tool_specs,
-                        runtime.task_state.as_ref(),
+                        runtime.task_boards.as_ref(),
                         true, // force: bypass the threshold, we know it overflowed
                     )
                     .await

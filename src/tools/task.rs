@@ -3,14 +3,20 @@
 //! `task_create`, `task_list`, `task_update`, `task_delete` each have their
 //! own struct so that `required` fields can be expressed per-tool without
 //! relying on `oneOf`/`anyOf` (which Gemini and grok don't support).
+//!
+//! P1-B1: the task board is **per-session** — persisted at
+//! `{sessions_root}/{uuid}/tasks.json` and resolved from the `Session` passed
+//! to `execute`. The previous global board (`workspace/.state/tasks.json`,
+//! shared by every session) was an isolation defect and is no longer read.
 
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::ids::{DEFAULT_NAMESPACE, Fqid, TYPE_TASK};
+use crate::ids::{bare_dir_name, DEFAULT_NAMESPACE, Fqid, TYPE_TASK};
 use crate::providers::{Tool, ToolResult};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -142,19 +148,50 @@ impl TaskState {
 }
 
 // ---------------------------------------------------------------------------
-// Shared state helper
+// Per-session task boards (P1-B1)
 // ---------------------------------------------------------------------------
 
 pub type SharedTaskState = Arc<RwLock<TaskState>>;
 
-pub fn shared_state() -> SharedTaskState {
-    Arc::new(RwLock::new(TaskState::default()))
+/// Per-session task board locator (P1-B1).
+///
+/// Resolves each session's task board to `{sessions_root}/{uuid}/tasks.json`
+/// (same bare-uuid session directory the session backend uses). Boards are
+/// loaded from disk on demand and saved back after every mutation — no
+/// process-global shared state, so sessions can never see each other's tasks.
+#[derive(Debug, Clone)]
+pub struct TaskBoards {
+    /// Sessions storage root (`{data_dir}/sessions`).
+    sessions_root: PathBuf,
+    /// Namespace for generated task FQIDs (`<ns>/t/<uuidv7>`).
+    namespace: String,
 }
 
-/// Create shared task state persisted to `path` (loaded at startup, saved on
-/// every mutation) — used by the daemon so tasks survive restarts/hot-switches.
-pub fn shared_state_persisted(path: std::path::PathBuf, namespace: &str) -> SharedTaskState {
-    Arc::new(RwLock::new(TaskState::load(&path, namespace)))
+impl TaskBoards {
+    pub fn new(sessions_root: PathBuf, namespace: impl Into<String>) -> Self {
+        Self {
+            sessions_root,
+            namespace: namespace.into(),
+        }
+    }
+
+    /// Task board file for a session: `{sessions_root}/{uuid}/tasks.json`.
+    pub fn board_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_root
+            .join(bare_dir_name(session_id))
+            .join("tasks.json")
+    }
+
+    /// Load the session's board from disk (defaults when absent/corrupt).
+    pub fn load(&self, session_id: &str) -> TaskState {
+        TaskState::load(&self.board_path(session_id), &self.namespace)
+    }
+
+    /// Load the session's board wrapped in the shared handle the tools use
+    /// (mutations inside go through [`TaskState::save`]).
+    pub fn board(&self, session_id: &str) -> SharedTaskState {
+        Arc::new(RwLock::new(self.load(session_id)))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +199,7 @@ pub fn shared_state_persisted(path: std::path::PathBuf, namespace: &str) -> Shar
 // ---------------------------------------------------------------------------
 
 pub struct TaskCreateTool {
-    state: SharedTaskState,
+    boards: TaskBoards,
 }
 
 #[async_trait]
@@ -207,12 +244,12 @@ impl Tool for TaskCreateTool {
     async fn execute(
         &self,
         args: Value,
-        _session: &crate::agents::session::Session,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
         let parent = args["parent"].as_str();
         let description = args["details"].as_str().unwrap_or("");
 
-        let mut state = self.state.write().await;
+        let mut state = self.boards.board(&session.id).write().await;
 
         // Verify parent exists
         if let Some(parent_id) = parent {
@@ -303,7 +340,7 @@ impl Tool for TaskCreateTool {
 // ---------------------------------------------------------------------------
 
 pub struct TaskListTool {
-    state: SharedTaskState,
+    boards: TaskBoards,
 }
 
 #[async_trait]
@@ -336,10 +373,10 @@ impl Tool for TaskListTool {
     async fn execute(
         &self,
         args: Value,
-        _session: &crate::agents::session::Session,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
         let parent = args["parent"].as_str();
-        let state = self.state.read().await;
+        let state = self.boards.board(&session.id).read().await;
 
         let filtered: Vec<Value> = state
             .tasks
@@ -375,7 +412,7 @@ impl Tool for TaskListTool {
 // ---------------------------------------------------------------------------
 
 pub struct TaskUpdateTool {
-    state: SharedTaskState,
+    boards: TaskBoards,
 }
 
 #[async_trait]
@@ -414,7 +451,7 @@ impl Tool for TaskUpdateTool {
     async fn execute(
         &self,
         args: Value,
-        _session: &crate::agents::session::Session,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
         let task_id = args["task_id"]
             .as_str()
@@ -435,7 +472,7 @@ impl Tool for TaskUpdateTool {
             });
         }
 
-        let mut state = self.state.write().await;
+        let mut state = self.boards.board(&session.id).write().await;
         match state.find_task_mut(task_id) {
             Some(task) => {
                 task.status = status.to_string();
@@ -466,7 +503,7 @@ impl Tool for TaskUpdateTool {
 // ---------------------------------------------------------------------------
 
 pub struct TaskDeleteTool {
-    state: SharedTaskState,
+    boards: TaskBoards,
 }
 
 #[async_trait]
@@ -499,13 +536,13 @@ impl Tool for TaskDeleteTool {
     async fn execute(
         &self,
         args: Value,
-        _session: &crate::agents::session::Session,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
         let task_id = args["task_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'task_id'"))?;
 
-        let mut state = self.state.write().await;
+        let mut state = self.boards.board(&session.id).write().await;
 
         if state.find_task(task_id).is_none() {
             return Ok(ToolResult {
@@ -538,12 +575,14 @@ impl Tool for TaskDeleteTool {
 // Helpers for daemon registration
 // ---------------------------------------------------------------------------
 
-pub fn new_tools(state: SharedTaskState) -> Vec<Arc<dyn Tool>> {
+/// Build the four task tools over per-session boards rooted at
+/// `sessions_root` (P1-B1: each session gets `{sessions_root}/{uuid}/tasks.json`).
+pub fn new_tools(boards: TaskBoards) -> Vec<Arc<dyn Tool>> {
     vec![
-        Arc::new(TaskCreateTool { state: Arc::clone(&state) }),
-        Arc::new(TaskListTool { state: Arc::clone(&state) }),
-        Arc::new(TaskUpdateTool { state: Arc::clone(&state) }),
-        Arc::new(TaskDeleteTool { state: Arc::clone(&state) }),
+        Arc::new(TaskCreateTool { boards: boards.clone() }),
+        Arc::new(TaskListTool { boards: boards.clone() }),
+        Arc::new(TaskUpdateTool { boards: boards.clone() }),
+        Arc::new(TaskDeleteTool { boards }),
     ]
 }
 
@@ -551,21 +590,25 @@ pub fn new_tools(state: SharedTaskState) -> Vec<Arc<dyn Tool>> {
 mod tests {
     use super::*;
 
-    fn make_session() -> crate::agents::session::Session {
-        crate::agents::session::Session::new("test".to_string())
+    fn make_session(id: &str) -> crate::agents::session::Session {
+        crate::agents::session::Session::new(id.to_string())
+    }
+
+    fn boards(dir: &tempfile::TempDir) -> TaskBoards {
+        TaskBoards::new(dir.path().join("sessions"), DEFAULT_NAMESPACE)
     }
 
     #[tokio::test]
     async fn test_batch_create() {
-        let state = shared_state();
-        let tool = TaskCreateTool { state: Arc::clone(&state) };
+        let dir = tempfile::tempdir().unwrap();
+        let tool = TaskCreateTool { boards: boards(&dir) };
 
         let result = tool
             .execute(
                 json!({
                     "subject": ["Goal A", "Goal B", "Goal C"]
                 }),
-                &make_session(),
+                &make_session("test"),
             )
             .await
             .unwrap();
@@ -578,12 +621,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_create_subtasks() {
-        let state = shared_state();
+        let dir = tempfile::tempdir().unwrap();
+        let create = TaskCreateTool { boards: boards(&dir) };
 
         // Create a goal
-        let create = TaskCreateTool { state: Arc::clone(&state) };
         let goal = create
-            .execute(json!({"subject": "My Goal"}), &make_session())
+            .execute(json!({"subject": "My Goal"}), &make_session("test"))
             .await
             .unwrap();
         let goal_output: Value = serde_json::from_str(&goal.output).unwrap();
@@ -596,7 +639,7 @@ mod tests {
                     "subject": ["Task 1", "Task 2"],
                     "parent": goal_id
                 }),
-                &make_session(),
+                &make_session("test"),
             )
             .await
             .unwrap();
@@ -609,35 +652,92 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_requires_status() {
-        let state = shared_state();
-        let create = TaskCreateTool { state: Arc::clone(&state) };
+        let dir = tempfile::tempdir().unwrap();
+        let create = TaskCreateTool { boards: boards(&dir) };
         let _goal = create
-            .execute(json!({"subject": "Goal"}), &make_session())
+            .execute(json!({"subject": "Goal"}), &make_session("test"))
             .await
             .unwrap();
 
         // Update without status should error
-        let update = TaskUpdateTool { state: Arc::clone(&state) };
+        let update = TaskUpdateTool { boards: boards(&dir) };
         let result = update
             .execute(
                 json!({"task_id": "myclaw/t/legacy"}),
-                &make_session(),
+                &make_session("test"),
             )
             .await;
 
         assert!(result.is_err());
     }
 
+    /// P1-B1: task boards are per-session — session A's tasks are invisible
+    /// to session B, and each board lives under its own session directory.
+    #[tokio::test]
+    async fn test_boards_are_isolated_per_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = boards(&dir);
+        let session_a = make_session("019fe342-6a03-7561-86de-0c2327a8c3de");
+        let session_b = make_session("019fe342-6a03-7561-86de-0c2327a8ffff");
+
+        // Session A creates a goal.
+        let create = TaskCreateTool { boards: b.clone() };
+        let goal = create
+            .execute(json!({"subject": "A's Goal"}), &session_a)
+            .await
+            .unwrap();
+        assert!(goal.success);
+        let goal_id: Value = serde_json::from_str(&goal.output).unwrap();
+        let goal_id = goal_id["task_id"].as_str().unwrap().to_string();
+
+        // Session B's board is empty — and cannot see/update A's task.
+        let list = TaskListTool { boards: b.clone() };
+        let b_view = list
+            .execute(json!({}), &session_b)
+            .await
+            .unwrap();
+        let b_out: Value = serde_json::from_str(&b_view.output).unwrap();
+        assert_eq!(b_out["total"].as_u64().unwrap(), 0);
+        assert!(b_out["tasks"].as_array().unwrap().is_empty());
+
+        let update = TaskUpdateTool { boards: b.clone() };
+        let cross = update
+            .execute(json!({"task_id": goal_id, "status": "completed"}), &session_b)
+            .await
+            .unwrap();
+        assert!(!cross.success, "session B must not mutate A's tasks");
+
+        // Session A still sees its pending goal.
+        let a_view = list.execute(json!({}), &session_a).await.unwrap();
+        let a_out: Value = serde_json::from_str(&a_view.output).unwrap();
+        assert_eq!(a_out["total"].as_u64().unwrap(), 1);
+
+        // Files landed under per-session directories.
+        assert!(dir
+            .path()
+            .join("sessions")
+            .join("019fe342-6a03-7561-86de-0c2327a8c3de")
+            .join("tasks.json")
+            .is_file());
+        assert!(!dir
+            .path()
+            .join("sessions")
+            .join("019fe342-6a03-7561-86de-0c2327a8ffff")
+            .join("tasks.json")
+            .exists());
+    }
+
     #[tokio::test]
     async fn test_persist_survives_daemon_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tasks.json");
+        let b = boards(&dir);
+        let session = make_session("019fe342-6a03-7561-86de-0c2327a8c3de");
+        let path = b.board_path(&session.id);
 
         // "Daemon A": create a goal and a child task — both must hit disk.
-        let state = shared_state_persisted(path.clone(), DEFAULT_NAMESPACE);
-        let create = TaskCreateTool { state: Arc::clone(&state) };
+        let create = TaskCreateTool { boards: b.clone() };
         let goal = create
-            .execute(json!({"subject": "Persisted Goal"}), &make_session())
+            .execute(json!({"subject": "Persisted Goal"}), &session)
             .await
             .unwrap();
         assert!(goal.success);
@@ -647,7 +747,7 @@ mod tests {
         let child = create
             .execute(
                 json!({"subject": "Persisted Child", "parent": goal_id}),
-                &make_session(),
+                &session,
             )
             .await
             .unwrap();
@@ -669,11 +769,11 @@ mod tests {
         );
 
         // Update through a fresh tool instance persists as well.
-        let updater = TaskUpdateTool { state: Arc::clone(&state) };
+        let updater = TaskUpdateTool { boards: b.clone() };
         let updated = updater
             .execute(
                 json!({"task_id": goal_id, "status": "completed"}),
-                &make_session(),
+                &session,
             )
             .await
             .unwrap();
@@ -682,9 +782,9 @@ mod tests {
         assert_eq!(reloaded_after_update.tasks[0].status, "completed");
 
         // Delete persists too (goal + descendant child).
-        let deleter = TaskDeleteTool { state: Arc::clone(&state) };
+        let deleter = TaskDeleteTool { boards: b.clone() };
         let deleted = deleter
-            .execute(json!({"task_id": goal_id}), &make_session())
+            .execute(json!({"task_id": goal_id}), &session)
             .await
             .unwrap();
         assert!(deleted.success);

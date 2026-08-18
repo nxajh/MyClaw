@@ -504,7 +504,7 @@ async fn build_tools(
     session_backend: Arc<dyn crate::storage::SessionBackend>,
 ) -> (
     ToolRegistry,
-    Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
+    Arc<crate::tools::TaskBoards>,
     Arc<crate::tools::SendMessageTool>,
     Arc<crate::tools::FriendToolsCtx>,
 ) {
@@ -528,11 +528,14 @@ async fn build_tools(
     ));
     tools.register(Arc::clone(&send_message_tool) as Arc<dyn crate::providers::Tool>);
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
-    let task_state = crate::tools::shared_task_state_persisted(
-        config.workspace_dir.join(".state").join("tasks.json"),
+    // Task tools — P1-B1: per-session boards at
+    // `{sessions_root}/{uuid}/tasks.json` (the `Session` passed to execute
+    // resolves the board; no process-global task state anymore).
+    let task_boards = Arc::new(crate::tools::TaskBoards::new(
+        config.sessions_root(),
         namespace,
-    );
-    for tool in crate::tools::new_task_tools(Arc::clone(&task_state)) {
+    ));
+    for tool in crate::tools::new_task_tools((*task_boards).clone()) {
         tools.register(tool);
     }
 
@@ -612,7 +615,7 @@ async fn build_tools(
     }
 
     tracing::info!(tool_count = tools.tool_count(), "tool registry built");
-    (tools, task_state, send_message_tool, friend_ctx)
+    (tools, task_boards, send_message_tool, friend_ctx)
 }
 
 /// Build SkillManager from SKILL.md files in the data dir (P1: `{data_dir}/skills`).
@@ -1049,7 +1052,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let session_backend = build_session_backend(&config);
 
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
-    let (mut tools, task_state, send_message_tool, friend_ctx) = build_tools(
+    let (mut tools, task_boards, send_message_tool, friend_ctx) = build_tools(
         &mcp_manager,
         &skills_arc,
         &shared_scheduler,
@@ -1408,7 +1411,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         .with_defaults(defaults)
         .with_mcp_manager(Arc::clone(&mcp_manager_arc))
         .with_search_cooldown(Arc::clone(&search_cooldown))
-        .with_task_state(task_state)
+        .with_task_boards(Arc::clone(&task_boards))
         .with_sessions_dir(config.sessions_root())
         // P4 第二波：注册表供输出渲染（`<ref>` → `@昵称(u/uid)`，流式/Done/fallback）。
         .with_user_registry(Arc::clone(&user_registry))

@@ -86,9 +86,10 @@ pub struct AgentRuntime {
     /// (the tool writes timestamps on rate-limit; `/status` reads them
     /// to render ⏱️ markers next to cooled-down providers).
     pub search_cooldown: Option<Arc<SearchProviderCooldown>>,
-    /// Shared task/goal state from task tools. Injected into the
-    /// compaction summary so the model retains its plan across context resets.
-    pub task_state: Option<Arc<tokio::sync::RwLock<crate::tools::TaskState>>>,
+    /// Per-session task boards (P1-B1). Resolved from the current session id
+    /// at compaction time so the injected plan matches the session's own
+    /// `{sessions_root}/{uuid}/tasks.json` board.
+    pub task_boards: Option<Arc<crate::tools::TaskBoards>>,
     /// Root directory of session storage (`{workspace}/sessions`).
     /// Used by the exec-marker mechanism so recovery can detect tools
     /// that were executing when the daemon was killed (e.g. `myclaw update`).
@@ -124,7 +125,7 @@ impl AgentRuntime {
             defaults: RuntimeDefaults::default(),
             mcp_manager: None,
             search_cooldown: None,
-            task_state: None,
+            task_boards: None,
             sessions_dir: None,
             user_registry: None,
         }
@@ -145,11 +146,8 @@ impl AgentRuntime {
         self
     }
 
-    pub fn with_task_state(
-        mut self,
-        state: Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
-    ) -> Self {
-        self.task_state = Some(state);
+    pub fn with_task_boards(mut self, boards: Arc<crate::tools::TaskBoards>) -> Self {
+        self.task_boards = Some(boards);
         self
     }
 

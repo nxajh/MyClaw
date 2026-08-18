@@ -129,7 +129,7 @@ impl ContextEngine {
         model_id: &str,
         provider: Arc<dyn ChatProvider>,
         tool_specs: &[ToolSpec],
-        task_state: Option<&Arc<tokio::sync::RwLock<crate::tools::TaskState>>>,
+        task_boards: Option<&Arc<crate::tools::TaskBoards>>,
         force: bool,
         override_retain: Option<usize>,
     ) -> Option<(Vec<ChatMessage>, u64, u64)> {
@@ -258,9 +258,10 @@ impl ContextEngine {
                 let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] ";
 
                 // Inject active task/goal state so the model retains its plan
-                // across context compaction.
-                let task_injection = if let Some(task_state) = task_state {
-                    let state = task_state.read().await;
+                // across context compaction (P1-B1: the session's own board).
+                let task_injection = if let Some(boards) = task_boards {
+                    let board = boards.board(&session.id);
+                    let state = board.read().await;
                     state.format_for_injection()
                 } else {
                     None
@@ -347,7 +348,7 @@ impl ContextEngine {
         model_id: &str,
         provider: Arc<dyn ChatProvider>,
         tool_specs: &[ToolSpec],
-        task_state: Option<&Arc<tokio::sync::RwLock<crate::tools::TaskState>>>,
+        task_boards: Option<&Arc<crate::tools::TaskBoards>>,
         force: bool,
     ) -> Option<Vec<ChatMessage>> {
         const MAX_PASSES: usize = 10;
@@ -370,7 +371,7 @@ impl ContextEngine {
                     model_id,
                     Arc::clone(&provider),
                     tool_specs,
-                    task_state,
+                    task_boards,
                     force_pass,
                     override_retain,
                 )
