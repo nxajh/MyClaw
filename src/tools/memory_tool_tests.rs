@@ -290,7 +290,7 @@ mod tests {
         // dir, marked scope=user + user_id in frontmatter.
         let user_file = std::fs::read_to_string(dir.path().join("scope-user-test.md")).unwrap();
         assert!(user_file.contains("scope: user"));
-        assert!(user_file.contains("user_id: test-user"));
+        assert!(user_file.contains(&format!("user_id: \"test-user\"")));
         let default_file =
             std::fs::read_to_string(dir.path().join("scope-default-test.md")).unwrap();
         assert!(default_file.contains("scope: user"));
@@ -555,9 +555,10 @@ mod tests {
         assert!(!names.contains(&"alice-fact"));
         assert_eq!(names.len(), 2);
 
-        // Alice cannot search bob's private entry.
+        // Alice cannot search bob's private entry ("bob" is unique to it;
+        // partial-token matches against her own entries stay allowed).
         let result = search_tool
-            .execute(json!({"query": "bob private"}), &alice)
+            .execute(json!({"query": "bob"}), &alice)
             .await
             .unwrap();
         let output: Value = serde_json::from_str(&result.output).unwrap();

@@ -916,7 +916,7 @@ mod tests {
         assert_eq!(loaded.consecutive_failures, 0);
         assert!(loaded.last_distill_ts.is_some());
         assert!(loaded.last_attempt_ts.is_some());
-        assert!(dir.path().join(".state/distill.json").exists());
+        assert!(dir.path().join("distill.json").exists());
     }
 
     #[test]
@@ -927,11 +927,21 @@ mod tests {
         // No users/ at all → nothing pending.
         assert!(!has_pending_user_memories(ws, None));
 
-        // Write one user memory.
-        let mem_dir = dir.path().join("users/user-1/memory");
-        std::fs::create_dir_all(&mem_dir).unwrap();
-        let file = mem_dir.join("note.md");
-        std::fs::write(&file, "# note\n").unwrap();
+        // Write one user memory (flat dir + frontmatter scope).
+        let file = dir.path().join("note.md");
+        std::fs::write(
+            &file,
+            "---\n\
+             name: \"note\"\n\
+             description: \"user note\"\n\
+             type: \"project\"\n\
+             inject: search\n\
+             scope: user\n\
+             user_id: user-1\n\
+             ---\n\
+             body\n",
+        )
+        .unwrap();
 
         // Never distilled → pending.
         assert!(has_pending_user_memories(ws, None));
@@ -972,10 +982,8 @@ mod tests {
     fn build_existing_agent_index_lists_agent_memories() {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().to_str().unwrap();
-        let mem_dir = dir.path().join("memory");
-        std::fs::create_dir_all(&mem_dir).unwrap();
         std::fs::write(
-            mem_dir.join("spec-verification-before-delivery.md"),
+            dir.path().join("spec-verification-before-delivery.md"),
             "---\n\
              name: \"spec-verification-before-delivery\"\n\
              description: \"verify deliverables against spec\"\n\
@@ -1009,10 +1017,8 @@ mod tests {
     fn dedup_blocks_near_duplicate_name() {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().to_str().unwrap();
-        let mem_dir = dir.path().join("memory");
-        std::fs::create_dir_all(&mem_dir).unwrap();
         std::fs::write(
-            mem_dir.join("spec-verification-before-delivery.md"),
+            dir.path().join("spec-verification-before-delivery.md"),
             "---\n\
              name: \"spec-verification-before-delivery\"\n\
              description: \"verify deliverables against spec\"\n\
@@ -1036,10 +1042,8 @@ mod tests {
     fn dedup_allows_distinct_name() {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().to_str().unwrap();
-        let mem_dir = dir.path().join("memory");
-        std::fs::create_dir_all(&mem_dir).unwrap();
         std::fs::write(
-            mem_dir.join("spec-verification-before-delivery.md"),
+            dir.path().join("spec-verification-before-delivery.md"),
             "---\n\
              name: \"spec-verification-before-delivery\"\n\
              description: \"verify deliverables against spec\"\n\
@@ -1061,10 +1065,8 @@ mod tests {
     fn dedup_requires_min_overlap() {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().to_str().unwrap();
-        let mem_dir = dir.path().join("memory");
-        std::fs::create_dir_all(&mem_dir).unwrap();
         std::fs::write(
-            mem_dir.join("after-delivery-checks.md"),
+            dir.path().join("after-delivery-checks.md"),
             "---\n\
              name: \"after-delivery-checks\"\n\
              description: \"post-delivery verification\"\n\

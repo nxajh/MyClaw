@@ -1141,11 +1141,15 @@ impl MemoryManageTool {
             scan_agent_pii_opt(content)?;
         }
 
-        let files = scan_scope(&self.knowledge_dir, scope, user_id);
-        if files.iter().any(|f| f.name == name) {
+        // P1-B2: flat dir — names are unique across scopes; an add that
+        // collides with an existing name owned by another scope must be
+        // rejected instead of silently overwriting the file.
+        let all_files = crate::memory::scan_memory_files(&self.knowledge_dir);
+        if let Some(existing) = all_files.iter().find(|f| f.name == name) {
+            let existing_scope = existing.scope.as_deref().unwrap_or("agent");
             return Err(format!(
                 "Memory '{}' already exists in the {} scope. Use 'replace' to update it.",
-                name, scope
+                name, existing_scope
             ));
         }
 
@@ -1156,7 +1160,7 @@ impl MemoryManageTool {
         let filename = format!("{}.md", name);
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        let warnings = lint_memory_content(name, content, &files);
+        let warnings = lint_memory_content(name, content, &all_files);
         let frontmatter = build_frontmatter(
             name,
             &description,

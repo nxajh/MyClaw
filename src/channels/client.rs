@@ -2442,7 +2442,7 @@ mod tests {
         let user_path = tmp.path().join("memory").join("fresh_user.md");
         let written = std::fs::read_to_string(&user_path).unwrap();
         assert!(written.contains("scope: user"));
-        assert!(written.contains(&format!("user_id: \"{}\"", USER_UID)));
+        assert!(written.contains(&format!("user_id: {}", USER_UID)));
         assert!(written.contains("new user body"));
         // Visible to this user via scope=user listing…
         let resp = api(
