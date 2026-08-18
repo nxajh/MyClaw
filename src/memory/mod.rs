@@ -670,6 +670,8 @@ mod tests {
                 ],
                 content: String::new(),
                 path: std::path::PathBuf::new(),
+                scope: None,
+                user_id: None,
             },
             MemoryFile {
                 name: "beta".into(),
@@ -685,6 +687,8 @@ mod tests {
                 }],
                 content: String::new(),
                 path: std::path::PathBuf::new(),
+                scope: None,
+                user_id: None,
             },
         ];
 
