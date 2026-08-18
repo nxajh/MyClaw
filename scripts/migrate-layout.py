@@ -60,13 +60,20 @@ class Plan:
 # ── frontmatter 注入 ─────────────────────────────────────────────────────────
 
 
-def inject_frontmatter(text: str, scope: str, user_id: str | None = None) -> str | None:
-    """注入 scope（+user_id）到 frontmatter；已有 scope 键则返回 None（幂等）。"""
+def inject_frontmatter(
+    text: str, scope: str, user_id: str | None = None, mem_type: str | None = None
+) -> str | None:
+    """注入 scope（+user_id、+type）到 frontmatter；所有待注入的 key 均已存在则返回
+    None（幂等）。`type` 是 Rust 侧 `MemoryFile` 的必填字段（缺失直接解析失败、
+    对整个系统不可见——不只是分类丢失），遗留 type 分区目录（如 project/、
+    reference/）拍平时必须一起补上，不能只补 scope。"""
     lines = text.splitlines(keepends=True)
     has_fm = bool(lines) and lines[0].strip() == "---"
     keys: list[str] = [f'scope: "{scope}"']
     if user_id:
         keys.append(f'user_id: "{user_id}"')
+    if mem_type:
+        keys.append(f'type: "{mem_type}"')
 
     def find_key(fm_lines: list[str], key: str) -> bool:
         return any(ln.startswith(f"{key}:") for ln in fm_lines)
@@ -80,9 +87,9 @@ def inject_frontmatter(text: str, scope: str, user_id: str | None = None) -> str
         if end is None:
             raise ValueError("frontmatter 未闭合（缺第二个 '---'）")
         fm = lines[1:end]
-        if find_key(fm, "scope"):
-            return None
         inject = [k + "\n" for k in keys if not find_key(fm, k.split(":")[0])]
+        if not inject:
+            return None
         return "".join(lines[:end]) + "".join(inject) + "".join(lines[end:])
     return "---\n" + "".join(k + "\n" for k in keys) + "---\n\n" + text
 
@@ -108,6 +115,56 @@ def check_daemon_stopped(data: Path) -> None:
                 sys.exit(f"错误：检测到疑似 myclaw 进程（pid {pid}）。请先 myclaw stop 再迁移。")
 
 
+# ── memory 子目录归位（.versions / .audit / 遗留 type 分区）──────────────────
+#
+# B12/B13 原本只 glob("*.md") 扫 memory 目录的第一层，完全没处理三类真实存在
+# 的子目录：
+#   .versions/{name}/v{N}__{date}__{hash}.md —— memory_tool.rs 的版本归档，
+#       目标同样是扁平池下的 .versions/{name}/（不区分用户，与运行时布局一致）
+#   .audit/ —— 运行时审计日志，目标是 {data}/state/memory/.audit/（不在
+#       memory 池里，memory_tool.rs 写在 data_dir/state/memory/.audit）
+#   其它任意子目录（如 project/、reference/）—— 更早期"按 type 分子目录"的
+#       遗留布局，拍平进 memory 池并补 type: <目录名>（MemoryFile.mem_type 是
+#       必填字段，缺失直接解析失败、对整个系统不可见，不只是分类丢失）
+def migrate_memory_subdir_extras(
+    p: Plan, memdir: Path, D: Any, scope: str, user_id: str | None, note_prefix: str
+) -> None:
+    if not memdir.is_dir():
+        return
+    versions_dir = memdir / ".versions"
+    if versions_dir.is_dir():
+        for f in sorted(versions_dir.rglob("*.md")):
+            rel_path = f.relative_to(versions_dir)
+            dst = D("memory", ".versions", *rel_path.parts)
+            if dst.exists():
+                if dst.read_bytes() == f.read_bytes():
+                    continue  # 内容一致（哈希落在文件名里）——之前已迁移过，幂等跳过
+                sys.exit(f"错误：memory 版本归档冲突 {rel_path}（同名不同内容）——人工决断")
+            p.add(kind="move", src=f, dst=dst, note=f"{note_prefix} .versions 归位")
+    audit_dir = memdir / ".audit"
+    if audit_dir.is_dir():
+        for f in sorted(audit_dir.rglob("*")):
+            if f.is_dir():
+                continue
+            rel_path = f.relative_to(audit_dir)
+            dst = D("state", "memory", ".audit", *rel_path.parts)
+            if dst.exists():
+                print(f"提示：{rel_path} 目标已存在，保留旧文件，跳过迁移源 {f}")
+                continue
+            p.add(kind="move", src=f, dst=dst, note=f"{note_prefix} .audit 归位")
+    for sub in sorted(memdir.iterdir()):
+        if not sub.is_dir() or sub.name in (".versions", ".audit"):
+            continue
+        mem_type = sub.name
+        for f in sorted(sub.rglob("*.md")):
+            dst = D("memory", f.name)
+            if dst.exists():
+                print(f"警告：遗留 type={mem_type} 分区 memory 同名跳过 {f.name}")
+                continue
+            p.add(kind="move", src=f, dst=dst, note=f"{note_prefix} 遗留 type={mem_type} 拍平",
+                  meta={"scope": scope, "user_id": user_id, "mem_type": mem_type})
+
+
 # ── 计划构建 ────────────────────────────────────────────────────────────────
 
 
@@ -128,14 +185,20 @@ def build_plan(ws: Path, data: Path) -> Plan:
         p.add(kind="move", src=W("sessions"), dst=D("sessions"), note="A2 sessions/ → data")
     if W("users").exists() and not D("users").exists():
         p.add(kind="move", src=W("users"), dst=D("users"), note="A3 users/ → data")
-    # A4 memory：逐 md 合并进 data/memory（data 侧可能已有少量文件）
+    # A4 memory：逐 md 合并进 data/memory（data 侧可能已有少量文件）。子目录
+    # （.versions/.audit/遗留 type 分区，如 project/、reference/）单独归位——
+    # 历史上这里只扫第一层 *.md，子目录内容会被无声漏掉。
     if W("memory").is_dir():
         for f in sorted(W("memory").glob("*.md")):
             dst = D("memory", f.name)
             if dst.exists():
                 sys.exit(f"错误：memory 名称冲突 {f.name}（data/memory 已存在同名文件）——人工决断后重跑")
             p.add(kind="move", src=f, dst=dst, note="A4 memory 平铺合并")
-    if W("memory").is_dir() and not any(W("memory").glob("*.md")):
+        migrate_memory_subdir_extras(p, W("memory"), D, "agent", None, "A4")
+    if W("memory").is_dir():
+        # rmdir_empty_tree 自底向上清空壳，含文件移出后留下的空子目录
+        # （.versions/xxx/、.audit/、遗留 type 分区）；真有文件剩下会保留+警告，
+        # 不需要在这里预判"是不是已经空了"。
         p.add(kind="removed_dir", src=W("memory"), note="A4 memory 清壳")
     # A5 cron → jobs：jobs.json 拆分（created）+ run_logs → history.jsonl（move）
     jobs_json = W("cron", "jobs.json")
@@ -250,12 +313,14 @@ def build_plan(ws: Path, data: Path) -> Plan:
                     memdir = udir / "memory"
                     if not memdir.is_dir():
                         continue
+                    user_id = f"{NAMESPACE}/u/{udir.name}"
                     for f in sorted(memdir.glob("*.md")):
                         dst = D("memory", f.name)
                         if dst.exists():
                             sys.exit(f"错误：memory 名称冲突 {f.name}（user 层迁移目标已存在）——人工决断")
                         p.add(kind="move", src=f, dst=dst, note="B12 user memory 平铺",
-                              meta={"scope": "user", "user_id": f"{NAMESPACE}/u/{udir.name}"})
+                              meta={"scope": "user", "user_id": user_id})
+                    migrate_memory_subdir_extras(p, memdir, D, "user", user_id, "B12")
             dbl = main / NAMESPACE / "u"
             if dbl.is_dir():
                 for udir in sorted(dbl.iterdir()):
@@ -263,23 +328,30 @@ def build_plan(ws: Path, data: Path) -> Plan:
                         memdir = udir / "memory"
                         if not memdir.is_dir():
                             continue
+                        user_id = f"{NAMESPACE}/u/{udir.name}"
                         for f in sorted(memdir.glob("*.md")):
                             dst = D("memory", f.name)
                             if dst.exists():
                                 print(f"警告：双前缀 memory 同名跳过 {f.name}")
                                 continue
                             p.add(kind="move", src=f, dst=dst, note="B12 双前缀并入主用户",
-                                  meta={"scope": "user", "user_id": f"{NAMESPACE}/u/{udir.name}"})
+                                  meta={"scope": "user", "user_id": user_id})
+                        migrate_memory_subdir_extras(p, memdir, D, "user", user_id, "B12 双前缀")
             root_mem = main / "root" / "memory"
             if root_mem.is_dir():
-                for f in sorted(root_mem.glob("*.md")):
-                    p.add(kind="move", src=f, dst=D("users", ".legacy-root-memory", f.name),
-                          note="B12 root 3 md 归档（不注入）")
+                # root 不注入共享池——.versions/遗留 type 分区也一并按原相对
+                # 路径归档到 .legacy-root-memory，不补 scope/type（原样保留）。
+                for f in sorted(root_mem.rglob("*.md")):
+                    rel_path = f.relative_to(root_mem)
+                    p.add(kind="move", src=f, dst=D("users", ".legacy-root-memory", *rel_path.parts),
+                          note="B12 root memory 归档（不注入）")
         if (users / NAMESPACE).exists():
             p.add(kind="removed_dir", src=users / NAMESPACE,
                   note="B12 users/myclaw 清壳（.legacy-rk-archive 保留）")
-    # B13 agent 层 memory 补 scope: agent（凡无 scope 键的；含 A4 未执行时的 ws 侧）
-    mem_dir = pick("memory")
+    # B13 agent 层 memory 补 scope: agent（凡无 scope 键的；A4 已经把
+    # workspace/memory 的内容——含子目录——并入 data/memory，这里只需要对
+    # 落位后仍缺 scope 键的文件补齐，不用再 pick() 二选一）。
+    mem_dir = D("memory")
     if mem_dir.is_dir():
         for f in sorted(mem_dir.glob("*.md")):
             txt = f.read_text()
@@ -416,10 +488,12 @@ def execute_action(ws: Path, data: Path, a: Action, manifest: dict[str, Any]) ->
         shutil.move(str(a.src), str(dst))
         manifest["moves"].append({"from": str(a.src), "to": str(dst)})
         print(f"move {a.src} → {dst}")
-        # B12/B13 语义：move 携带 scope meta 时，落位后注入 frontmatter
+        # A4/B12/B13 语义：move 携带 scope meta 时，落位后注入 frontmatter
         if "scope" in a.meta:
             txt = dst.read_text()
-            new = inject_frontmatter(txt, a.meta["scope"], a.meta.get("user_id"))
+            new = inject_frontmatter(
+                txt, a.meta["scope"], a.meta.get("user_id"), a.meta.get("mem_type")
+            )
             if new is not None:
                 dst.write_text(new)
                 manifest["modified"].append(str(dst))
@@ -532,8 +606,22 @@ def verify(ws: Path, data: Path) -> int:
     print(f"INFO memory {len(mds)}（user {n_user} / agent {n_agent}）")
     check(all(_has_userid(f) for f in mds if _scope_is(f, "user")), "user scope 均含 user_id")
 
-    check(not any((data / "users").rglob("memory/*.md")) if (data / "users").is_dir() else True,
-          "users/ 下无 memory 子树残留")
+    # .legacy-rk-archive/.legacy-root-memory 是设计上就该保留的归档
+    # （B11/B12 归档目标），底下带 memory/ 子树是预期状态，不算残留。
+    users_dir = data / "users"
+    LEGACY_ARCHIVE_DIRS = (".legacy-rk-archive", ".legacy-root-memory")
+    stray_memory = [
+        f for f in (users_dir.rglob("memory/*.md") if users_dir.is_dir() else [])
+        if f.relative_to(users_dir).parts[0] not in LEGACY_ARCHIVE_DIRS
+    ]
+    check(not stray_memory, f"users/ 下无 memory 子树残留（{len(stray_memory)}）")
+    # 上面那条按 "memory/*.md" 模式找残留，抓不到 .versions/{name}/v1.md 这种
+    # （直接父目录不叫 memory）——B12 应该把整个 users/{ns} 子树清空，单独验证。
+    check(not (data / "users" / NAMESPACE).exists(),
+          f"users/{NAMESPACE} 已清壳（含 .versions/.audit/遗留 type 分区）")
+    ws_mem = ws / "memory"
+    check(not ws_mem.is_dir() or not any(ws_mem.iterdir()),
+          "workspace/memory 内容已清空（若非空见上方 A4 归位动作）")
     for absent in ("sessions", "users", "memory", "agents", "skills", "backups"):
         check(not (ws / absent).exists(), f"workspace/{absent} 已不存在")
     check(not (ws / "cron" / "jobs.json").exists(), "workspace/cron/jobs.json 已不存在")

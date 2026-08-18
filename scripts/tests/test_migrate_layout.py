@@ -68,11 +68,27 @@ class MigrateLayoutTest(unittest.TestCase):
         rt = ws / "users" / "myclaw" / "u" / "root" / "memory"
         rt.mkdir(parents=True)
         (rt / "root-note.md").write_text("root legacy\n")
+        (rt / ".versions" / "root-topic").mkdir(parents=True)
+        (rt / ".versions" / "root-topic" / "v1__20260101__aaa.md").write_text("root old ver\n")
         (ws / "users" / ".legacy-rk-archive" / "telegram:x").mkdir(parents=True)
-        # memory：agent 层 2 md（无 scope）
+        # 用户层 memory 子目录：.versions（版本归档）、.audit（审计日志）、
+        # project/（遗留 type 分区，无 scope/type 键的旧格式）
+        (um / ".versions" / "user-topic").mkdir(parents=True)
+        (um / ".versions" / "user-topic" / "v1__20260101__bbb.md").write_text("user old ver\n")
+        (um / ".audit").mkdir()
+        (um / ".audit" / "user_audit.jsonl").write_text('{"a":1}\n')
+        (um / "project").mkdir()
+        (um / "project" / "user-proj-note.md").write_text("user legacy type=project note\n")
+        # memory：agent 层 2 md（无 scope）+ 同样的三类子目录
         (ws / "memory").mkdir()
         (ws / "memory" / "agent-one.md").write_text("---\nname: a1\ntags: [t]\n---\n\nbody\n")
         (ws / "memory" / "agent-two.md").write_text("bare agent memory\n")
+        (ws / "memory" / ".versions" / "agent-topic").mkdir(parents=True)
+        (ws / "memory" / ".versions" / "agent-topic" / "v1__20260101__ccc.md").write_text("agent old ver\n")
+        (ws / "memory" / ".audit").mkdir()
+        (ws / "memory" / ".audit" / "agent_audit.jsonl").write_text('{"b":1}\n')
+        (ws / "memory" / "reference").mkdir()
+        (ws / "memory" / "reference" / "agent-ref-note.md").write_text("agent legacy type=reference note\n")
         # cron：jobs.json 1 条 + run_logs 1 个 + 用户笔记 + 旧 bak（后两者留在 workspace）
         (ws / "cron").mkdir()
         jid = "myclaw/job/019fe4ce-9e19-7da1-9235-7bc312adb456"
@@ -129,6 +145,27 @@ class MigrateLayoutTest(unittest.TestCase):
         self.assertIn('scope: "agent"', (d / "memory" / "agent-two.md").read_text())
         self.assertIn('scope: "agent"', (d / "memory" / "preexisting.md").read_text())
         self.assertTrue((d / "users" / ".legacy-root-memory" / "root-note.md").exists())
+        # root 的 .versions 也归档到 .legacy-root-memory（不注入、不补 scope/type）
+        root_ver = d / "users" / ".legacy-root-memory" / ".versions" / "root-topic" / "v1__20260101__aaa.md"
+        self.assertTrue(root_ver.exists())
+        self.assertNotIn("scope", root_ver.read_text())
+        # 用户层 .versions/.audit/遗留 type 分区全部归位
+        self.assertTrue(
+            (d / "memory" / ".versions" / "user-topic" / "v1__20260101__bbb.md").exists())
+        self.assertTrue((d / "state" / "memory" / ".audit" / "user_audit.jsonl").exists())
+        self.assertTrue((d / "state" / "memory" / ".audit" / "agent_audit.jsonl").exists())
+        user_proj = (d / "memory" / "user-proj-note.md").read_text()
+        self.assertIn('scope: "user"', user_proj)
+        self.assertIn('type: "project"', user_proj)
+        self.assertIn('user_id: "myclaw/u/019fe342-6a03-7561-86de-0c2327a8c3de"', user_proj)
+        # agent 层（workspace/memory，data/memory 已存在时也不能被 pick() 无视）
+        # .versions/.audit/遗留 type 分区同样全部归位
+        self.assertTrue(
+            (d / "memory" / ".versions" / "agent-topic" / "v1__20260101__ccc.md").exists())
+        agent_ref = (d / "memory" / "agent-ref-note.md").read_text()
+        self.assertIn('scope: "agent"', agent_ref)
+        self.assertIn('type: "reference"', agent_ref)
+        self.assertFalse((ws / "memory").exists())
         # users 清壳、legacy-rk-archive 保留
         self.assertFalse((d / "users" / "myclaw").exists())
         self.assertTrue((d / "users" / ".legacy-rk-archive").is_dir())
