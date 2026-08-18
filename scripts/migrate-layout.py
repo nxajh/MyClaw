@@ -365,9 +365,16 @@ def apply(ws: Path, data: Path) -> None:
                 bundle = make_backup(ws, data, plan, bak_dir)
                 print(f"备份完成：{bundle}")
             for a in plan.actions:
-                n = execute_action(ws, data, a, manifest)
+                try:
+                    n = execute_action(ws, data, a, manifest)
+                except Exception as e:  # noqa: BLE001 —— fail-fast：报告后中止，带上具体动作方便定位
+                    sys.exit(
+                        f"迁移中止（已完成 {total} 步）：{a.kind} "
+                        f"src={a.src} dst={a.dst}（{a.note}）失败：{e}\n"
+                        f"修复问题后直接重跑 --apply（已执行步骤自动跳过）。"
+                    )
                 total += n
-    except Exception as e:  # noqa: BLE001 —— fail-fast：报告后中止
+    except Exception as e:  # noqa: BLE001 —— build_plan/make_backup 阶段的失败
         sys.exit(f"迁移中止（已完成 {total} 步）：{e}\n"
                  f"修复问题后直接重跑 --apply（已执行步骤自动跳过）。")
 
