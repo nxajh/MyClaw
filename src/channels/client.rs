@@ -1632,7 +1632,7 @@ fn handle_api_request(
                         &uid,
                         Some(&dir),
                     ));
-                    let stem = filename.strip_suffix(".md").unwrap_or(&filename);
+                    let stem = filename.strip_suffix(".md").unwrap_or(filename);
                     let matches_scope = |f: &crate::memory::MemoryFile, scope_name: &str| {
                         f.name == stem && memory_file_in_scope(f, scope_name, &uid)
                     };
@@ -1713,7 +1713,7 @@ fn handle_api_request(
                         &uid,
                         Some(&dir),
                     ));
-                    let stem = filename.strip_suffix(".md").unwrap_or(&filename);
+                    let stem = filename.strip_suffix(".md").unwrap_or(filename);
                     let matches_scope = |f: &crate::memory::MemoryFile, scope_name: &str| {
                         f.name == stem && memory_file_in_scope(f, scope_name, &uid)
                     };

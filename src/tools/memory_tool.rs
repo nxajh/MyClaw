@@ -536,6 +536,7 @@ fn lint_memory_content(name: &str, content: &str, files: &[MemoryFile]) -> Vec<S
 /// Build frontmatter string.
 /// P1-B2: ownership (`scope` + `user_id`) is always written — files without a
 /// `scope` field would fall back to the agent layer on read.
+#[allow(clippy::too_many_arguments)]
 fn build_frontmatter(
     name: &str,
     description: &str,

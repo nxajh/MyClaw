@@ -269,7 +269,7 @@ fn name_tokens(name: &str) -> std::collections::HashSet<String> {
 /// an existing memory instead of adding a duplicate topic.
 fn find_duplicate_agent_memory(workspace_dir: &str, candidate_name: &str) -> Option<String> {
     let memory_dir = std::path::Path::new(workspace_dir);
-    let files = crate::memory::scan_memory_files(&memory_dir);
+    let files = crate::memory::scan_memory_files(memory_dir);
     let cand = name_tokens(candidate_name);
     if cand.is_empty() {
         return None;
@@ -302,7 +302,7 @@ fn find_duplicate_agent_memory(workspace_dir: &str, candidate_name: &str) -> Opt
 /// model can spot covered topics without guessing.
 fn build_existing_agent_index(workspace_dir: &str) -> String {
     let memory_dir = std::path::Path::new(workspace_dir);
-    let files = crate::memory::scan_memory_files(&memory_dir);
+    let files = crate::memory::scan_memory_files(memory_dir);
     if files.is_empty() {
         return "(empty — no agent-level memories yet)".to_string();
     }
@@ -315,7 +315,7 @@ fn build_existing_agent_index(workspace_dir: &str) -> String {
 /// Used to diff before/after pass 1 to find newly written/modified memories.
 fn snapshot_agent_memories(workspace_dir: &str) -> std::collections::HashMap<String, String> {
     let memory_dir = std::path::Path::new(workspace_dir);
-    let files = crate::memory::scan_memory_files(&memory_dir);
+    let files = crate::memory::scan_memory_files(memory_dir);
     files
         .iter()
         .map(|f| {
