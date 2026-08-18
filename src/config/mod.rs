@@ -6,6 +6,7 @@
 //! # Configuration file structure
 //!
 //! ```toml
+//! data_dir = "~/.myclaw"
 //! workspace_dir = "~/.myclaw/workspace"
 //!
 //! [providers.openai]
@@ -46,6 +47,18 @@
 //! command = "npx"
 //! args = ["mcp-server-filesystem"]
 //! ```
+//!
+//! # 数据目录与工作区分离（storage-layout redesign §3.2）
+//!
+//! 系统数据分两个根：
+//!
+//! - **data dir**（`data_dir`，默认 `~/.local/share/myclaw`）：系统数据库 +
+//!   系统配置 + 运行时状态。daemon 启动依赖的实体（`sessions/`、`users/`、
+//!   `jobs/`、`memory/`、`agents/`、`skills/`、`backups/`、`state/`）全部
+//!   在这里。派生路径见 [`AppConfig::sessions_root`] 等方法。
+//! - **workspace dir**（`workspace_dir`，默认 `{data_dir}/workspace`）：agent
+//!   工作台（cwd、代码仓库、过程产物）。daemon 启动不依赖其中任何东西，
+//!   可整体清理重建。
 
 pub mod agent;
 pub mod channel;
@@ -77,11 +90,17 @@ use routing::RoutingConfig;
 /// Raw configuration as parsed from TOML — before env var expansion.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RawConfig {
-    /// Workspace directory path.
+    /// Data directory path（系统数据库 + 配置 + 运行时状态）。
+    /// 默认 `ProjectDirs::from("","","myclaw").data_dir()`。
+    #[serde(default)]
+    data_dir: Option<String>,
+
+    /// Workspace directory path（agent 工作台，过程产物）。
+    /// 默认 `{data_dir}/workspace`。
     #[serde(default)]
     workspace_dir: Option<String>,
 
-    /// 知识库目录路径。默认为 {workspace_dir}/memory。
+    /// 知识库目录路径。默认为 {data_dir}/memory（已弃用显式配置）。
     #[serde(default)]
     knowledge_dir: Option<String>,
 
@@ -360,9 +379,14 @@ fn glob_match_chars(pat: &[char], seg: &[char]) -> bool {
 /// This is the main config type consumed by all subsystems.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    /// Workspace directory (absolute path).
+    /// Data directory (absolute path) — system database + config + runtime
+    /// state (sessions/users/jobs/memory/agents/skills/…). See the module
+    /// docs for the data-dir / workspace split.
+    pub data_dir: PathBuf,
+    /// Workspace directory (absolute path) — agent working area (process
+    /// artifacts, repositories). Defaults to `{data_dir}/workspace`.
     pub workspace_dir: PathBuf,
-    /// Knowledge directory (absolute path). Defaults to {workspace_dir}/memory.
+    /// Knowledge directory (absolute path). Defaults to {data_dir}/memory.
     pub knowledge_dir: PathBuf,
     /// Path to the config file.
     pub config_path: PathBuf,
@@ -403,6 +427,46 @@ pub struct AppConfig {
 use std::sync::OnceLock;
 
 static SAFETY_CONFIG: OnceLock<SafetyConfig> = OnceLock::new();
+
+/// Default data dir — `ProjectDirs::from("","","myclaw").data_dir()`
+/// (same derivation the daemon and migration use).
+fn default_data_dir() -> PathBuf {
+    directories::ProjectDirs::from("", "", "myclaw")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(".myclaw"))
+}
+
+impl AppConfig {
+    /// Session storage root: `{data_dir}/sessions`.
+    pub fn sessions_root(&self) -> PathBuf {
+        self.data_dir.join("sessions")
+    }
+
+    /// User entity root: `{data_dir}/users`.
+    pub fn users_root(&self) -> PathBuf {
+        self.data_dir.join("users")
+    }
+
+    /// Job (cron/webhook) entity root: `{data_dir}/jobs`.
+    pub fn jobs_root(&self) -> PathBuf {
+        self.data_dir.join("jobs")
+    }
+
+    /// Skills root: `{data_dir}/skills`.
+    pub fn skills_root(&self) -> PathBuf {
+        self.data_dir.join("skills")
+    }
+
+    /// Sub-agent definitions root: `{data_dir}/agents`.
+    pub fn agents_root(&self) -> PathBuf {
+        self.data_dir.join("agents")
+    }
+
+    /// Migration backups root: `{data_dir}/backups`.
+    pub fn backups_root(&self) -> PathBuf {
+        self.data_dir.join("backups")
+    }
+}
 
 /// Initialize the global safety config. Called once at daemon startup.
 /// Subsequent calls are no-ops (the first config wins).
@@ -453,23 +517,36 @@ impl ConfigLoader {
         // Expand environment variables in all string fields.
         Self::expand_env_vars(&mut raw);
 
-        // Resolve workspace_dir.
+        // Resolve data_dir: explicit path or the platform data dir
+        // (`ProjectDirs::from("","","myclaw").data_dir()`).
+        let data_dir = raw
+            .data_dir
+            .map(|dir| Self::expand_path(&dir))
+            .unwrap_or_else(default_data_dir);
+
+        // Resolve workspace_dir: explicit path or default `{data_dir}/workspace`.
         let workspace_dir = raw
             .workspace_dir
             .map(|dir| Self::expand_path(&dir))
-            .unwrap_or_else(|| {
-                directories::ProjectDirs::from("", "", "myclaw")
-                    .map(|d| d.data_dir().join("workspace"))
-                    .unwrap_or_else(|| PathBuf::from(".myclaw/workspace"))
-            });
+            .unwrap_or_else(|| data_dir.join("workspace"));
 
-        // Resolve knowledge_dir: explicit path or default to {workspace_dir}/memory.
-        let knowledge_dir = raw
-            .knowledge_dir
-            .map(|d| Self::expand_path(&d))
-            .unwrap_or_else(|| workspace_dir.join("memory"));
+        // Resolve knowledge_dir: explicit path (deprecated) or default
+        // `{data_dir}/memory`.
+        let knowledge_dir = match raw.knowledge_dir {
+            Some(d) => {
+                let expanded = Self::expand_path(&d);
+                tracing::warn!(
+                    explicit = %expanded.display(),
+                    recommended = %data_dir.join("memory").display(),
+                    "knowledge_dir 显式配置已弃用，建议迁移至 {data_dir}/memory"
+                );
+                expanded
+            }
+            None => data_dir.join("memory"),
+        };
 
         Ok(AppConfig {
+            data_dir,
             workspace_dir,
             knowledge_dir,
             config_path,

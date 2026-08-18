@@ -75,10 +75,10 @@ pub async fn run(cli: &Cli, action: ConfigAction) -> Result<()> {
 
             // Sub-agents are loaded from workspace/agents/, not from config
             let agents = myclaw::agents::agent_loader::load_agents_from_dir(
-                &cfg.workspace_dir.join("agents"),
+                &cfg.agents_root(),
             );
             if !agents.is_empty() {
-                println!("[[agents]] (from workspace/agents/)");
+                println!("[[agents]] (from data dir agents/)");
                 for agent in &agents {
                     println!("  name = \"{}\"", agent.name);
                     if let Some(ref desc) = agent.description {

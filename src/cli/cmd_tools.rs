@@ -92,7 +92,7 @@ fn list_agents(cli: &Cli, format: &str) -> Result<()> {
                 .as_ref()
                 .map(|c| {
                     myclaw::agents::agent_loader::load_agents_from_dir(
-                        &c.workspace_dir.join("agents"),
+                        &c.agents_root(),
                     )
                     .into_iter()
                     .map(|a| a.name)
@@ -105,7 +105,7 @@ fn list_agents(cli: &Cli, format: &str) -> Result<()> {
             println!("🤖 Configured Sub-Agents\n");
             if let Some(cfg) = cfg {
                 let agents = myclaw::agents::agent_loader::load_agents_from_dir(
-                    &cfg.workspace_dir.join("agents"),
+                    &cfg.agents_root(),
                 );
                 if agents.is_empty() {
                     println!("  (none configured — add AGENT.md files to workspace/agents/)");

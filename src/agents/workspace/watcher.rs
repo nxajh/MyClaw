@@ -27,7 +27,7 @@ pub struct ChangeSet {
 
 /// 文件系统监视器。
 ///
-/// 监视 `workspace/skills/` 和 `workspace/agents/` 目录，
+/// 监视 skills/ 和 agents/ 目录变化（P1: 随 data dir），通知 AgentLoop。
 /// 通过 `rx` channel 发送变化信号。
 pub struct WorkspaceWatcher {
     /// 变化信号接收端（AgentLoop 持有）
@@ -38,11 +38,24 @@ pub struct WorkspaceWatcher {
 
 impl WorkspaceWatcher {
     pub fn new(workspace_dir: &Path, knowledge_dir: &Path) -> Result<Self> {
+        // P1: skills/agents 热加载目录随 data dir（系统配置面）。此构造器保留
+        // 旧签名（workspace 侧）以兼容既有调用；daemon 侧请用 `new_with_roots`。
+        Self::new_with_roots(
+            workspace_dir.join("skills"),
+            workspace_dir.join("agents"),
+            knowledge_dir,
+        )
+    }
+
+    /// P1 variant: hot-reload roots supplied directly (data-dir derived).
+    pub fn new_with_roots(
+        skills_dir: PathBuf,
+        agents_dir: PathBuf,
+        memory_dir: &Path,
+    ) -> Result<Self> {
         let (tx, rx) = watch::channel(ChangeSet::default());
 
-        let skills_dir = workspace_dir.join("skills");
-        let agents_dir = workspace_dir.join("agents");
-        let memory_dir = knowledge_dir.to_path_buf();
+        let memory_dir = memory_dir.to_path_buf();
 
         let skills_dir_c = skills_dir.clone();
         let agents_dir_c = agents_dir.clone();
@@ -115,10 +128,29 @@ impl WorkspaceWatcher {
         agent_registry: crate::agents::AgentRegistry,
         skill_manager: Arc<RwLock<super::skills::SkillManager>>,
     ) -> Result<ManagedWatcherGuard> {
-        let watcher = Self::new(workspace_dir, knowledge_dir)?;
+        Self::spawn_managed_with_roots(
+            workspace_dir.join("skills"),
+            workspace_dir.join("agents"),
+            knowledge_dir,
+            agent_registry,
+            skill_manager,
+        )
+    }
+
+    /// P1 variant: reload roots supplied directly (data-dir derived).
+    pub fn spawn_managed_with_roots(
+        skills_dir: PathBuf,
+        agents_dir: PathBuf,
+        knowledge_dir: &Path,
+        agent_registry: crate::agents::AgentRegistry,
+        skill_manager: Arc<RwLock<super::skills::SkillManager>>,
+    ) -> Result<ManagedWatcherGuard> {
+        let watcher = Self::new_with_roots(
+            skills_dir.clone(),
+            agents_dir.clone(),
+            knowledge_dir,
+        )?;
         let mut rx = watcher.rx.clone();
-        let agents_dir = workspace_dir.join("agents");
-        let skills_dir = workspace_dir.join("skills");
 
         let token = tokio_util::sync::CancellationToken::new();
         let task_token = token.clone();

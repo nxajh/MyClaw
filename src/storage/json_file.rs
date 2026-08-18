@@ -5,7 +5,7 @@
 //! ```text
 //! sessions/
 //!   active.json              # { "user_id": "session_id", ... }
-//!   {dir_name(session_id)}/  # `/` → `_`、`_` → `__`（可逆，见 ids::dir_name）
+//!   {bare_dir_name(session_id)}/  # P1: 裸 uuid（FQID 解析失败回退 dir_name）
 //!     meta.json              # all session metadata (identity, counters, compaction state)
 //!     history.jsonl          # active segment: one ChatMessage JSON per line, append-only
 //!     archive/
@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{dir_name, id_from_dir, Fqid, DEFAULT_NAMESPACE, TYPE_SESSION};
+use crate::ids::{bare_dir_name, id_from_dir, Fqid, DEFAULT_NAMESPACE, TYPE_SESSION};
 use crate::storage::{ChatMessage, SavedSessionFile, SessionBackend, SessionInfo, SummaryRecord};
 
 // ── On-disk types ─────────────────────────────────────────────────────────────
@@ -155,8 +155,24 @@ impl JsonFileBackend {
 
     // ── Paths ─────────────────────────────────────────────────────────────────
 
+    /// P1: 目录名裸化 —— FQID session 用裸 uuid 段，遗留 key 回退 `dir_name`。
     fn session_dir(&self, session_id: &str) -> PathBuf {
-        self.root.join(dir_name(session_id))
+        self.root.join(bare_dir_name(session_id))
+    }
+
+    /// P1: 目录名 → 完整 FQID。优先读目录内 meta.json 的 `id`（权威完整
+    /// FQID）；meta 缺失/损坏时用 backend 自持 namespace 组装
+    /// `{ns}/s/{目录名}`（裸 uuid 假定 session 类型）。目录名本身不可逆。
+    fn id_from_session_dir(&self, name: &str) -> String {
+        let meta_path = self.root.join(name).join("meta.json");
+        if let Ok(bytes) = fs::read(&meta_path) {
+            if let Ok(meta) = serde_json::from_slice::<SessionMeta>(&bytes) {
+                if !meta.id.is_empty() {
+                    return meta.id;
+                }
+            }
+        }
+        format!("{}/s/{}", self.namespace, name)
     }
 
     fn meta_path(&self, session_id: &str) -> PathBuf {
@@ -180,10 +196,10 @@ impl JsonFileBackend {
         self.session_dir(session_id).join("suspension.json")
     }
 
-    /// Durable delegation checkpoint file: `delegations/<sub_session_id>.json`
-    /// (the sub-session FQID is the agent identity and checkpoint key).
+    /// Durable delegation checkpoint file: `{session_dir(sub)}/delegation.json`
+    /// (P1: checkpoint 依附宿主 sub-session 目录，脐带与宿主同生共死)。
     fn delegation_checkpoint_path(&self, sub_session_id: &str) -> PathBuf {
-        self.root.join("delegations").join(format!("{}.json", dir_name(sub_session_id)))
+        self.session_dir(sub_session_id).join("delegation.json")
     }
 
     // ── Atomic write helpers ──────────────────────────────────────────────────
@@ -562,11 +578,12 @@ impl JsonFileBackend {
                 continue;
             }
 
-            let dir_name = path
+            let _dir_name = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
-            let _session_id = id_from_dir(dir_name);
+            // P1 裸 uuid 目录：id 重建走 meta.json / namespace 组装，此处仅为迁移遍历占位。
+            let _session_id = id_from_dir(_dir_name);
 
             // Walk segments: archive 0000, 0001, ..., then active.
             let mut segments: Vec<SegmentRecord> = Vec::new();
@@ -720,7 +737,7 @@ impl SessionBackend for JsonFileBackend {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
             .filter_map(|e| {
-                let id = id_from_dir(&e.file_name().to_string_lossy());
+                let id = self.id_from_session_dir(&e.file_name().to_string_lossy());
                 self.read_meta(&id)
             })
             .filter(|m| m.owner == owner)
@@ -738,7 +755,7 @@ impl SessionBackend for JsonFileBackend {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
             .filter_map(|e| {
-                let id = id_from_dir(&e.file_name().to_string_lossy());
+                let id = self.id_from_session_dir(&e.file_name().to_string_lossy());
                 self.read_meta(&id)
             })
             .map(|m| Self::meta_to_info(&m))
@@ -1045,7 +1062,7 @@ impl SessionBackend for JsonFileBackend {
             if !ft.is_dir() {
                 continue;
             }
-            let id = id_from_dir(&entry.file_name().to_string_lossy());
+            let id = self.id_from_session_dir(&entry.file_name().to_string_lossy());
             if let Some(meta) = self.read_meta(&id) {
                 if meta.last_activity < cutoff {
                     let _ = fs::remove_dir_all(entry.path());
@@ -1236,13 +1253,15 @@ impl SessionBackend for JsonFileBackend {
     }
 
     fn load_delegation_checkpoints(&self) -> Vec<crate::storage::DelegationCheckpoint> {
-        let dir = self.root.join("delegations");
-        let Ok(entries) = fs::read_dir(&dir) else {
+        // P1: checkpoints live inside each sub-session dir (`delegation.json`),
+        // not a shared `delegations/` dir. Scan session dirs.
+        let Ok(entries) = fs::read_dir(&self.root) else {
             return Vec::new();
         };
         let mut out = Vec::new();
         for entry in entries.filter_map(|e| e.ok()) {
-            let Ok(bytes) = fs::read(entry.path()) else {
+            let cp_path = entry.path().join("delegation.json");
+            let Ok(bytes) = fs::read(&cp_path) else {
                 continue;
             };
             match serde_json::from_slice::<crate::storage::DelegationCheckpoint>(&bytes) {
@@ -1391,8 +1410,10 @@ mod tests {
             backend.save_delegation_checkpoint(&cp).unwrap();
         }
 
-        // Write a corrupt checkpoint file.
-        let corrupt_path = backend.root.join("delegations").join("corrupt.json");
+        // Write a corrupt checkpoint file (inside a bogus session dir).
+        let corrupt_dir = backend.root.join("019fec31-0000-7000-8000-000000000000");
+        fs::create_dir_all(&corrupt_dir).unwrap();
+        let corrupt_path = corrupt_dir.join("delegation.json");
         fs::write(&corrupt_path, b"{not valid json").unwrap();
 
         let loaded = backend.load_delegation_checkpoints();

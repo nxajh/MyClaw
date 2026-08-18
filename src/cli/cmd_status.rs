@@ -84,7 +84,7 @@ fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
             );
 
             let agents = myclaw::agents::agent_loader::load_agents_from_dir(
-                &cfg.workspace_dir.join("agents"),
+                &cfg.agents_root(),
             );
             println!("  Sub-agents: {}", agents.len());
             println!("  MCP servers: {}", cfg.mcp_servers.len());
@@ -120,7 +120,7 @@ fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
         status["workspace"] = serde_json::json!(c.workspace_dir.to_string_lossy().as_ref());
         status["providers"] = serde_json::json!(c.providers.keys().collect::<Vec<_>>());
         let agents =
-            myclaw::agents::agent_loader::load_agents_from_dir(&c.workspace_dir.join("agents"));
+            myclaw::agents::agent_loader::load_agents_from_dir(&c.agents_root());
         status["sub_agents"] = serde_json::json!(agents.len());
         status["mcp_servers"] = serde_json::json!(c.mcp_servers.len());
     }

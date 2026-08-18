@@ -19,14 +19,15 @@ const ALLOWED_SUBDIRS: &[&str] = &["references", "scripts", "templates", "assets
 
 pub struct SkillManageTool {
     skills: Arc<RwLock<SkillManager>>,
-    workspace_dir: PathBuf,
+    /// P1: skills root (`{data_dir}/skills`) — passed directly by the daemon.
+    skills_root: PathBuf,
 }
 
 impl SkillManageTool {
-    pub fn new(skills: Arc<RwLock<SkillManager>>, workspace_dir: PathBuf) -> Self {
+    pub fn new(skills: Arc<RwLock<SkillManager>>, skills_root: PathBuf) -> Self {
         Self {
             skills,
-            workspace_dir,
+            skills_root,
         }
     }
 }

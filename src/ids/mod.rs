@@ -117,6 +117,19 @@ pub fn dir_name(id: &str) -> String {
     id.replace('_', "__").replace('/', "_")
 }
 
+/// P1 布局重构：实体目录名取 FQID 的裸 uuid 段（`{uuid}` 而非
+/// `myclaw_s_{uuid}`）。
+///
+/// JSON/协议层的 id 保持完整 FQID 不变，仅文件系统目录名裸化。无法解析为
+/// 本命名空间 FQID 的遗留 key（`telegram:xxx`、`_cron_xxx`、短 id 等）回退
+/// 旧 [`dir_name`] 转义，保持原目录布局。
+pub fn bare_dir_name(id: &str) -> String {
+    match Fqid::parse(id, DEFAULT_NAMESPACE) {
+        Some(f) => f.uuid_str(),
+        None => dir_name(id),
+    }
+}
+
 /// 文件系统安全名 → id（`dir_name` 逆操作）。
 pub fn id_from_dir(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
@@ -169,6 +182,22 @@ mod tests {
         assert!(Fqid::parse("myclaw/u/", "myclaw").is_none());
         assert!(Fqid::parse("myclaw/", "myclaw").is_none());
         assert!(Fqid::parse("myclaw", "myclaw").is_none());
+    }
+
+    #[test]
+    fn bare_dir_name_strips_fqid_prefix() {
+        let f = Fqid::new("myclaw", TYPE_SESSION);
+        assert_eq!(bare_dir_name(&f.to_string()), f.uuid_str());
+        // 裸 uuid 输入（已是裸形态）→ 原样返回
+        assert_eq!(bare_dir_name(&f.uuid_str()), f.uuid_str());
+    }
+
+    #[test]
+    fn bare_dir_name_falls_back_for_legacy_keys() {
+        // 非 FQID（解析失败）→ 回退 dir_name 转义，布局不变
+        assert_eq!(bare_dir_name("telegram:12345"), dir_name("telegram:12345"));
+        assert_eq!(bare_dir_name("_cron_x"), dir_name("_cron_x"));
+        assert_eq!(bare_dir_name("abc"), "abc");
     }
 
     #[test]

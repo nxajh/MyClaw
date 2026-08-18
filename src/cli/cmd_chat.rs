@@ -35,7 +35,7 @@ pub async fn run(
     ))));
     tools.register(Arc::new(myclaw::tools::SkillManageTool::new(
         Arc::clone(&skills_arc),
-        workspace_dir.clone(),
+        cfg.skills_root(),
     )));
     // Memory tools (G43: workspace/users/{uid}/memory/, identity resolver in CLI mode)
     let resolver = Arc::new(myclaw::UserResolver::new());

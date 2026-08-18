@@ -18,7 +18,7 @@ pub struct DelegationCheckpoint {
     /// Parent session FQID that spawned the delegation.
     pub parent_session_id: String,
     /// Sub-session FQID the sub-agent runs in. This is the agent's identity
-    /// and the checkpoint's primary key (`delegations/<sub_session_id>.json`).
+    /// and the checkpoint's primary key (P1: `sessions/{uuid}/delegation.json`).
     pub sub_session_id: String,
     /// Sub-agent config name (e.g. "coder").
     pub agent_name: String,
@@ -154,7 +154,7 @@ pub fn write_session_file(
     mime_type: Option<&str>,
 ) -> std::io::Result<SavedSessionFile> {
     let dir = sessions_root
-        .join(crate::ids::dir_name(session_id))
+        .join(crate::ids::bare_dir_name(session_id))
         .join("files");
     std::fs::create_dir_all(&dir)?;
     let path = std::path::Path::new(preferred_name);
@@ -180,7 +180,7 @@ pub fn write_session_file(
     Ok(SavedSessionFile {
         path: format!(
             "sessions/{}/files/{candidate}",
-            crate::ids::dir_name(session_id)
+            crate::ids::bare_dir_name(session_id)
         ),
         file_name: candidate,
         mime_type: mime_type.map(str::to_string),

@@ -494,7 +494,7 @@ async fn build_tools(
     mcp_manager: &McpManager,
     skills: &Arc<parking_lot::RwLock<SkillManager>>,
     shared_scheduler: &crate::agents::SharedScheduler,
-    workspace_dir: &std::path::Path,
+    config: &crate::config::AppConfig,
     _knowledge_dir: &str,
     user_resolver: &Arc<crate::agents::UserResolver>,
     ask_router: Arc<crate::agents::AskRouter>,
@@ -509,7 +509,7 @@ async fn build_tools(
     Arc<crate::tools::FriendToolsCtx>,
 ) {
     let mut tools = ToolRegistry::new();
-    let builtin = crate::tools::builtin_tools(Some(workspace_dir.join("sessions")));
+    let builtin = crate::tools::builtin_tools(Some(config.sessions_root()));
     for tool in builtin {
         tools.register(tool);
     }
@@ -529,7 +529,7 @@ async fn build_tools(
     tools.register(Arc::clone(&send_message_tool) as Arc<dyn crate::providers::Tool>);
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
     let task_state = crate::tools::shared_task_state_persisted(
-        workspace_dir.join(".state").join("tasks.json"),
+        config.workspace_dir.join(".state").join("tasks.json"),
         namespace,
     );
     for tool in crate::tools::new_task_tools(Arc::clone(&task_state)) {
@@ -547,7 +547,7 @@ async fn build_tools(
     // SkillManageTool — CRUD for skills.
     tools.register(Arc::new(crate::tools::SkillManageTool::new(
         Arc::clone(skills),
-        workspace_dir.to_path_buf(),
+        config.skills_root(),
     )));
 
     // CronJobTool — manage scheduled cron jobs.
@@ -556,7 +556,7 @@ async fn build_tools(
     ))));
 
     // Memory tools — persistent per-user memory (G43: workspace/users/{uid}/memory/).
-    let wd = workspace_dir.to_path_buf();
+    let wd = config.workspace_dir.clone();
     let r = Arc::clone(user_resolver);
     tools.register(Arc::new(crate::tools::MemoryListTool::new(
         wd.clone(),
@@ -615,10 +615,10 @@ async fn build_tools(
     (tools, task_state, send_message_tool, friend_ctx)
 }
 
-/// Build SkillManager from SKILL.md files in workspace.
-fn build_skill_manager(workspace_dir: &std::path::Path) -> SkillManager {
+/// Build SkillManager from SKILL.md files in the data dir (P1: `{data_dir}/skills`).
+fn build_skill_manager(config: &crate::config::AppConfig) -> SkillManager {
     let mut manager = SkillManager::new();
-    let skills_dir = workspace_dir.join("skills");
+    let skills_dir = config.skills_root();
     let definitions = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
     for def in definitions {
         tracing::debug!(name = %def.name, "skill registered");
@@ -633,14 +633,14 @@ fn build_skill_manager(workspace_dir: &std::path::Path) -> SkillManager {
 /// Sub-agents are defined in `workspace/agents/<name>/AGENT.md` — each file
 /// contains YAML front matter (metadata) and Markdown body (system prompt).
 fn build_sub_agents(
-    workspace_dir: &std::path::Path,
+    config: &crate::config::AppConfig,
 ) -> Vec<crate::config::sub_agent::SubAgentConfig> {
-    let agents_dir = workspace_dir.join("agents");
+    let agents_dir = config.agents_root();
     let agents = crate::agents::agent_loader::load_agents_from_dir(&agents_dir);
     if !agents.is_empty() {
         tracing::info!(
             agent_count = agents.len(),
-            "sub-agents loaded from workspace"
+            "sub-agents loaded from data dir"
         );
     }
     agents
@@ -703,7 +703,7 @@ fn warn_missing_agent_tool_references(
 fn build_session_backend(
     config: &crate::config::AppConfig,
 ) -> Arc<dyn crate::storage::SessionBackend> {
-    let sessions_dir = config.workspace_dir.join("sessions");
+    let sessions_dir = config.sessions_root();
     match crate::storage::JsonFileBackend::open_with_namespace(
         &sessions_dir,
         &config.system.namespace,
@@ -820,11 +820,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // D27 — RFC v2 §三.A: workspace/agents/main/AGENT.md is required.
     // Without it there is no default agent to route inbound messages to.
     // Run scripts/migrate_main_agent.sh on first boot after upgrade.
-    let main_agent_md = config
-        .workspace_dir
-        .join("agents")
-        .join("main")
-        .join("AGENT.md");
+    let main_agent_md = config.agents_root().join("main").join("AGENT.md");
     if !main_agent_md.exists() {
         anyhow::bail!(
             "missing main agent at {}\n\
@@ -900,9 +896,26 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // UserRegistry、JsonFileBackend（sessions/）等组件加载之前执行，否则迁移
     // 后的 FQID 与组件内存态不一致。失败不阻断启动（注册表对旧数据降级兼容，
     // .bak 备份保留可手动恢复）。
-    let data_dir = directories::ProjectDirs::from("", "", "myclaw")
-        .map(|d| d.data_dir().to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let data_dir = config.data_dir.clone();
+    // P1 布局重构 fail-fast：检测到旧布局（workspace/sessions 存在而
+    // {data_dir}/sessions 缺失）时拒绝启动 —— 布局迁移由外置脚本完成
+    // （见 docs/storage-layout-and-trigger-redesign.md §5），daemon 不做
+    // 双读兼容。先停机执行迁移脚本再重启。
+    if config.workspace_dir.join("sessions").exists() && !data_dir.join("sessions").exists() {
+        eprintln!(
+            "检测到旧存储布局：{} 存在而 {} 缺失。\n\
+             布局迁移已改为外置脚本，daemon 不再自动迁移。\n\
+             请先停机执行：python3 scripts/migrate-layout.py --dry-run 查看，\n\
+             确认后执行：python3 scripts/migrate-layout.py --apply（详见\n\
+             docs/storage-layout-and-trigger-redesign.md §5），完成后重启 daemon。",
+            config.workspace_dir.join("sessions").display(),
+            data_dir.join("sessions").display(),
+        );
+        anyhow::bail!(
+            "old storage layout detected (workspace/sessions exists, {}/sessions missing); run scripts/migrate-layout.py first",
+            data_dir.display()
+        );
+    }
     if let Err(e) = crate::migration::run_auto(&config.workspace_dir, &data_dir, &config.system.namespace)
     {
         tracing::warn!(err = %e, "migration: 自动迁移失败（继续以原数据启动）");
@@ -918,7 +931,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     // Build skill manager (SKILL.md files).
-    let skills = build_skill_manager(&config.workspace_dir);
+    let skills = build_skill_manager(&config);
     let skills_arc: Arc<parking_lot::RwLock<SkillManager>> =
         Arc::new(parking_lot::RwLock::new(skills));
 
@@ -1039,7 +1052,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         &mcp_manager,
         &skills_arc,
         &shared_scheduler,
-        &config.workspace_dir,
+        &config,
         config.knowledge_dir.to_str().unwrap_or("."),
         &user_resolver,
         Arc::clone(&ask_router),
@@ -1057,7 +1070,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     send_message_tool.set_user_registry(Arc::clone(&user_registry));
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
-    let sub_agent_configs = build_sub_agents(&config.workspace_dir);
+    let sub_agent_configs = build_sub_agents(&config);
     let sub_agent_count = sub_agent_configs.len();
     let sub_agent_names: Vec<String> = sub_agent_configs.iter().map(|a| a.name.clone()).collect();
     let sub_agent_registry = Arc::new(crate::agents::AgentRegistry::from_vec(
@@ -1089,8 +1102,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // `agents/` (AGENT.md) and `skills/` (SKILL.md) are picked up live via
     // `AgentRegistry::reload_from_dir` / `SkillManager::reload` — no daemon
     // restart needed.
-    let _watcher = crate::agents::WorkspaceWatcher::spawn_managed(
-        &config.workspace_dir,
+    // P1: agents/skills 热加载目录随 data dir（系统配置面）。
+    let _watcher = crate::agents::WorkspaceWatcher::spawn_managed_with_roots(
+        config.skills_root(),
+        config.agents_root(),
         &config.knowledge_dir,
         sub_agent_registry.as_ref().clone(),
         skills_arc.clone(),
@@ -1350,8 +1365,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Arc::clone(&skills_arc),
             Arc::clone(&sub_agent_registry),
             Vec::new(),
-            config.workspace_dir.join("skills"),
-            config.workspace_dir.join("agents"),
+            config.skills_root(),
+            config.agents_root(),
             config.knowledge_dir.to_string_lossy().to_string(),
             config.prompt.timezone_offset,
         );
@@ -1393,7 +1408,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         .with_mcp_manager(Arc::clone(&mcp_manager_arc))
         .with_search_cooldown(Arc::clone(&search_cooldown))
         .with_task_state(task_state)
-        .with_sessions_dir(config.workspace_dir.join("sessions"))
+        .with_sessions_dir(config.sessions_root())
         // P4 第二波：注册表供输出渲染（`<ref>` → `@昵称(u/uid)`，流式/Done/fallback）。
         .with_user_registry(Arc::clone(&user_registry))
     };
