@@ -362,7 +362,7 @@ impl SessionManager {
             std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
         })?;
 
-        if info.owner != user_id {
+        if self.resolver.resolve(&info.owner) != self.resolver.resolve(user_id) {
             let err = SessionNotOwned {
                 session_id: session_id.to_string(),
                 routing_key: user_id.to_string(),
@@ -397,7 +397,7 @@ impl SessionManager {
             std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
         })?;
 
-        if info.owner != user_id {
+        if self.resolver.resolve(&info.owner) != self.resolver.resolve(user_id) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "not your session",
@@ -780,5 +780,52 @@ fn permissive_main_default(agent_name: &str) -> SubAgentConfig {
         isolation: Default::default(),
         timeout: None,
         max_timeout: None,
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    const TELEGRAM_KEY: &str = "telegram:default:12345";
+    const WEB_KEY: &str = "client:default:web-user:default";
+    const UID: &str = "myclaw/u/019fe342-test";
+    const OTHER_KEY: &str = "telegram:default:99999";
+
+    fn linked_manager() -> SessionManager {
+        let resolver = Arc::new(UserResolver::new());
+        resolver.set(TELEGRAM_KEY.to_string(), UID.to_string());
+        resolver.set(WEB_KEY.to_string(), UID.to_string());
+        SessionManager::in_memory().with_resolver(resolver)
+    }
+
+    #[test]
+    fn switch_session_allows_linked_routing_key() {
+        let sm = linked_manager();
+        let info = sm.new_session(TELEGRAM_KEY, Some("chat")).unwrap();
+        // A different routing_key that resolves to the same uid can switch
+        // to a session it doesn't literally own.
+        let switched = sm.switch_session(WEB_KEY, &info.id).unwrap();
+        assert_eq!(switched.id, info.id);
+    }
+
+    #[test]
+    fn switch_session_rejects_unlinked_routing_key() {
+        let sm = linked_manager();
+        let info = sm.new_session(TELEGRAM_KEY, Some("chat")).unwrap();
+        // OTHER_KEY has no resolver override — resolves to itself, distinct
+        // from UID — so it must still be rejected.
+        let err = sm.switch_session(OTHER_KEY, &info.id).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn delete_session_allows_linked_routing_key() {
+        let sm = linked_manager();
+        let info = sm.new_session(TELEGRAM_KEY, Some("chat")).unwrap();
+        // Make a different session active so `info` isn't the active one.
+        sm.new_session(TELEGRAM_KEY, Some("other")).unwrap();
+        sm.delete_session(WEB_KEY, &info.id).unwrap();
+        assert!(sm.backend().get_session(&info.id).is_none());
     }
 }
