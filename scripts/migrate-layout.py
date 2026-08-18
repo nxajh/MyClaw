@@ -169,16 +169,31 @@ def build_plan(ws: Path, data: Path) -> Plan:
             p.add(kind="move", src=d, dst=D("sessions", ".legacy", d.name),
                   note="A7 归档批次 → .legacy")
     # A8 .state：tasks.json → sessions/.legacy；其余 → data/state
+    #
+    # 目标已存在（常见场景：新代码已经在 data/state 直接跑起来一段时间，
+    # workspace/.state 那份是重构前的遗留数据）不再整体报错退出——逐文件
+    # 合并，已存在的目标条目原样跳过（execute_action 的 move 本来就是这个
+    # 语义，这里只是让目录级冲突也享受同样的幂等 skip，而不是卡住整个迁移）。
+    # 目录搬完后 removed_dir 会自底向上清理空壳；若真有文件级冲突，会保留
+    # 该文件、打印警告，交给人工确认，而不是静默覆盖。
     if W(".state").is_dir():
         for f in sorted(W(".state").iterdir()):
             if f.name.startswith("tasks.json"):
                 p.add(kind="move", src=f, dst=D("sessions", ".legacy", f.name),
                       note="A8 全局任务板归档（P1 起任务板 per-session）")
+            elif f.is_dir():
+                # 先保证目标目录本身存在——目录可能是空的（没有文件触发
+                # mkdir(parents=True)），但仍需要在 data 侧占位存在。
+                p.add(kind="mkdir", dst=D("state", f.name), note="A8 目录合并占位")
+                for child in sorted(f.rglob("*")):
+                    if child.is_dir():
+                        continue
+                    p.add(kind="move", src=child, dst=D("state", f.name, str(child.relative_to(f))),
+                          note="A8 .state 运行时状态 → data/state（目录合并）")
+                p.add(kind="removed_dir", src=f, note="A8 .state 子目录清壳")
             else:
-                dst = D("state", f.name)
-                if dst.exists():
-                    sys.exit(f"错误：state 名称冲突 {f.name}（data/state 已存在）")
-                p.add(kind="move", src=f, dst=dst, note="A8 .state 运行时状态 → data/state")
+                p.add(kind="move", src=f, dst=D("state", f.name),
+                      note="A8 .state 运行时状态 → data/state")
         p.add(kind="removed_dir", src=W(".state"), note="A8 .state 清壳")
 
     # ── B 组：实体形态迁移（data dir 内） ──
@@ -350,15 +365,23 @@ def apply(ws: Path, data: Path) -> None:
                 bundle = make_backup(ws, data, plan, bak_dir)
                 print(f"备份完成：{bundle}")
             for a in plan.actions:
-                n = execute_action(ws, data, a, manifest)
+                try:
+                    n = execute_action(ws, data, a, manifest)
+                except Exception as e:  # noqa: BLE001 —— fail-fast：报告后中止，带上具体动作方便定位
+                    sys.exit(
+                        f"迁移中止（已完成 {total} 步）：{a.kind} "
+                        f"src={a.src} dst={a.dst}（{a.note}）失败：{e}\n"
+                        f"修复问题后直接重跑 --apply（已执行步骤自动跳过）。"
+                    )
                 total += n
-    except Exception as e:  # noqa: BLE001 —— fail-fast：报告后中止
+    except Exception as e:  # noqa: BLE001 —— build_plan/make_backup 阶段的失败
         sys.exit(f"迁移中止（已完成 {total} 步）：{e}\n"
                  f"修复问题后直接重跑 --apply（已执行步骤自动跳过）。")
 
     if total == 0 and not manifest["notifies"]:
         print("无需迁移（数据已符合目标布局）。")
         return
+    bak_dir.mkdir(parents=True, exist_ok=True)
     mf = bak_dir / "manifest.json"
     mf.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     print(f"\n完成 {total} 步。manifest：{mf}")
@@ -422,6 +445,12 @@ def execute_action(ws: Path, data: Path, a: Action, manifest: dict[str, Any]) ->
         a.src.write_text(new)
         manifest["modified"].append(str(a.src))
         print(f"modify {a.src.name} (+scope={a.meta['scope']})")
+        return 1
+    if a.kind == "mkdir":
+        if a.dst.exists():
+            return 0
+        a.dst.mkdir(parents=True, exist_ok=True)
+        print(f"mkdir {rel(a.dst, data)}")
         return 1
     if a.kind == "removed_dir":
         if a.src.exists() and rmdir_empty_tree(a.src):
@@ -576,6 +605,8 @@ def dry_run(ws: Path, data: Path) -> None:
             print(f"{i:4}. modify {a.src}（+scope: {a.meta.get('scope')}）   [{a.note}]")
         elif a.kind == "removed_dir":
             print(f"{i:4}. rmdir  {a.src}   [{a.note}]")
+        elif a.kind == "mkdir":
+            print(f"{i:4}. mkdir  {a.dst}   [{a.note}]")
         else:
             print(f"{i:4}. notify {a.note}")
 

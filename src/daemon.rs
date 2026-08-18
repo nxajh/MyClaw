@@ -707,6 +707,28 @@ fn warn_missing_agent_tool_references(
     }
 }
 
+/// List top-level directory names under `sessions_dir` that are neither a
+/// bare uuid nor the `.legacy` archive — i.e. session directories still on
+/// the pre-P1-A `myclaw_s_<uuid>` naming. Missing `sessions_dir` yields no
+/// results (nothing to flag before it's ever been created).
+fn find_legacy_session_dirs(sessions_dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name == ".legacy" || uuid::Uuid::parse_str(&name).is_ok() {
+                None
+            } else {
+                Some(name)
+            }
+        })
+        .collect()
+}
+
 /// Build the session backend (shared with SessionManager and persist hooks).
 fn build_session_backend(
     config: &crate::config::AppConfig,
@@ -931,6 +953,36 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             "old storage layout detected (workspace/sessions exists, {}/sessions missing); run scripts/migrate-layout.py first",
             data_dir.display()
         );
+    }
+    // P1-A 裸 uuid 目录 fail-fast：{data_dir}/sessions 下不允许任何非裸-uuid
+    // 目录存在（`.legacy` 归档目录除外）。JsonFileBackend 的读路径能容忍
+    // 遗留 `myclaw_s_<uuid>` 命名（避免静默丢会话），但那是运行时兜底，不是
+    // 允许这种状态长期存在——裸化是 B9 迁移步骤的职责，发现残留就拒绝启动，
+    // 逼着先跑迁移脚本，而不是让两种目录命名无限期共存。
+    {
+        let stale = find_legacy_session_dirs(&data_dir.join("sessions"));
+        if !stale.is_empty() {
+            eprintln!(
+                "检测到 {} 个非裸-uuid 会话目录（举例：{}）。\n\
+                 P1-A 裸 uuid 目录布局要求 {{data_dir}}/sessions 下只允许裸 uuid \n\
+                 目录（`.legacy` 归档除外）。请先停机执行：\n\
+                 python3 scripts/migrate-layout.py --dry-run --workspace {} --data {}\n\
+                 确认无误后：\n\
+                 python3 scripts/migrate-layout.py --apply --workspace {} --data {}\n\
+                 完成后重启 daemon。",
+                stale.len(),
+                stale.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
+                config.workspace_dir.display(),
+                data_dir.display(),
+                config.workspace_dir.display(),
+                data_dir.display(),
+            );
+            anyhow::bail!(
+                "{} legacy-named session directories found under {}/sessions; run scripts/migrate-layout.py first",
+                stale.len(),
+                data_dir.display()
+            );
+        }
     }
     if let Err(e) = crate::migration::run_auto(&config.workspace_dir, &data_dir, &config.system.namespace)
     {
@@ -1834,6 +1886,30 @@ mod tests {
             missing,
             vec![("coder".to_string(), vec!["ghost_tool".to_string()])]
         );
+    }
+
+    #[test]
+    fn find_legacy_session_dirs_flags_prefixed_names_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(sessions.join("019fe564-15dd-7a40-af78-ed900edac08c")).unwrap();
+        std::fs::create_dir_all(sessions.join("myclaw_s_019fe564-15dd-7a40-af78-ed900edac08d"))
+            .unwrap();
+        std::fs::create_dir_all(sessions.join(".legacy")).unwrap();
+        std::fs::write(sessions.join("active.json"), "{}").unwrap();
+
+        let stale = find_legacy_session_dirs(&sessions);
+        assert_eq!(
+            stale,
+            vec!["myclaw_s_019fe564-15dd-7a40-af78-ed900edac08d".to_string()]
+        );
+    }
+
+    #[test]
+    fn find_legacy_session_dirs_empty_when_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = find_legacy_session_dirs(&dir.path().join("sessions"));
+        assert!(stale.is_empty());
     }
 }
 

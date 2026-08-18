@@ -160,21 +160,6 @@ impl JsonFileBackend {
         self.root.join(bare_dir_name(session_id))
     }
 
-    /// P1: 目录名 → 完整 FQID。优先读目录内 meta.json 的 `id`（权威完整
-    /// FQID）；meta 缺失/损坏时用 backend 自持 namespace 组装
-    /// `{ns}/s/{目录名}`（裸 uuid 假定 session 类型）。目录名本身不可逆。
-    fn id_from_session_dir(&self, name: &str) -> String {
-        let meta_path = self.root.join(name).join("meta.json");
-        if let Ok(bytes) = fs::read(&meta_path) {
-            if let Ok(meta) = serde_json::from_slice::<SessionMeta>(&bytes) {
-                if !meta.id.is_empty() {
-                    return meta.id;
-                }
-            }
-        }
-        format!("{}/s/{}", self.namespace, name)
-    }
-
     fn meta_path(&self, session_id: &str) -> PathBuf {
         self.session_dir(session_id).join("meta.json")
     }
@@ -219,6 +204,21 @@ impl JsonFileBackend {
 
     fn read_meta(&self, session_id: &str) -> Option<SessionMeta> {
         let bytes = fs::read(self.meta_path(session_id)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Read `meta.json` directly under a known session directory path.
+    ///
+    /// Unlike `read_meta`, this does **not** round-trip through an FQID and
+    /// `bare_dir_name` — it trusts the directory the caller already has.
+    /// That distinction matters for directory-scan callers (`list_sessions`,
+    /// `list_all_sessions`): re-deriving the path from `meta.id` via
+    /// `bare_dir_name` assumes the P1-A bare-uuid layout, but pre-P1-A
+    /// session dirs are still named `myclaw_s_<uuid>` on disk. Round-tripping
+    /// through the FQID for those looks up a bare-uuid directory that never
+    /// existed, silently dropping every legacy session from the scan.
+    fn read_meta_at(dir: &Path) -> Option<SessionMeta> {
+        let bytes = fs::read(dir.join("meta.json")).ok()?;
         serde_json::from_slice(&bytes).ok()
     }
 
@@ -736,10 +736,7 @@ impl SessionBackend for JsonFileBackend {
         let mut sessions: Vec<SessionInfo> = entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .filter_map(|e| {
-                let id = self.id_from_session_dir(&e.file_name().to_string_lossy());
-                self.read_meta(&id)
-            })
+            .filter_map(|e| Self::read_meta_at(&e.path()))
             .filter(|m| m.owner == owner)
             .map(|m| Self::meta_to_info(&m))
             .collect();
@@ -754,10 +751,7 @@ impl SessionBackend for JsonFileBackend {
         let mut sessions: Vec<SessionInfo> = entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .filter_map(|e| {
-                let id = self.id_from_session_dir(&e.file_name().to_string_lossy());
-                self.read_meta(&id)
-            })
+            .filter_map(|e| Self::read_meta_at(&e.path()))
             .map(|m| Self::meta_to_info(&m))
             .collect();
         sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
@@ -1062,8 +1056,7 @@ impl SessionBackend for JsonFileBackend {
             if !ft.is_dir() {
                 continue;
             }
-            let id = self.id_from_session_dir(&entry.file_name().to_string_lossy());
-            if let Some(meta) = self.read_meta(&id) {
+            if let Some(meta) = Self::read_meta_at(&entry.path()) {
                 if meta.last_activity < cutoff {
                     let _ = fs::remove_dir_all(entry.path());
                     count += 1;
@@ -1328,6 +1321,35 @@ mod tests {
         let backend = JsonFileBackend::open(dir.path()).unwrap();
         let info = backend.create_session("owner", None).unwrap();
         (dir, backend, info.id)
+    }
+
+    #[test]
+    fn list_sessions_finds_legacy_prefixed_directory() {
+        // Pre-P1-A session dirs are named `myclaw_s_<uuid>` (the FQID with
+        // `/` escaped to `_`), not the bare uuid `session_dir()` now assumes.
+        // Regression test for the bug where `list_sessions`/`list_all_sessions`
+        // re-derived the directory from `meta.id` via `bare_dir_name` and
+        // silently dropped every legacy-named session because that bare-uuid
+        // directory never existed on disk.
+        let (dir, backend, sid) = backend_with_session();
+        let bare_name = dir
+            .path()
+            .read_dir()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name();
+        let legacy_name = format!("myclaw_s_{}", bare_name.to_string_lossy());
+        fs::rename(dir.path().join(&bare_name), dir.path().join(&legacy_name)).unwrap();
+
+        let sessions = backend.list_sessions("owner");
+        assert_eq!(sessions.len(), 1, "legacy-named session dir should still be found");
+        assert_eq!(sessions[0].id, sid);
+
+        let all = backend.list_all_sessions();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, sid);
     }
 
     #[test]
