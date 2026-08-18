@@ -249,7 +249,8 @@ impl Tool for TaskCreateTool {
         let parent = args["parent"].as_str();
         let description = args["details"].as_str().unwrap_or("");
 
-        let mut state = self.boards.board(&session.id).write().await;
+        let board = self.boards.board(&session.id);
+        let mut state = board.write().await;
 
         // Verify parent exists
         if let Some(parent_id) = parent {
@@ -376,7 +377,8 @@ impl Tool for TaskListTool {
         session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
         let parent = args["parent"].as_str();
-        let state = self.boards.board(&session.id).read().await;
+        let board = self.boards.board(&session.id);
+        let state = board.read().await;
 
         let filtered: Vec<Value> = state
             .tasks
@@ -472,7 +474,8 @@ impl Tool for TaskUpdateTool {
             });
         }
 
-        let mut state = self.boards.board(&session.id).write().await;
+        let board = self.boards.board(&session.id);
+        let mut state = board.write().await;
         match state.find_task_mut(task_id) {
             Some(task) => {
                 task.status = status.to_string();
@@ -542,7 +545,8 @@ impl Tool for TaskDeleteTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'task_id'"))?;
 
-        let mut state = self.boards.board(&session.id).write().await;
+        let board = self.boards.board(&session.id);
+        let mut state = board.write().await;
 
         if state.find_task(task_id).is_none() {
             return Ok(ToolResult {
