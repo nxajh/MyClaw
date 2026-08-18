@@ -1571,7 +1571,7 @@ fn handle_api_request(
                     let path = memory_dir.join(filename);
                     // Minimal header must satisfy parse_memory_file: name and
                     // type are required, otherwise the file is invisible to scans.
-                    let stem = filename.strip_suffix(".md").unwrap_or(&filename);
+                    let stem = filename.strip_suffix(".md").unwrap_or(filename);
                     let body = if content.trim_start().starts_with("---") {
                         // Caller-supplied frontmatter: inject/patch scope keys.
                         let trimmed = content.trim_start();
