@@ -216,14 +216,7 @@ fn collect_user_memories(knowledge_dir: &str) -> (usize, usize, String) {
         if f.scope.as_deref() != Some("user") {
             continue;
         }
-        let uid = f.user_id.clone().unwrap_or_else(
-_E1=1
-fi
-printf '
-__MYCLAW_CHK_da4273d3f2e74d8c96434af4540395f0_1_%d__
-' 
-if [  -eq 0 ]; then _E2=; else
-"unknown".to_string());
+        let uid = f.user_id.clone().unwrap_or_else(|| "unknown".to_string());
         by_user.entry(uid).or_default().push(f);
     }
 
