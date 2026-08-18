@@ -10,6 +10,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  migrate-script-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout MyClaw
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Migration script tests
+        run: python -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
   build:
     runs-on: ubuntu-latest
     
