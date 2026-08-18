@@ -47,6 +47,8 @@ pub const MEMORY_DIR_NAME: &str = "memory";
 #[derive(Debug, Clone)]
 pub struct MemoryFile {
     pub name: String,
+    pub scope: Option<String>,
+    pub user_id: Option<String>,
     pub mem_type: String,
     pub inject: String,
     pub description: String,
@@ -154,6 +156,8 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
 
     // Parse YAML frontmatter (simple key: value parsing)
     let mut name = None;
+    let mut scope: Option<String> = None;
+    let mut user_id: Option<String> = None;
     let mut description: Option<String> = None;
     let mut summary: Option<String> = None;
     let mut abstract_val: Option<String> = None;
@@ -170,6 +174,8 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
             let value = strip_yaml_quotes(value.trim());
             match key {
                 "name" => name = Some(value.to_string()),
+                "scope" => scope = Some(value.to_string()),
+                "user_id" => user_id = Some(value.to_string()),
                 "description" => description = Some(value.to_string()),
                 "summary" => summary = Some(value.to_string()),
                 "abstract" => abstract_val = Some(value.to_string()),
@@ -191,6 +197,8 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
 
     Some(MemoryFile {
         name: name?,
+        scope,
+        user_id,
         mem_type: mem_type?,
         inject: inject.unwrap_or_else(|| "search".to_string()),
         description,
@@ -548,6 +556,31 @@ mod tests {
         let mf = parse_memory_file(&path).unwrap();
         assert_eq!(mf.updated_at.as_deref(), Some("2026-07-01"));
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_scope_ownership() {
+        // scope: user + user_id → carried through
+        let content = "---\nname: scoped\nscope: user\nuser_id: myclaw/u/abc\ntype: project\ncreated_at: 2026-08-18\n---\n\nBody.";
+        let dir = std::env::temp_dir().join("myclaw_test_memory_scope");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scoped.md");
+        fs::write(&path, content).unwrap();
+        let mf = parse_memory_file(&path).unwrap();
+        assert_eq!(mf.scope.as_deref(), Some("user"));
+        assert_eq!(mf.user_id.as_deref(), Some("myclaw/u/abc"));
+        let _ = fs::remove_dir_all(&dir);
+
+        // No scope field → None (agent layer by default)
+        let content = "---\nname: unscoped\ntype: project\ncreated_at: 2026-08-18\n---\n\nBody.";
+        let dir = std::env::temp_dir().join("myclaw_test_memory_noscope");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("unscoped.md");
+        fs::write(&path, content).unwrap();
+        let mf = parse_memory_file(&path).unwrap();
+        assert!(mf.scope.is_none());
+        assert!(mf.user_id.is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 

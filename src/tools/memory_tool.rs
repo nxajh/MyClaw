@@ -86,10 +86,11 @@ struct MemoryAudit<'a> {
     args: &'a serde_json::Value,
 }
 
-fn append_memory_audit(workspace_dir: &Path, session: &Session, audit: MemoryAudit<'_>) {
-    let audit_dir = workspace_dir
-        .join(crate::memory::MEMORY_DIR_NAME)
-        .join(".audit");
+fn append_memory_audit(data_dir: &Path, session: &Session, audit: MemoryAudit<'_>) {
+    // P1-B2: audit is runtime state, lives on the data side
+    // ({data_dir}/state/memory/memory_audit.jsonl), not under the
+    // knowledge dir (which is now the flat agent/user memory pool).
+    let audit_dir = data_dir.join("state").join("memory").join(".audit");
     if let Err(e) = std::fs::create_dir_all(&audit_dir) {
         tracing::warn!(err = %e, "memory audit: failed to create audit dir");
         return;
@@ -149,23 +150,15 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Scan memory files from both global and per-user directories, deduplicated by name.
-fn scan_merged(workspace_dir: &Path, user_id: &str) -> Vec<crate::memory::MemoryFile> {
-    let global_dir = workspace_dir.join(crate::memory::MEMORY_DIR_NAME);
-    let user_dir = workspace_dir
-        .join("users")
-        .join(user_id)
-        .join(crate::memory::MEMORY_DIR_NAME);
-
-    let mut files = crate::memory::scan_memory_files(&global_dir);
-    let global_names: std::collections::HashSet<String> =
-        files.iter().map(|f| f.name.clone()).collect();
-
-    for f in crate::memory::scan_memory_files(&user_dir) {
-        if !global_names.contains(&f.name) {
-            files.push(f);
-        }
-    }
+/// Scan memory files visible to a user: all agent-scope entries plus the
+/// user's own user-scope entries, from the single flat knowledge dir
+/// (ownership via frontmatter, not path). Dedup by name, agent layer wins.
+fn scan_merged(knowledge_dir: &Path, user_id: &str) -> Vec<crate::memory::MemoryFile> {
+    let mut files: Vec<crate::memory::MemoryFile> = crate::memory::scan_memory_files(knowledge_dir)
+        .into_iter()
+        .filter(|f| f.scope.as_deref().unwrap_or("agent") == "agent" || f.user_id.as_deref() == Some(user_id))
+        .collect();
+    files.sort_by(|a, b| (&a.mem_type, &a.name).cmp(&(&b.mem_type, &b.name)));
     files
 }
 
@@ -342,20 +335,27 @@ fn resolve_scope(args: &serde_json::Value) -> &'static str {
 }
 
 /// Directory for a scope's memory files.
-fn scope_memory_dir(workspace_dir: &Path, scope: &str, user_id: &str) -> PathBuf {
-    if scope == "agent" {
-        workspace_dir.join(crate::memory::MEMORY_DIR_NAME)
-    } else {
-        workspace_dir
-            .join("users")
-            .join(user_id)
-            .join(crate::memory::MEMORY_DIR_NAME)
-    }
+/// P1-B2: single flat knowledge dir for both scopes — ownership is a
+/// frontmatter attribute (`scope` + `user_id`), not a path segment.
+fn scope_memory_dir(knowledge_dir: &Path, _scope: &str, _user_id: &str) -> PathBuf {
+    knowledge_dir.to_path_buf()
 }
 
-/// Scan memory files from a single scope (not merged).
-fn scan_scope(workspace_dir: &Path, scope: &str, user_id: &str) -> Vec<crate::memory::MemoryFile> {
-    crate::memory::scan_memory_files(&scope_memory_dir(workspace_dir, scope, user_id))
+/// Scan memory files from a single scope (not merged), filtered by
+/// frontmatter ownership. `scope=user` requires an exact `user_id` match;
+/// a missing `scope` field is treated as the agent layer.
+fn scan_scope(knowledge_dir: &Path, scope: &str, user_id: &str) -> Vec<crate::memory::MemoryFile> {
+    crate::memory::scan_memory_files(&scope_memory_dir(knowledge_dir, scope, user_id))
+        .into_iter()
+        .filter(|f| {
+            let f_scope = f.scope.as_deref().unwrap_or("agent");
+            if scope == "agent" {
+                f_scope == "agent"
+            } else {
+                f_scope == "user" && f.user_id.as_deref() == Some(user_id)
+            }
+        })
+        .collect()
 }
 
 // ── PII guard for agent-scope writes ─────────────────────────────────────
@@ -534,6 +534,8 @@ fn lint_memory_content(name: &str, content: &str, files: &[MemoryFile]) -> Vec<S
 }
 
 /// Build frontmatter string.
+/// P1-B2: ownership (`scope` + `user_id`) is always written — files without a
+/// `scope` field would fall back to the agent layer on read.
 fn build_frontmatter(
     name: &str,
     description: &str,
@@ -542,20 +544,34 @@ fn build_frontmatter(
     inject: &str,
     created_at: &str,
     updated_at: Option<&str>,
+    scope: &str,
+    user_id: Option<&str>,
 ) -> String {
     let mut fm = format!(
         "---
 name: {}
-description: {}
+scope: {}
 type: {}
 inject: {}
 created_at: {}",
         yaml_scalar(name),
-        yaml_scalar(description),
+        scope,
         yaml_scalar(mem_type),
         inject,
         yaml_scalar(created_at)
     );
+    if scope == "user" {
+        match user_id {
+            Some(uid) => fm.push_str(&format!("\nuser_id: {}", yaml_scalar(uid))),
+            // Callers validate this before writing; belt-and-braces default.
+            None => fm.push_str("\nuser_id: unknown"),
+        }
+    }
+    fm.push_str(&format!(
+        "
+description: {}",
+        yaml_scalar(description)
+    ));
     if let Some(ua) = updated_at {
         fm.push_str(&format!(
             "
@@ -585,14 +601,14 @@ tags: [{}]",
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemoryListTool {
-    workspace_dir: PathBuf,
+    knowledge_dir: PathBuf,
     resolver: Arc<UserResolver>,
 }
 
 impl MemoryListTool {
-    pub fn new(workspace_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
+    pub fn new(knowledge_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
         Self {
-            workspace_dir,
+            knowledge_dir,
             resolver,
         }
     }
@@ -628,7 +644,7 @@ impl Tool for MemoryListTool {
     ) -> anyhow::Result<ToolResult> {
         let type_filter = normalize_optional_filter(args["memory_type"].as_str());
         let user_id = user_id_for(session, &self.resolver);
-        let files = scan_merged(&self.workspace_dir, &user_id);
+        let files = scan_merged(&self.knowledge_dir, &user_id);
         let entries: Vec<crate::memory::IndexEntry> = files
             .iter()
             .filter(|mf| {
@@ -690,14 +706,14 @@ impl Tool for MemoryListTool {
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemoryViewTool {
-    workspace_dir: PathBuf,
+    knowledge_dir: PathBuf,
     resolver: Arc<UserResolver>,
 }
 
 impl MemoryViewTool {
-    pub fn new(workspace_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
+    pub fn new(knowledge_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
         Self {
-            workspace_dir,
+            knowledge_dir,
             resolver,
         }
     }
@@ -743,7 +759,7 @@ impl Tool for MemoryViewTool {
         };
 
         let user_id = user_id_for(session, &self.resolver);
-        let files = scan_merged(&self.workspace_dir, &user_id);
+        let files = scan_merged(&self.knowledge_dir, &user_id);
         let file = files.iter().find(|f| f.name == name);
 
         match file {
@@ -794,14 +810,14 @@ impl Tool for MemoryViewTool {
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemorySearchTool {
-    workspace_dir: PathBuf,
+    knowledge_dir: PathBuf,
     resolver: Arc<UserResolver>,
 }
 
 impl MemorySearchTool {
-    pub fn new(workspace_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
+    pub fn new(knowledge_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
         Self {
-            workspace_dir,
+            knowledge_dir,
             resolver,
         }
     }
@@ -870,7 +886,7 @@ impl Tool for MemorySearchTool {
         let include_related = args["include_related"].as_bool().unwrap_or(false);
 
         let user_id = user_id_for(session, &self.resolver);
-        let files = scan_merged(&self.workspace_dir, &user_id);
+        let files = scan_merged(&self.knowledge_dir, &user_id);
 
         let mut results: Vec<(i32, &crate::memory::MemoryFile)> = Vec::new();
         for mf in &files {
@@ -958,14 +974,16 @@ impl Tool for MemorySearchTool {
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemoryManageTool {
-    workspace_dir: PathBuf,
+    knowledge_dir: PathBuf,
+    data_dir: PathBuf,
     resolver: Arc<UserResolver>,
 }
 
 impl MemoryManageTool {
-    pub fn new(workspace_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
+    pub fn new(knowledge_dir: PathBuf, data_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
         Self {
-            workspace_dir,
+            knowledge_dir,
+            data_dir,
             resolver,
         }
     }
@@ -1097,6 +1115,11 @@ impl MemoryManageTool {
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
         let scope = resolve_scope(args);
+        // P1-B2: user-scope entries carry ownership in frontmatter — without a
+        // resolvable user_id they would be unreadable after the write.
+        if scope == "user" && user_id.trim().is_empty() {
+            return Err("User scope requires a resolvable user_id.".to_string());
+        }
 
         let content = args["content"]
             .as_str()
@@ -1117,7 +1140,7 @@ impl MemoryManageTool {
             scan_agent_pii_opt(content)?;
         }
 
-        let files = scan_scope(&self.workspace_dir, scope, user_id);
+        let files = scan_scope(&self.knowledge_dir, scope, user_id);
         if files.iter().any(|f| f.name == name) {
             return Err(format!(
                 "Memory '{}' already exists in the {} scope. Use 'replace' to update it.",
@@ -1133,16 +1156,26 @@ impl MemoryManageTool {
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
         let warnings = lint_memory_content(name, content, &files);
-        let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &inject, &now, None);
+        let frontmatter = build_frontmatter(
+            name,
+            &description,
+            &tags,
+            &mem_type,
+            &inject,
+            &now,
+            None,
+            scope,
+            Some(user_id),
+        );
         let file_content = format!("{}{}", frontmatter, content);
 
-        let target = scope_memory_dir(&self.workspace_dir, scope, user_id).join(&filename);
+        let target = scope_memory_dir(&self.knowledge_dir, scope, user_id).join(&filename);
         // Ensure the memory dir exists
         let _ = std::fs::create_dir_all(target.parent().unwrap_or(&target));
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
         append_memory_audit(
-            &self.workspace_dir,
+            &self.data_dir,
             session,
             MemoryAudit {
                 user_id,
@@ -1176,7 +1209,7 @@ impl MemoryManageTool {
         validate_name(name)?;
         let scope = resolve_scope(args);
 
-        let files = scan_scope(&self.workspace_dir, scope, user_id);
+        let files = scan_scope(&self.knowledge_dir, scope, user_id);
         let existing = files
             .iter()
             .find(|f| f.name == name)
@@ -1233,6 +1266,8 @@ impl MemoryManageTool {
             &inject,
             &existing.created_at,
             Some(&now),
+            scope,
+            Some(user_id),
         );
         let file_content = format!("{}{}", frontmatter, content);
 
@@ -1248,7 +1283,7 @@ impl MemoryManageTool {
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
         append_memory_audit(
-            &self.workspace_dir,
+            &self.data_dir,
             session,
             MemoryAudit {
                 user_id,
@@ -1285,7 +1320,7 @@ impl MemoryManageTool {
             );
         }
 
-        let files = scan_scope(&self.workspace_dir, scope, user_id);
+        let files = scan_scope(&self.knowledge_dir, scope, user_id);
         let existing = files
             .iter()
             .find(|f| f.name == name)
@@ -1297,7 +1332,7 @@ impl MemoryManageTool {
         std::fs::remove_file(&existing.path)
             .map_err(|e| format!("Failed to remove memory file: {}", e))?;
         append_memory_audit(
-            &self.workspace_dir,
+            &self.data_dir,
             session,
             MemoryAudit {
                 user_id,

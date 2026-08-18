@@ -558,22 +558,27 @@ async fn build_tools(
         shared_scheduler,
     ))));
 
-    // Memory tools — persistent per-user memory (G43: workspace/users/{uid}/memory/).
-    let wd = config.workspace_dir.clone();
+    // Memory tools — P1-B2: single flat knowledge dir ({data_dir}/memory),
+    // ownership expressed via frontmatter `scope`/`user_id` (not by path).
+    let kd = config.knowledge_dir.clone();
     let r = Arc::clone(user_resolver);
     tools.register(Arc::new(crate::tools::MemoryListTool::new(
-        wd.clone(),
+        kd.clone(),
         Arc::clone(&r),
     )));
     tools.register(Arc::new(crate::tools::MemoryViewTool::new(
-        wd.clone(),
+        kd.clone(),
         Arc::clone(&r),
     )));
     tools.register(Arc::new(crate::tools::MemorySearchTool::new(
-        wd.clone(),
+        kd.clone(),
         Arc::clone(&r),
     )));
-    tools.register(Arc::new(crate::tools::MemoryManageTool::new(wd, r)));
+    tools.register(Arc::new(crate::tools::MemoryManageTool::new(
+        kd,
+        config.data_dir.clone(),
+        r,
+    )));
 
     // Session query tool — provenance lookup (session IDs + message IDs).
     tools.register(Arc::new(crate::tools::SessionQueryTool::new(
@@ -1298,6 +1303,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             cc.set_session_manager(session_manager.clone());
             cc.set_tool_specs(tools_arc.all_tools().iter().map(|t| t.spec()).collect());
             cc.set_workspace_dir(config.workspace_dir.clone());
+            cc.set_knowledge_dir(config.knowledge_dir.clone());
             cc.set_config_path(config.config_path.clone());
             cc.set_skill_manager(skills_arc.clone());
             cc.set_provider_registry(registry_arc.clone());
