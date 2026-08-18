@@ -1476,7 +1476,7 @@ fn handle_api_request(
 
         "memory.list" => {
             let scope = params["scope"].as_str().unwrap_or("all");
-            match ctx.knowledge_dir.get().or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME))) {
+            match ctx.knowledge_dir.get().cloned().or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME))) {
                 Some(dir) => {
                     let dir = dir.as_path();
                     let uid = memory_user_id(ctx);
@@ -1555,6 +1555,7 @@ fn handle_api_request(
             let dir_opt = ctx
                 .knowledge_dir
                 .get()
+                .cloned()
                 .or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME)));
             match dir_opt {
                 Some(dir) => {
@@ -1618,6 +1619,7 @@ fn handle_api_request(
             let dir_opt = ctx
                 .knowledge_dir
                 .get()
+                .cloned()
                 .or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME)));
             match dir_opt {
                 Some(dir) => {
@@ -1698,6 +1700,7 @@ fn handle_api_request(
             let dir_opt = ctx
                 .knowledge_dir
                 .get()
+                .cloned()
                 .or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME)));
             match dir_opt {
                 Some(dir) => {
