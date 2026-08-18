@@ -32,9 +32,9 @@ pub const STREAM_CHUNK_INTERVAL_TIMEOUT: Duration = Duration::from_secs(120);
 ///
 /// Bounds the worst case of many small-but-alive chunks trickling forever
 /// (each individually under the interval timeout) and ensures the whole turn
-/// cannot run past a bounded wall-clock budget. 420 s > first-chunk (300 s) +
+/// cannot run past a bounded wall-clock budget. 500 s > first-chunk (300 s) +
 /// headroom so a single slow chunk never trips it spuriously.
-pub const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(420);
+pub const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(500);
 
 /// Time to wait for the provider to accept the request (`send()`).
 ///
