@@ -26,7 +26,6 @@ pub async fn run(
     tools.register(Arc::new(myclaw::tools::ListDirTool::new()));
     let skills_arc: Arc<parking_lot::RwLock<myclaw::SkillManager>> =
         Arc::new(parking_lot::RwLock::new(myclaw::SkillManager::new()));
-    let workspace_dir = std::path::PathBuf::from(&cfg.workspace_dir);
     // P1-B2: memory pool is the knowledge dir; audit log lives under data.
     let knowledge_dir = cfg.knowledge_dir.clone();
     let data_dir = cfg.data_dir.clone();
