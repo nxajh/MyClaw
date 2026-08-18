@@ -7,11 +7,13 @@
 //! 渠道侧 routing_key 到用户的映射仍由 [`UserResolver`] 承担（值统一为
 //! user.id，如 `myclaw/u/<uuidv7>`）；本注册表只存"人"的实体属性，不感知渠道。
 //!
-//! 持久化在 `{data_dir}/users.json`（version 2：`uid`=uuidv7 +
-//! `username` 字段），每次变更写盘（数据量小，与 `user_resolver.json` 同一
-//! 策略）。读入兼容 version 1 旧文件（无 `username` 字段 → 空串；`uid` 为旧
-//! 语义句柄），语义错位由迁移（task: migrate）统一修正。命名空间默认
-//! `myclaw`（RFC: `[system] namespace` 配置项，后续接入）。
+//! 持久化（P1-B1 目录化）：每用户一个 `{data_dir}/users/{uuid}/meta.json`
+//! （内容 = [`User`] 完整序列化，`uid` 为完整 FQID `<ns>/u/<uuid>`），
+//! 变更只写该用户的 meta.json，不再全量重写单文件。加载优先扫目录；目录化
+//! 数据不存在时兜底读旧 `{data_dir}/users.json`（version 2；兼容 version 1
+//! 旧文件——无 `username` 字段 → 空串；`uid` 为旧语义句柄），语义错位由迁移
+//! （task: migrate）统一修正。命名空间默认 `myclaw`（RFC: `[system]
+//! namespace` 配置项，后续接入）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,9 +23,16 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::agents::{KnownUsersRegistry, UserResolver};
-use crate::ids::{Fqid, TYPE_USER};
+use crate::ids::{bare_dir_name, Fqid, TYPE_USER};
 
 // ── 常量与规则 ───────────────────────────────────────────────────────────────
+
+/// 目录化存储的用户实体根目录名：`{data_dir}/users/`。
+pub const USERS_DIR: &str = "users";
+/// 每用户实体的元数据文件名：`{data_dir}/users/{uuid}/meta.json`。
+pub const USER_META_FILE: &str = "meta.json";
+/// 旧版单文件存储文件名（兼容兜底读，不再写）。
+pub const LEGACY_USERS_FILE: &str = "users.json";
 
 /// 保留字（username 不可用）：root 及系统级保留（RFC §2.2）。
 pub const RESERVED_USERNAMES: &[&str] = &["root", "admin", "system", "bot", "help", "register"];
@@ -106,7 +115,8 @@ pub enum RegisterError {
 // ── 注册表 ───────────────────────────────────────────────────────────────────
 
 /// 用户实体注册表：`uid → User` + `email → uid` + `username → uid` 索引，
-/// 持久化 `users.json`。
+/// 持久化 `{data_dir}/users/{uuid}/meta.json`（P1-B1 目录化；旧
+/// `users.json` 仅兜底读）。
 #[derive(Debug)]
 pub struct UserRegistry {
     users: RwLock<HashMap<String, User>>,
@@ -114,8 +124,8 @@ pub struct UserRegistry {
     email_index: RwLock<HashMap<String, String>>,
     /// username（小写）→ uid 唯一索引（派生，不落盘，加载时重建）。
     username_index: RwLock<HashMap<String, String>>,
-    /// 持久化路径（空 = 内存态，不落盘）。
-    data_path: PathBuf,
+    /// 持久化根（`{data_dir}`；空 = 内存态，不落盘）。
+    data_dir: PathBuf,
     /// 命名空间（user.id 前缀，默认 `myclaw`）。
     namespace: String,
 }
@@ -127,28 +137,46 @@ impl UserRegistry {
             users: RwLock::new(HashMap::new()),
             email_index: RwLock::new(HashMap::new()),
             username_index: RwLock::new(HashMap::new()),
-            data_path: PathBuf::new(),
+            data_dir: PathBuf::new(),
             namespace: DEFAULT_NAMESPACE.to_string(),
         }
     }
 
-    /// 持久化注册表（`{data_dir}/users.json`），默认命名空间 `myclaw`。
+    /// 持久化注册表（`{data_dir}/users/`，P1-B1 目录化），默认命名空间
+    /// `myclaw`。
     pub fn persistent(data_dir: &Path) -> Self {
         Self::with_namespace(data_dir, DEFAULT_NAMESPACE)
     }
 
-    /// 持久化注册表 + 自定义命名空间（RFC: [system] namespace 配置项接入点）。
+    /// 持久化注册表 + 自定义命名空间（RFC: [system] namespace 配置接入点）。
     pub fn with_namespace(data_dir: &Path, namespace: &str) -> Self {
-        let data_path = data_dir.join("users.json");
         let reg = Self {
             users: RwLock::new(HashMap::new()),
             email_index: RwLock::new(HashMap::new()),
             username_index: RwLock::new(HashMap::new()),
-            data_path: data_path.clone(),
+            data_dir: data_dir.to_path_buf(),
             namespace: namespace.to_string(),
         };
         reg.load_from_disk();
         reg
+    }
+
+    /// 用户实体根目录（`{data_dir}/users/`）。
+    fn users_root(&self) -> PathBuf {
+        self.data_dir.join(USERS_DIR)
+    }
+
+    /// 单个用户的目录：`{data_dir}/users/{uuid}/`。
+    ///
+    /// 目录名取 uid（完整 FQID `<ns>/u/<uuid>`）的裸 uuid 段；uid 不是
+    /// 合法 FQID（旧语义句柄等）时退化为 `dir_name` 转义，保证路径安全。
+    fn user_dir(&self, uid: &str) -> PathBuf {
+        self.users_root().join(bare_dir_name(uid))
+    }
+
+    /// 单个用户的 meta.json 路径。
+    fn user_meta_path(&self, uid: &str) -> PathBuf {
+        self.user_dir(uid).join(USER_META_FILE)
     }
 
     /// 命名空间（user.id 前缀段）。
@@ -281,11 +309,11 @@ impl UserRegistry {
         };
         users.insert(uid.clone(), user.clone());
         emails.insert(email, uid.clone());
-        usernames.insert(username, uid);
+        usernames.insert(username, uid.clone());
         drop(users);
         drop(emails);
         drop(usernames);
-        self.save();
+        self.save_user(&uid);
         Ok(user)
     }
 
@@ -315,7 +343,7 @@ impl UserRegistry {
         user.email = Some(new_email);
         drop(users);
         drop(emails);
-        self.save();
+        self.save_user(uid);
         Ok(())
     }
 
@@ -342,7 +370,7 @@ impl UserRegistry {
         user.username = new_username;
         drop(users);
         drop(usernames);
-        self.save();
+        self.save_user(uid);
         Ok(())
     }
 
@@ -363,10 +391,10 @@ impl UserRegistry {
             created_ms: now_ms(),
         };
         users.insert(uid.clone(), user.clone());
-        usernames.insert(ROOT_USERNAME.to_string(), uid);
+        usernames.insert(ROOT_USERNAME.to_string(), uid.clone());
         drop(users);
         drop(usernames);
-        self.save();
+        self.save_user(&uid);
     }
 
     // ── 一次性迁移（RFC §2.2 / §2.3: 存量归 root）─────────────────────────
@@ -412,11 +440,74 @@ impl UserRegistry {
 
     // ── 持久化 ──────────────────────────────────────────────────────────────
 
+    /// 加载：优先扫 `{data_dir}/users/{uuid}/meta.json` 逐个加载；目录化数据
+    /// 不存在（无 `users/` 目录或目录为空）时兜底读旧 `users.json`。
+    /// 存量 users.json → 目录的拆分由迁移脚本负责，代码不做自动迁移。
     fn load_from_disk(&self) {
-        if self.data_path.as_os_str().is_empty() {
+        if self.data_dir.as_os_str().is_empty() {
             return;
         }
-        let contents = match std::fs::read_to_string(&self.data_path) {
+        let count = self.load_from_users_dir();
+        if count > 0 {
+            info!(count, "user_registry: loaded from users/ directory");
+        } else {
+            // 目录化数据不存在（首次运行或迁移脚本未跑）→ 兼容兜底。
+            self.load_from_legacy_file();
+        }
+    }
+
+    /// 扫 `{data_dir}/users/` 逐个加载 `meta.json`。单个文件损坏只跳过
+    /// 该用户（warn），不影响其余。返回成功加载的用户数。
+    fn load_from_users_dir(&self) -> usize {
+        let root = self.users_root();
+        let entries = match std::fs::read_dir(&root) {
+            Ok(e) => e,
+            Err(_) => return 0, // 无 users/ 目录 → 由调用方走 users.json 兜底
+        };
+        let mut users = self.users.write();
+        let mut emails = self.email_index.write();
+        let mut usernames = self.username_index.write();
+        let mut count = 0usize;
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let meta = entry.path().join(USER_META_FILE);
+            let contents = match std::fs::read_to_string(&meta) {
+                Ok(c) => c,
+                Err(_) => continue, // 空目录 / 非 meta 目录（嵌套布局等）
+            };
+            match serde_json::from_str::<User>(&contents) {
+                Ok(user) => {
+                    // map key 一律用 user.uid（完整 FQID；文件内容为准，
+                    // 目录名仅是物理布局）。
+                    let uid = user.uid.clone();
+                    if let Some(email) = &user.email {
+                        emails.insert(email.clone(), uid.clone());
+                    }
+                    if !user.username.is_empty() {
+                        usernames.insert(user.username.clone(), uid.clone());
+                    }
+                    users.insert(uid, user);
+                    count += 1;
+                }
+                Err(e) => {
+                    warn!(
+                        path = %meta.display(),
+                        err = %e,
+                        "user_registry: skipping unparsable user meta"
+                    );
+                }
+            }
+        }
+        count
+    }
+
+    /// 读旧 `{data_dir}/users.json`（version 1/2 单文件）。仅在目录化数据
+    /// 不存在时调用（兼容兜底）。
+    fn load_from_legacy_file(&self) {
+        let path = self.data_dir.join(LEGACY_USERS_FILE);
+        let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => return, // 首次运行，无文件
         };
@@ -435,14 +526,14 @@ impl UserRegistry {
                     users.insert(uid, user);
                 }
                 info!(
-                    path = %self.data_path.display(),
+                    path = %path.display(),
                     count = users.len(),
-                    "user_registry: loaded from disk"
+                    "user_registry: loaded from legacy users.json"
                 );
             }
             Err(e) => {
                 warn!(
-                    path = %self.data_path.display(),
+                    path = %path.display(),
                     err = %e,
                     "user_registry: failed to parse, starting empty"
                 );
@@ -450,36 +541,35 @@ impl UserRegistry {
         }
     }
 
-    fn save(&self) {
-        if self.data_path.as_os_str().is_empty() {
+    /// 写单个用户的 meta.json（`users/{uuid}/meta.json`，先建目录）。
+    /// P1-B1：变更只落对应用户文件，不再全量重写 users.json。
+    fn save_user(&self, uid: &str) {
+        if self.data_dir.as_os_str().is_empty() {
             return;
         }
-        let body = match serde_json::to_vec_pretty(&PersistedUsers {
-            version: 2,
-            users: self.users.read().clone(),
-        }) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(err = %e, "user_registry: serialization failed");
-                return;
-            }
+        let Some(user) = self.users.read().get(uid).cloned() else {
+            return;
         };
-        if let Some(parent) = self.data_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                warn!(
-                    path = %parent.display(),
-                    err = %e,
-                    "user_registry: failed to create data dir"
-                );
-                return;
-            }
-        }
-        if let Err(e) = std::fs::write(&self.data_path, body) {
+        let path = self.user_meta_path(uid);
+        if let Err(e) = std::fs::create_dir_all(path.parent().unwrap_or(&self.users_root())) {
             warn!(
-                path = %self.data_path.display(),
+                path = %path.display(),
                 err = %e,
-                "user_registry: failed to persist users"
+                "user_registry: failed to create user dir"
             );
+            return;
+        }
+        match serde_json::to_vec_pretty(&user) {
+            Ok(body) => {
+                if let Err(e) = std::fs::write(&path, body) {
+                    warn!(
+                        path = %path.display(),
+                        err = %e,
+                        "user_registry: failed to persist user meta"
+                    );
+                }
+            }
+            Err(e) => warn!(err = %e, "user_registry: serialization failed"),
         }
     }
 }
@@ -614,5 +704,142 @@ mod tests {
         assert_eq!(r.username_of(&fqid), Some("bob".to_string()));
         // username 变更后 @username 解析生效。
         assert_eq!(r.find_by_username("bob").unwrap().uid, fqid);
+    }
+
+    // ── P1-B1 目录化持久化 ────────────────────────────────────────────────
+
+    /// 优先扫 `users/{uuid}/meta.json`：目录化数据存在时不再读 users.json。
+    #[test]
+    fn directory_layout_takes_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+
+        // 目录化：一个用户。
+        let reg = UserRegistry::with_namespace(data, DEFAULT_NAMESPACE);
+        let u = reg.register("alice@example.com", "alice").unwrap();
+        drop(reg);
+
+        // 同时放一个内容不同的旧 users.json（若被读到，用户名会是 eve）。
+        let legacy = serde_json::json!({
+            "version": 2,
+            "users": {
+                "myclaw/u/00000000-0000-7000-8000-000000000001": {
+                    "uid": "myclaw/u/00000000-0000-7000-8000-000000000001",
+                    "username": "eve",
+                    "email": "eve@example.com",
+                    "active": true,
+                    "created_ms": 1u64
+                }
+            }
+        });
+        std::fs::write(
+            data.join("users.json"),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        // 重开：目录数据生效（alice 在、eve 不在）。
+        let re = UserRegistry::with_namespace(data, DEFAULT_NAMESPACE);
+        assert!(re.find_by_username("alice").is_some());
+        assert!(re.find_by_username("eve").is_none());
+        assert_eq!(re.count(), 1);
+        assert_eq!(re.find_by_uid(&u.uid).unwrap().username, "alice");
+
+        // meta.json 位于 users/{bare-uuid}/meta.json。
+        let bare = u.uid.strip_prefix("myclaw/u/").unwrap();
+        let meta = data.join("users").join(bare).join("meta.json");
+        assert!(meta.is_file());
+    }
+
+    /// 目录化数据不存在时兜底读旧 users.json（v2 单文件）。
+    #[test]
+    fn legacy_users_json_fallback_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let legacy = serde_json::json!({
+            "version": 2,
+            "users": {
+                "myclaw/u/00000000-0000-7000-8000-000000000002": {
+                    "uid": "myclaw/u/00000000-0000-7000-8000-000000000002",
+                    "username": "bob",
+                    "email": "bob@example.com",
+                    "active": true,
+                    "created_ms": 1u64
+                }
+            }
+        });
+        std::fs::write(
+            data.join("users.json"),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let reg = UserRegistry::with_namespace(data, DEFAULT_NAMESPACE);
+        assert_eq!(reg.count(), 1);
+        assert!(reg.find_by_username("bob").is_some());
+        assert!(reg.find_by_email("BOB@example.com").is_some());
+
+        // 兜底加载后的写操作落目录化 meta.json（不再改写 users.json）。
+        let u = reg.find_by_username("bob").unwrap();
+        reg.set_email(&u.uid, "new@example.com").unwrap();
+        let bare = u.uid.strip_prefix("myclaw/u/").unwrap();
+        let meta = data.join("users").join(bare).join("meta.json");
+        assert!(meta.is_file());
+        let on_disk: User =
+            serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
+        assert_eq!(on_disk.email.as_deref(), Some("new@example.com"));
+
+        // users.json 保持原样（不再被全量重写）。
+        let legacy_raw = std::fs::read_to_string(data.join("users.json")).unwrap();
+        let legacy_back: serde_json::Value = serde_json::from_str(&legacy_raw).unwrap();
+        assert_eq!(
+            legacy_back["users"]["myclaw/u/00000000-0000-7000-8000-000000000002"]["email"],
+            "bob@example.com"
+        );
+    }
+
+    /// 写操作只落对应 meta.json：register/ensure_root 各自只写自己的文件。
+    #[test]
+    fn writes_are_localized_per_user_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let reg = UserRegistry::with_namespace(data, DEFAULT_NAMESPACE);
+
+        reg.ensure_root();
+        let root = reg.find_by_username("root").unwrap();
+        let a = reg.register("a@example.com", "alice").unwrap();
+        let b = reg.register("b@example.com", "bob").unwrap();
+
+        // 每个用户都有自己的 meta.json。
+        for (uid, username) in [(root.uid.as_str(), "root"), (&a.uid, "alice"), (&b.uid, "bob")] {
+            let bare = uid.strip_prefix("myclaw/u/").unwrap();
+            let meta = data.join("users").join(bare).join("meta.json");
+            assert!(meta.is_file(), "missing meta.json for {username}");
+            let on_disk: User =
+                serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
+            assert_eq!(on_disk.username, username);
+            assert_eq!(on_disk.uid, uid);
+        }
+
+        // 改名只改该用户的文件（其余 mtime/内容不变——这里以内容为准断言）。
+        reg.set_username(&a.uid, "alicia").unwrap();
+        let a_meta = data
+            .join("users")
+            .join(a.uid.strip_prefix("myclaw/u/").unwrap())
+            .join("meta.json");
+        let on_disk: User =
+            serde_json::from_str(&std::fs::read_to_string(&a_meta).unwrap()).unwrap();
+        assert_eq!(on_disk.username, "alicia");
+
+        // 不产生 users.json（目录化写入不再写单文件）。
+        assert!(!data.join("users.json").exists());
+
+        // 重开后从目录读回全部 3 个用户（root 含迁移语义）。
+        drop(reg);
+        let re = UserRegistry::with_namespace(data, DEFAULT_NAMESPACE);
+        assert_eq!(re.count(), 3);
+        assert!(re.find_by_username("root").is_some());
+        assert!(re.find_by_username("alicia").is_some());
+        assert!(re.find_by_username("bob").is_some());
     }
 }

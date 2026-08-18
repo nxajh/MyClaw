@@ -1030,8 +1030,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     );
     known_users.migrate_legacy(&data_dir);
 
-    // P4 用户实体注册表（uid/email/username，users.json）。存量 identity
-    // 一次性迁移归 `myclaw/u/root`（幂等：root 已存在即跳过）。
+    // P4 用户实体注册表（uid/email/username，P1-B1 目录化
+    // `{data_dir}/users/{uuid}/meta.json`；旧 users.json 仅兜底读）。存量
+    // identity 一次性迁移归 `myclaw/u/root`（幂等：root 已存在即跳过）。
     // P4 第二波：namespace 取自 `[system] namespace`（默认 myclaw，存量
     // users.json/resolver 绑定零影响；改 namespace 的迁移见 RFC §2.2，本波不做）。
     let user_registry = Arc::new(crate::agents::UserRegistry::with_namespace(
