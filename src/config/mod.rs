@@ -538,7 +538,7 @@ impl ConfigLoader {
                 tracing::warn!(
                     explicit = %expanded.display(),
                     recommended = %data_dir.join("memory").display(),
-                    "knowledge_dir 显式配置已弃用，建议迁移至 {data_dir}/memory"
+                    "knowledge_dir 显式配置已弃用，建议迁移至 {{data_dir}}/memory"
                 );
                 expanded
             }

@@ -152,6 +152,10 @@ impl WorkspaceWatcher {
         )?;
         let mut rx = watcher.rx.clone();
 
+        // Clone for the guard: the async block below moves the originals.
+        let guard_agents_dir = agents_dir.clone();
+        let guard_skills_dir = skills_dir.clone();
+
         let token = tokio_util::sync::CancellationToken::new();
         let task_token = token.clone();
 
@@ -185,8 +189,8 @@ impl WorkspaceWatcher {
             _watcher: watcher,
             _handle: handle,
             cancel: token,
-            agents_dir: workspace_dir.join("agents"),
-            skills_dir: workspace_dir.join("skills"),
+            agents_dir: guard_agents_dir,
+            skills_dir: guard_skills_dir,
         })
     }
 }

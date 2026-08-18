@@ -151,7 +151,7 @@ impl SkillManageTool {
             ));
         }
 
-        let skill_dir = self.workspace_dir.join("skills").join(name);
+        let skill_dir = self.skills_root.join(name);
         std::fs::create_dir_all(&skill_dir)
             .map_err(|e| format!("Failed to create skill directory: {}", e))?;
 
@@ -364,7 +364,7 @@ impl SkillManageTool {
     }
 
     fn refresh_skills(&self) {
-        let skills_dir = self.workspace_dir.join("skills");
+        let skills_dir = self.skills_root.clone();
         let definitions = skill_loader::load_skills_from_dir(&skills_dir);
         let new_skills: Vec<Skill> = definitions.iter().map(Skill::from_definition).collect();
         self.skills.write().reload(new_skills);
