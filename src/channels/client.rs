@@ -1569,6 +1569,9 @@ fn handle_api_request(
                     // keys would break parsing — simplest correct form: write
                     // body-only content under a generated frontmatter.
                     let path = memory_dir.join(filename);
+                    // Minimal header must satisfy parse_memory_file: name and
+                    // type are required, otherwise the file is invisible to scans.
+                    let stem = filename.strip_suffix(".md").unwrap_or(&filename);
                     let body = if content.trim_start().starts_with("---") {
                         // Caller-supplied frontmatter: inject/patch scope keys.
                         let trimmed = content.trim_start();
@@ -1592,9 +1595,12 @@ fn handle_api_request(
                         }
                     } else {
                         let extra = if scope == "user" {
-                            format!("scope: user\nuser_id: {}\n", uid)
+                            format!(
+                                "name: {}\ntype: project\nscope: user\nuser_id: {}\n",
+                                stem, uid
+                            )
                         } else {
-                            "scope: agent\n".to_string()
+                            format!("name: {}\ntype: project\nscope: agent\n", stem)
                         };
                         format!("---\n{}---\n\n{}", extra, content)
                     };
