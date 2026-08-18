@@ -865,7 +865,7 @@ mod tests {
     #[test]
     fn distill_state_backoff_after_three_failures_and_reset_on_success() {
         let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path().to_str().unwrap();
+        let ws = dir.path();
 
         let mut state = DistillState::default();
         assert!(!state.in_backoff());
@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn distill_state_persists_across_load() {
         let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path().to_str().unwrap();
+        let ws = dir.path();
 
         let mut state = DistillState::default();
         state.record_attempt(false, ws);

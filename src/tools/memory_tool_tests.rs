@@ -25,13 +25,7 @@ mod tests {
         tags: &str,
         content: &str,
     ) {
-        // P1-B2: Cargo.lock	 dist		    myclaw.prev		 scripts
-Cargo.toml	 docs		    myclaw.toml.example  src
-add_override.py  dump_93_94.py	    patch1.py		 symbols.txt
-build.rs	 dump_history.py    patch2.py		 update_missing.py
-check_deploy.sh  dump_range.py	    patch3.py		 verify_doc.py
-check_doc.py	 dump_t1_traces.py  recover_async.rs	 workspace
-clients		 myclaw.old2	    rust-toolchain.toml IS the knowledge dir (flat memory pool).
+        // P1-B2: dir IS the knowledge dir (flat memory pool).
         let memory_dir = dir;
         std::fs::create_dir_all(&memory_dir).unwrap();
         std::fs::write(
