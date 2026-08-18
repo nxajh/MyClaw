@@ -14,12 +14,13 @@ use crate::providers::{BoxStream, StreamEvent};
 
 /// Time to wait for the first stream chunk before giving up.
 ///
-/// 60 s covers slow models (DeepSeek reasoning, GPT-5 thinking) on long
-/// prompts while still bounding a cold-inference or stalled-upstream wait.
+/// 300 s covers slow models (DeepSeek reasoning, GPT-5 thinking) on very
+/// large prompts (300k+ tokens) behind proxies (CPA) where upstream prefill
+/// + thinking time-to-first-token regularly exceeds the old 60 s bound.
 /// The pre-stream `send()` is bounded separately by [`REQUEST_SEND_TIMEOUT`],
 /// so this timeout only ever applies once the provider has accepted the
 /// request and opened a stream.
-pub const STREAM_FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+pub const STREAM_FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Time to wait between chunks once streaming has started.
 ///
@@ -31,9 +32,9 @@ pub const STREAM_CHUNK_INTERVAL_TIMEOUT: Duration = Duration::from_secs(120);
 ///
 /// Bounds the worst case of many small-but-alive chunks trickling forever
 /// (each individually under the interval timeout) and ensures the whole turn
-/// cannot run past a bounded wall-clock budget. 180 s > first-chunk (60 s) +
-/// interval (120 s) so a single slow chunk never trips it spuriously.
-pub const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
+/// cannot run past a bounded wall-clock budget. 420 s > first-chunk (300 s) +
+/// headroom so a single slow chunk never trips it spuriously.
+pub const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(420);
 
 /// Time to wait for the provider to accept the request (`send()`).
 ///
@@ -43,7 +44,7 @@ pub const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
 /// means nothing bounds this unless we do. On expiry the request is dropped
 /// and a `StreamEvent::Error` is emitted so the routing fallback chain can
 /// classify the timeout and fail over to the next provider.
-pub const REQUEST_SEND_TIMEOUT: Duration = Duration::from_secs(60);
+pub const REQUEST_SEND_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Time to wait for reading an HTTP error body after a non-2xx status.
 ///
