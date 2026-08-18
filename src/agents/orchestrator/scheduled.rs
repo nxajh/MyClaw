@@ -294,14 +294,20 @@ async fn send_to_target_internal(
 pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
     use crate::agents::memory_distill::{DistillState, has_pending_user_memories, run_memory_distill};
 
-    let workspace_dir = orch.runtime.defaults.prompt.workspace_dir.clone();
-    if workspace_dir.is_empty() {
-        tracing::warn!("memory_distill: workspace_dir not configured, skipped");
+    let knowledge_dir = orch.runtime.defaults.prompt.knowledge_dir.clone();
+    if knowledge_dir.is_empty() {
+        tracing::warn!("memory_distill: knowledge_dir not configured, skipped");
         return;
     }
 
     // Backoff: after 3 consecutive failures, pause for 2 hours.
-    let mut state = DistillState::load(&workspace_dir);
+    // P1-B2: distill state is runtime state — sibling of the knowledge dir
+    // ({data_dir}/state/memory/distill.json), not inside the memory pool.
+    let state_dir = std::path::Path::new(&knowledge_dir)
+        .parent()
+        .map(|p| p.join("state").join("memory"))
+        .unwrap_or_else(|| std::path::PathBuf::from("state/memory"));
+    let mut state = DistillState::load(&state_dir);
     if state.in_backoff() {
         tracing::warn!(
             failures = state.consecutive_failures,
@@ -311,7 +317,7 @@ pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
     }
 
     // Only distill when at least one user memory changed since the last pass.
-    if !has_pending_user_memories(&workspace_dir, state.last_distill_ts.as_deref()) {
+    if !has_pending_user_memories(&knowledge_dir, state.last_distill_ts.as_deref()) {
         tracing::debug!("memory_distill: no new user memories, skipped");
         return;
     }
@@ -360,13 +366,13 @@ pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
         provider,
         tool_specs,
         tool_registry: Arc::clone(&orch.runtime.tools),
-        workspace_dir,
+        knowledge_dir,
         registry: Arc::clone(&orch.runtime.providers) as Arc<dyn crate::providers::ProviderRegistry>,
     };
 
     let result = run_memory_distill(input).await;
     let success = result.is_ok();
-    state.record_attempt(success, &orch.runtime.defaults.prompt.workspace_dir);
+    state.record_attempt(success, &state_dir);
     if success {
         tracing::info!(files_written = result.unwrap_or(0), "memory_distill: pass recorded");
     } else {

@@ -50,8 +50,9 @@ pub struct DistillInput {
     pub tool_specs: Vec<ToolSpec>,
     /// Tool registry for actual execution.
     pub tool_registry: Arc<ToolRegistry>,
-    /// Workspace root — user memory files are scanned under `users/`.
-    pub workspace_dir: String,
+    /// Knowledge dir ({data_dir}/memory) — the single flat memory pool;
+    /// user-layer entries are selected by frontmatter `scope=user` (P1-B2).
+    pub knowledge_dir: String,
     /// Provider registry for resolving model config (reasoning flag).
     pub registry: Arc<dyn ProviderRegistry>,
 }
@@ -106,13 +107,15 @@ pub struct DistillState {
 }
 
 impl DistillState {
-    fn path(workspace_dir: &str) -> std::path::PathBuf {
-        std::path::Path::new(workspace_dir).join(".state").join("distill.json")
+    /// State file lives directly in the given dir (P1-B2: the caller passes
+    /// {data_dir}/state/memory — runtime state, not the memory pool).
+    fn path(state_dir: &std::path::Path) -> std::path::PathBuf {
+        state_dir.join("distill.json")
     }
 
     /// Load state from disk; returns defaults when missing or unparsable.
-    pub fn load(workspace_dir: &str) -> DistillState {
-        let path = Self::path(workspace_dir);
+    pub fn load(state_dir: &std::path::Path) -> DistillState {
+        let path = Self::path(state_dir);
         match std::fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => DistillState::default(),
@@ -120,8 +123,8 @@ impl DistillState {
     }
 
     /// Save state atomically.
-    pub fn save(&self, workspace_dir: &str) {
-        let path = Self::path(workspace_dir);
+    pub fn save(&self, state_dir: &std::path::Path) {
+        let path = Self::path(state_dir);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -156,7 +159,7 @@ impl DistillState {
     }
 
     /// Mark an attempt (success or failure) and persist.
-    pub fn record_attempt(&mut self, success: bool, workspace_dir: &str) {
+    pub fn record_attempt(&mut self, success: bool, state_dir: &std::path::Path) {
         self.last_attempt_ts = Some(Self::now_rfc3339());
         if success {
             self.last_distill_ts = Some(Self::now_rfc3339());
@@ -164,49 +167,35 @@ impl DistillState {
         } else {
             self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         }
-        self.save(workspace_dir);
+        self.save(state_dir);
     }
 }
 
 /// Whether any per-user memory file was modified after `last_distill_ts`.
 /// A `None` last-distill timestamp means "never distilled" → pending.
-pub fn has_pending_user_memories(workspace_dir: &str, last_distill_ts: Option<&str>) -> bool {
+pub fn has_pending_user_memories(knowledge_dir: &str, last_distill_ts: Option<&str>) -> bool {
     let last_distill = last_distill_ts
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
 
-    let users_root = std::path::Path::new(workspace_dir).join("users");
-    let entries = match std::fs::read_dir(&users_root) {
-        Ok(rd) => rd,
-        Err(_) => return false,
-    };
-
-    for entry in entries.flatten() {
-        let user_dir = entry.path();
-        if !user_dir.is_dir() {
+    // P1-B2: single flat knowledge dir; user-layer entries are identified
+    // by frontmatter scope=user (file mtime check does not need parsing).
+    let files = crate::memory::scan_memory_files(std::path::Path::new(knowledge_dir));
+    for f in files {
+        if f.scope.as_deref() != Some("user") {
             continue;
         }
-        let memory_dir = user_dir.join(crate::memory::MEMORY_DIR_NAME);
-        let Ok(rd) = std::fs::read_dir(&memory_dir) else {
+        let Ok(meta) = std::fs::metadata(&f.path) else {
             continue;
         };
-        for file in rd.flatten() {
-            let path = file.path();
-            if path.extension() != Some(std::ffi::OsStr::new("md")) {
-                continue;
-            }
-            let Ok(meta) = file.metadata() else {
-                continue;
-            };
-            let Ok(mtime) = meta.modified() else {
-                continue;
-            };
-            let mtime: chrono::DateTime<chrono::Utc> = mtime.into();
-            match last_distill {
-                None => return true,
-                Some(last) if mtime > last => return true,
-                Some(_) => {}
-            }
+        let Ok(mtime) = meta.modified() else {
+            continue;
+        };
+        let mtime: chrono::DateTime<chrono::Utc> = mtime.into();
+        match last_distill {
+            None => return true,
+            Some(last) if mtime > last => return true,
+            Some(_) => {}
         }
     }
     false
@@ -214,25 +203,31 @@ pub fn has_pending_user_memories(workspace_dir: &str, last_distill_ts: Option<&s
 
 /// Collect per-user memory files into an anonymized input document.
 /// Returns (user_count, file_count, document).
-fn collect_user_memories(workspace_dir: &str) -> (usize, usize, String) {
-    let users_root = std::path::Path::new(workspace_dir).join("users");
+fn collect_user_memories(knowledge_dir: &str) -> (usize, usize, String) {
     let mut batches: Vec<(String, String)> = Vec::new();
     let mut total_files = 0usize;
     let mut total_chars = 0usize;
     let mut user_idx = 0usize;
 
-    let entries = match std::fs::read_dir(&users_root) {
-        Ok(rd) => rd,
-        Err(_) => return (0, 0, String::new()),
-    };
-
-    for entry in entries.flatten() {
-        let user_dir = entry.path();
-        if !user_dir.is_dir() {
+    // P1-B2: group flat-dir user-layer files by frontmatter user_id.
+    let mut by_user: std::collections::BTreeMap<String, Vec<crate::memory::MemoryFile>> =
+        std::collections::BTreeMap::new();
+    for f in crate::memory::scan_memory_files(std::path::Path::new(knowledge_dir)) {
+        if f.scope.as_deref() != Some("user") {
             continue;
         }
-        let memory_dir = user_dir.join(crate::memory::MEMORY_DIR_NAME);
-        let files = crate::memory::scan_memory_files(&memory_dir);
+        let uid = f.user_id.clone().unwrap_or_else(
+_E1=1
+fi
+printf '
+__MYCLAW_CHK_da4273d3f2e74d8c96434af4540395f0_1_%d__
+' 
+if [  -eq 0 ]; then _E2=; else
+"unknown".to_string());
+        by_user.entry(uid).or_default().push(f);
+    }
+
+    for (_uid, files) in by_user {
         if files.is_empty() {
             continue;
         }
@@ -280,7 +275,7 @@ fn name_tokens(name: &str) -> std::collections::HashSet<String> {
 /// memory name. Runtime backstop for the prompt rule: distill must merge into
 /// an existing memory instead of adding a duplicate topic.
 fn find_duplicate_agent_memory(workspace_dir: &str, candidate_name: &str) -> Option<String> {
-    let memory_dir = std::path::Path::new(workspace_dir).join(crate::memory::MEMORY_DIR_NAME);
+    let memory_dir = std::path::Path::new(workspace_dir);
     let files = crate::memory::scan_memory_files(&memory_dir);
     let cand = name_tokens(candidate_name);
     if cand.is_empty() {
@@ -313,7 +308,7 @@ fn find_duplicate_agent_memory(workspace_dir: &str, candidate_name: &str) -> Opt
 /// prompt injection — mirrors `memory_fork::build_extraction_prompt` so the
 /// model can spot covered topics without guessing.
 fn build_existing_agent_index(workspace_dir: &str) -> String {
-    let memory_dir = std::path::Path::new(workspace_dir).join(crate::memory::MEMORY_DIR_NAME);
+    let memory_dir = std::path::Path::new(workspace_dir);
     let files = crate::memory::scan_memory_files(&memory_dir);
     if files.is_empty() {
         return "(empty — no agent-level memories yet)".to_string();
@@ -326,7 +321,7 @@ fn build_existing_agent_index(workspace_dir: &str) -> String {
 /// Snapshot agent-layer memory names and their content hashes.
 /// Used to diff before/after pass 1 to find newly written/modified memories.
 fn snapshot_agent_memories(workspace_dir: &str) -> std::collections::HashMap<String, String> {
-    let memory_dir = std::path::Path::new(workspace_dir).join(crate::memory::MEMORY_DIR_NAME);
+    let memory_dir = std::path::Path::new(workspace_dir);
     let files = crate::memory::scan_memory_files(&memory_dir);
     files
         .iter()
@@ -351,7 +346,7 @@ fn diff_agent_memories(
     after: &std::collections::HashMap<String, String>,
     workspace_dir: &str,
 ) -> Vec<(String, String)> {
-    let memory_dir = std::path::Path::new(workspace_dir).join(crate::memory::MEMORY_DIR_NAME);
+    let memory_dir = std::path::Path::new(workspace_dir);
     let mut result = Vec::new();
 
     for (name, after_hash) in after {
@@ -490,7 +485,7 @@ fn build_rule_synthesis_prompt(
 }
 
 async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
-    let (user_count, file_count, input_doc) = collect_user_memories(&input.workspace_dir);
+    let (user_count, file_count, input_doc) = collect_user_memories(&input.knowledge_dir);
     if user_count == 0 {
         tracing::debug!("memory_distill: no user memories to distill");
         return Ok(0);
@@ -516,10 +511,10 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
             }
         });
 
-    let existing_index = build_existing_agent_index(&input.workspace_dir);
+    let existing_index = build_existing_agent_index(&input.knowledge_dir);
 
     // Snapshot agent memory state before pass 1 so we can diff after.
-    let before = snapshot_agent_memories(&input.workspace_dir);
+    let before = snapshot_agent_memories(&input.knowledge_dir);
 
     // ── Pass 1: extract facts/scenarios/reference from user memories ──
     tracing::info!("memory_distill: pass 1 (facts/scenarios)");
@@ -533,15 +528,15 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
         Arc::clone(&input.tool_registry),
         &session_shell,
         &thinking,
-        &input.workspace_dir,
+        &input.knowledge_dir,
     )
     .await?;
 
     let mut total_written = pass1_written;
 
     // ── Pass 2: synthesize rules from newly written agent memories ──
-    let after = snapshot_agent_memories(&input.workspace_dir);
-    let new_memories = diff_agent_memories(&before, &after, &input.workspace_dir);
+    let after = snapshot_agent_memories(&input.knowledge_dir);
+    let new_memories = diff_agent_memories(&before, &after, &input.knowledge_dir);
 
     if !new_memories.is_empty() {
         tracing::info!(
@@ -554,7 +549,7 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
             .collect::<String>();
 
         // Refresh index to include pass-1 writes.
-        let updated_index = build_existing_agent_index(&input.workspace_dir);
+        let updated_index = build_existing_agent_index(&input.knowledge_dir);
         let rule_prompt = build_rule_synthesis_prompt(&new_memories_doc, &updated_index);
         let messages2 = vec![ChatMessage::user_text(rule_prompt)];
         let pass2_written = run_distill_rounds(
@@ -565,7 +560,7 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
             Arc::clone(&input.tool_registry),
             &session_shell,
             &thinking,
-            &input.workspace_dir,
+            &input.knowledge_dir,
         )
         .await?;
         total_written += pass2_written;

@@ -1,7 +1,7 @@
 //! Scheduler — Cron job scheduling, storage, and execution events.
 //!
 //! The Scheduler is the single owner of all cron job data. It:
-//!   - Loads and persists jobs from `jobs.json`
+//!   - Loads and persists jobs from `{jobs_root}/{id}/meta.json` (P1-B2)
 //!   - Hot-reloads when the file changes on disk
 //!   - Sends timing events (heartbeat, cron) via mpsc channel
 //!   - Provides CRUD methods for cronjob_tool
@@ -29,7 +29,7 @@ pub type SharedScheduler = Arc<Scheduler>;
 
 // ── JobEntry ────────────────────────────────────────────────────────────────
 
-/// A single cron job stored in `jobs.json`.
+/// A single cron job stored in `{jobs_root}/{id}/meta.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobEntry {
     /// Unique ID — FQID `<ns>/job/<uuidv7>`; legacy 12-hex ids remain readable.
@@ -150,7 +150,7 @@ pub struct JobUpdate {
     pub trigger_now: bool,
 }
 
-/// The top-level JSON structure of `jobs.json`.
+/// The legacy single-file jobs structure (P1-B2: read fallback only).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JobsFile {
     pub jobs: Vec<JobEntry>,
@@ -172,8 +172,12 @@ pub struct DistillConfig {
 pub struct Scheduler {
     /// Jobs data protected by RwLock for concurrent access.
     jobs: RwLock<JobsFile>,
-    /// Path to jobs.json on disk.
-    path: PathBuf,
+    /// P1-B2: jobs entity root (`{data_dir}/jobs`). Each job lives at
+    /// `{root}/{dir_name(id)}/meta.json`; the legacy single-file
+    /// `{root}/jobs.json` is read as a fallback (pre-migration layouts).
+    jobs_root: PathBuf,
+    /// Legacy single-file store path (read fallback only).
+    legacy_path: PathBuf,
     /// Identity namespace for job FQIDs (`<ns>/job/<uuidv7>`).
     namespace: String,
     /// Last known mtime (for hot-reload detection).
@@ -214,24 +218,43 @@ impl Scheduler {
         last_channel_file: PathBuf,
         last_recipient_file: PathBuf,
     ) -> SharedScheduler {
+        // P1-B2: `path` is the jobs root dir ({data_dir}/jobs). Accept a
+        // jobs.json path too (older embedders): normalize to its parent.
+        let (jobs_root, legacy_path) = if path.extension().is_some_and(|e| e == "json") {
+            let legacy = path.clone();
+            (
+                path.parent().map(|p| p.to_path_buf()).unwrap_or(path),
+                legacy,
+            )
+        } else {
+            (path.clone(), path.join("jobs.json"))
+        };
+
         let mut data = JobsFile::default();
         let mut last_mtime = None;
 
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
+        // Directory-based store wins; fall back to the legacy single file
+        // only when no per-job meta.json exists yet (pre-migration layout).
+        let mut from_dirs = load_jobs_from_dirs(&jobs_root);
+        if from_dirs.is_empty() && legacy_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&legacy_path) {
                 if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
-                    data = parsed;
-                    last_mtime = std::fs::metadata(&path)
-                        .ok()
-                        .and_then(|m| m.modified().ok());
+                    from_dirs = parsed.jobs;
                 }
             }
+        }
+        if !from_dirs.is_empty() {
+            data.jobs = from_dirs;
+            last_mtime = std::fs::metadata(&jobs_root)
+                .ok()
+                .and_then(|m| m.modified().ok());
         }
 
         let job_count = data.jobs.len();
         tracing::info!(
             count = job_count,
-            "scheduler loaded cron jobs from JSON store"
+            root = %jobs_root.display(),
+            "scheduler loaded cron jobs from jobs store"
         );
 
         let last_channel_value = std::fs::read_to_string(&last_channel_file)
@@ -245,7 +268,8 @@ impl Scheduler {
 
         Arc::new(Self {
             jobs: RwLock::new(data),
-            path,
+            jobs_root,
+            legacy_path,
             namespace: namespace.to_string(),
             last_mtime: ParkMutex::new(last_mtime),
             timezone,
@@ -736,12 +760,24 @@ impl Scheduler {
     }
 
     /// Path to the run log JSONL file for a given job.
+    /// P1-B2: per-job `{jobs_root}/{id}/run_logs/{id}.jsonl` (log lives
+    /// beside its meta.json). Falls back to the shared `run_logs/` dir
+    /// when a legacy log exists there (pre-migration reads keep working).
     fn run_log_path(&self, job_id: &str) -> PathBuf {
-        self.path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
+        let file = format!("{}.jsonl", crate::ids::dir_name(job_id));
+        let per_job = self
+            .jobs_root
+            .join(crate::ids::dir_name(job_id))
             .join("run_logs")
-            .join(format!("{}.jsonl", crate::ids::dir_name(job_id)))
+            .join(&file);
+        if per_job.exists() {
+            return per_job;
+        }
+        let shared = self.jobs_root.join("run_logs").join(&file);
+        if shared.exists() {
+            return shared;
+        }
+        per_job
     }
 
     /// Append a run record to the job's JSONL log file.
@@ -770,35 +806,107 @@ impl Scheduler {
 
 // ── Persistence ─────────────────────────────────────────────────────────────
 
-impl Scheduler {
-    /// Atomic save: write to .tmp then rename.
-    fn save_to_disk_inner(&self, data: &JobsFile) -> anyhow::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+/// Load every `{jobs_root}/{dir}/meta.json` (P1-B2 directory-based store).
+/// Malformed entries are skipped. Sorted by id for stable ordering.
+fn load_jobs_from_dirs(jobs_root: &Path) -> Vec<JobEntry> {
+    let entries = match std::fs::read_dir(jobs_root) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+    let mut jobs = Vec::new();
+    for entry in entries.flatten() {
+        let meta = entry.path().join("meta.json");
+        if !meta.is_file() {
+            continue;
         }
-        let json = serde_json::to_string_pretty(data)?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json)?;
-        std::fs::rename(&tmp, &self.path)?;
+        let content = match std::fs::read_to_string(&meta) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        match serde_json::from_str::<JobEntry>(&content) {
+            Ok(job) => jobs.push(job),
+            Err(e) => tracing::warn!(
+                path = %meta.display(),
+                err = %e,
+                "jobs store: skipping malformed meta.json"
+            ),
+        }
+    }
+    jobs.sort_by(|a, b| a.id.cmp(&b.id));
+    jobs
+}
+
+impl Scheduler {
+    /// Per-job meta.json path: `{jobs_root}/{dir_name(id)}/meta.json`.
+    fn job_meta_path(&self, id: &str) -> PathBuf {
+        self.jobs_root
+            .join(crate::ids::dir_name(id))
+            .join("meta.json")
+    }
+
+    /// P1-B2: persist each job as its own `{jobs_root}/{id}/meta.json`.
+    /// Jobs removed from `data` get their meta.json deleted. The legacy
+    /// single-file jobs.json is never written anymore (read fallback only).
+    fn save_to_disk_inner(&self, data: &JobsFile) -> anyhow::Result<()> {
+        std::fs::create_dir_all(&self.jobs_root)?;
+        let mut seen_dirs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for job in &data.jobs {
+            let meta = self.job_meta_path(&job.id);
+            let dir = meta
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("job meta path without parent"))?
+                .to_path_buf();
+            std::fs::create_dir_all(&dir)?;
+            let json = serde_json::to_string_pretty(job)?;
+            let tmp = dir.join("meta.json.tmp");
+            std::fs::write(&tmp, &json)?;
+            std::fs::rename(&tmp, &meta)?;
+            seen_dirs.insert(dir);
+        }
+        // Delete per-job dirs whose job is gone from the dataset.
+        if let Ok(rd) = std::fs::read_dir(&self.jobs_root) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if !p.is_dir() || !p.join("meta.json").is_file() {
+                    continue; // run_logs/ and unknown dirs are left alone
+                }
+                if !seen_dirs.contains(&p) {
+                    // Only remove when the dir holds no run logs (keep logs).
+                    let has_logs = p.join("run_logs").is_dir();
+                    if has_logs {
+                        if let Err(e) = std::fs::remove_file(p.join("meta.json")) {
+                            tracing::warn!(err = %e, "jobs store: failed to prune stale meta.json");
+                        }
+                    } else if let Err(e) = std::fs::remove_dir_all(&p) {
+                        tracing::warn!(err = %e, "jobs store: failed to prune job dir");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
-    /// Hot-reload: check if jobs.json changed on disk and reload if so.
+    /// Hot-reload: check the jobs store changed on disk and reload if so.
     pub fn maybe_reload(&self) {
-        let meta = std::fs::metadata(&self.path).ok();
-        let mtime = meta.and_then(|m| m.modified().ok());
+        let dir_meta = std::fs::metadata(&self.jobs_root).ok();
+        let mtime = dir_meta.and_then(|m| m.modified().ok());
         let mut last = self.last_mtime.lock();
         if mtime == *last {
             return;
         }
-        if let Ok(content) = std::fs::read_to_string(&self.path) {
-            if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
-                let mut data = self.jobs.write();
-                *data = parsed;
-                *last = mtime;
-                tracing::info!(count = data.jobs.len(), "hot-reloaded cron jobs from disk");
+        let mut jobs = load_jobs_from_dirs(&self.jobs_root);
+        // Legacy fallback: only when the dir store is empty.
+        if jobs.is_empty() && self.legacy_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&self.legacy_path) {
+                if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
+                    jobs = parsed.jobs;
+                }
             }
         }
+        let mut data = self.jobs.write();
+        *data = JobsFile { jobs };
+        *last = mtime;
+        tracing::info!(count = data.jobs.len(), "hot-reloaded cron jobs from jobs store");
     }
 
     /// Migrate jobs from old markdown files in the cron directory.
@@ -1667,7 +1775,7 @@ mod tests {
     fn test_scheduler(dir: &std::path::Path) -> SharedScheduler {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         Scheduler::new(
-            dir.join("jobs.json"),
+            dir.join("jobs"),
             "test",
             "UTC".to_string(),
             None,
@@ -1876,5 +1984,112 @@ mod tests {
     fn validate_active_hours_start_ge_end() {
         assert!(validate_active_hours("18:00-08:00").is_err());
         assert!(validate_active_hours("12:00-12:00").is_err());
+    }
+
+    // ── P1-B2 directory-based job storage ─────────────────────────────────
+
+    #[test]
+    fn jobs_store_directory_load_wins_over_legacy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+
+        // Directory store: one job at {id}/meta.json
+        let id_a = "test/job/019fe342aaaa";
+        let meta_dir = jobs_root.join(crate::ids::dir_name(id_a));
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        let entry_a = serde_json::to_string(&test_entry("0 9 * * *")).unwrap();
+        let mut parsed: serde_json::Value = serde_json::from_str(&entry_a).unwrap();
+        parsed["id"] = serde_json::json!(id_a);
+        std::fs::write(meta_dir.join("meta.json"), parsed.to_string()).unwrap();
+
+        // Legacy single file also present with a DIFFERENT job.
+        let id_legacy = "test/job/019fe342bbbb";
+        let mut legacy_entry = serde_json::to_value(test_entry("0 8 * * *")).unwrap();
+        legacy_entry["id"] = serde_json::json!(id_legacy);
+        std::fs::create_dir_all(&jobs_root).unwrap();
+        std::fs::write(
+            jobs_root.join("jobs.json"),
+            serde_json::to_string(&JobsFile {
+                jobs: vec![serde_json::from_value(legacy_entry).unwrap()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root,
+            "test",
+            "UTC".to_string(),
+            None,
+            None,
+            tx,
+            dir.path().join("lc"),
+            dir.path().join("lr"),
+        );
+        let jobs = sched.jobs();
+        // Directory store wins entirely; legacy job is ignored.
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, id_a);
+    }
+
+    #[test]
+    fn jobs_store_legacy_file_fallback_when_dir_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        std::fs::create_dir_all(&jobs_root).unwrap();
+
+        let id_legacy = "test/job/019fe342cccc";
+        let mut legacy_entry = serde_json::to_value(test_entry("0 8 * * *")).unwrap();
+        legacy_entry["id"] = serde_json::json!(id_legacy);
+        std::fs::write(
+            jobs_root.join("jobs.json"),
+            serde_json::to_string(&JobsFile {
+                jobs: vec![serde_json::from_value(legacy_entry).unwrap()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root,
+            "test",
+            "UTC".to_string(),
+            None,
+            None,
+            tx,
+            dir.path().join("lc"),
+            dir.path().join("lr"),
+        );
+        let jobs = sched.jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, id_legacy);
+    }
+
+    #[test]
+    fn jobs_store_writes_per_job_meta_and_prunes_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let sched = test_scheduler(dir.path());
+
+        // Add a job → meta.json appears under {id}/meta.json.
+        let entry = test_entry("0 9 * * *");
+        let id = sched.add_job(entry.clone()).unwrap();
+        let meta = jobs_root
+            .join(crate::ids::dir_name(&id))
+            .join("meta.json");
+        assert!(meta.is_file());
+        // meta.json round-trips the full JobEntry.
+        let on_disk: JobEntry =
+            serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
+        assert_eq!(on_disk.id, id);
+        assert_eq!(on_disk.schedule, "0 9 * * *");
+        // The legacy single file must NOT be (re)created.
+        assert!(!jobs_root.join("jobs.json").exists());
+
+        // Remove → meta.json gone.
+        assert!(sched.remove_job(&id).unwrap());
+        assert!(!meta.exists());
     }
 }

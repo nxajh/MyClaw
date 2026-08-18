@@ -966,14 +966,19 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tokio::sync::mpsc::channel::<crate::agents::SchedulerEvent>(100);
 
     // Build shared scheduler (owns all cron job data).
+    // P1-B2: job storage moved to the data side — {data_dir}/jobs with
+    // per-job {id}/meta.json; the legacy single-file jobs.json (workspace
+    // or data side) is a read-only fallback inside Scheduler::new.
+    let jobs_root = config.jobs_root();
     let cron_dir = config.workspace_dir.join("cron");
-    let jobs_json_path = cron_dir.join("jobs.json");
 
-    // Migrate from old markdown files if jobs.json doesn't exist yet.
-    if !jobs_json_path.exists() {
+    // Migrate from old markdown files if the jobs store is empty.
+    if !jobs_root.join("jobs.json").exists()
+        && std::fs::read_dir(&jobs_root).map(|mut rd| rd.next().is_none()).unwrap_or(true)
+    {
         let (dummy_tx, _) = tokio::sync::mpsc::channel(1);
         let migrator = crate::agents::scheduling::scheduler::Scheduler::new(
-            jobs_json_path.clone(),
+            jobs_root.clone(),
             &config.system.namespace,
             tz_name.clone(),
             None,
@@ -984,7 +989,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         );
         let count = migrator.migrate_from_markdown(&cron_dir);
         if count > 0 {
-            tracing::debug!(count = count, "migrated cron jobs from markdown to JSON");
+            tracing::debug!(count = count, "migrated cron jobs from markdown");
         }
     }
 
@@ -1006,7 +1011,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     };
 
     let shared_scheduler = crate::agents::scheduling::scheduler::Scheduler::new(
-        jobs_json_path.clone(),
+        jobs_root,
         &config.system.namespace,
         tz_name.clone(),
         heartbeat_config,
