@@ -1282,7 +1282,15 @@ fn handle_api_request(
             // previously-used channel become invisible the moment that
             // channel is linked to the account.
             let resolved = memory_user_id(ctx);
+            let linked_routing_keys = sm.resolver().routing_keys_for(&resolved);
             let sessions = sm.list_sessions_for_user(&resolved);
+            tracing::info!(
+                raw_routing_key = %ctx.user_id,
+                resolved_uid = %resolved,
+                linked_routing_keys = ?linked_routing_keys,
+                session_count = sessions.len(),
+                "sessions.list diagnostic"
+            );
             let active = sm.active_session_id(user_id);
             let result: Vec<serde_json::Value> = sessions.iter().map(|s| {
                 serde_json::json!({
