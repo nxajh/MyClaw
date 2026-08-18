@@ -1276,7 +1276,13 @@ fn handle_api_request(
 
     match method {
         "sessions.list" => {
-            let sessions = sm.list_sessions(user_id);
+            // Aggregate across every routing_key linked to this identity via
+            // `/link` (UserResolver), not just this web-client connection's
+            // own routing_key — otherwise sessions created from a
+            // previously-used channel become invisible the moment that
+            // channel is linked to the account.
+            let resolved = memory_user_id(ctx);
+            let sessions = sm.list_sessions_for_user(&resolved);
             let active = sm.active_session_id(user_id);
             let result: Vec<serde_json::Value> = sessions.iter().map(|s| {
                 serde_json::json!({
@@ -2326,8 +2332,10 @@ mod tests {
         let pr: Arc<OnceLock<Arc<dyn ProviderRegistry>>> = Arc::new(OnceLock::new());
         let resolver = Arc::new(UserResolver::new());
         resolver.set(USER_KEY.to_string(), USER_UID.to_string());
-        let _ = ur.set(resolver);
-        let _ = sm.set(Arc::new(SessionManager::in_memory()));
+        let _ = ur.set(Arc::clone(&resolver));
+        // Mirrors daemon.rs: SessionManager and ApiContext share one
+        // resolver instance — sessions.list depends on that (G44).
+        let _ = sm.set(Arc::new(SessionManager::in_memory().with_resolver(resolver)));
         let _ = wd.set(ws.to_path_buf());
         let kd: Arc<OnceLock<std::path::PathBuf>> = Arc::new(OnceLock::new());
         let _ = kd.set(ws.join("memory"));
@@ -2517,5 +2525,67 @@ mod tests {
             tmp.path(),
         );
         assert_eq!(resp["type"], "api_error");
+    }
+
+    /// Regression test for the bug where linking a channel's routing_key to
+    /// an existing user (via `/link`) did not surface that user's
+    /// pre-existing sessions in the web client's session list: `sessions.list`
+    /// used to call `list_sessions(raw_routing_key)` instead of the
+    /// resolver-aware `list_sessions_for_user(resolved_uid)` (G44).
+    #[test]
+    fn sessions_list_surfaces_linked_channel_sessions() {
+        let tmp = test_workspace();
+        let sm: Arc<OnceLock<Arc<SessionManager>>> = Arc::new(OnceLock::new());
+        let wd: Arc<OnceLock<std::path::PathBuf>> = Arc::new(OnceLock::new());
+        let ur: Arc<OnceLock<Arc<UserResolver>>> = Arc::new(OnceLock::new());
+        let ts: Arc<RwLock<Vec<ToolSpec>>> = Arc::new(RwLock::new(Vec::new()));
+        let cp: Arc<OnceLock<std::path::PathBuf>> = Arc::new(OnceLock::new());
+        let sk: Arc<OnceLock<Arc<RwLock<SkillManager>>>> = Arc::new(OnceLock::new());
+        let pr: Arc<OnceLock<Arc<dyn ProviderRegistry>>> = Arc::new(OnceLock::new());
+        let kd: Arc<OnceLock<std::path::PathBuf>> = Arc::new(OnceLock::new());
+        let _ = kd.set(tmp.path().join("memory"));
+        let _ = wd.set(tmp.path().to_path_buf());
+
+        // Both a pre-existing Telegram channel and the web client's own
+        // routing_key are folded into the same uid — exactly what
+        // `/link` + `/link_confirm` does at runtime.
+        const TELEGRAM_KEY: &str = "telegram:default:12345";
+        let resolver = Arc::new(UserResolver::new());
+        resolver.set(USER_KEY.to_string(), USER_UID.to_string());
+        resolver.set(TELEGRAM_KEY.to_string(), USER_UID.to_string());
+        let _ = ur.set(Arc::clone(&resolver));
+
+        let session_manager = Arc::new(SessionManager::in_memory().with_resolver(resolver));
+        // A session that already existed on the Telegram channel, created
+        // before the user ever touched the web client.
+        let telegram_session = session_manager
+            .new_session(TELEGRAM_KEY, Some("old telegram chat"))
+            .unwrap();
+        let _ = sm.set(session_manager);
+
+        let ctx = ApiContext {
+            user_id: USER_KEY,
+            session_manager: &sm,
+            tool_specs: &ts,
+            workspace_dir: &wd,
+            knowledge_dir: &kd,
+            config_path: &cp,
+            skill_manager: &sk,
+            provider_registry: &pr,
+            user_resolver: &ur,
+        };
+
+        let resp: serde_json::Value = serde_json::from_str(&handle_api_request(
+            "t1",
+            "sessions.list",
+            &serde_json::json!({}),
+            &ctx,
+        ))
+        .unwrap();
+        let r = rows(&resp);
+        assert!(
+            r.iter().any(|s| s["id"] == telegram_session.id),
+            "linked channel's pre-existing session should be visible: {r:?}"
+        );
     }
 }

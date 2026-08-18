@@ -913,11 +913,19 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         eprintln!(
             "检测到旧存储布局：{} 存在而 {} 缺失。\n\
              布局迁移已改为外置脚本，daemon 不再自动迁移。\n\
-             请先停机执行：python3 scripts/migrate-layout.py --dry-run 查看，\n\
-             确认后执行：python3 scripts/migrate-layout.py --apply（详见\n\
-             docs/storage-layout-and-trigger-redesign.md §5），完成后重启 daemon。",
+             请先停机执行（务必显式传入下面两个路径 —— 脚本的内置默认值\n\
+             可能与本次 daemon 实际解析出的 workspace_dir/data_dir 不一致，\n\
+             传错路径会把数据搬到 daemon 读不到的地方）：\n\
+             python3 scripts/migrate-layout.py --dry-run --workspace {} --data {}\n\
+             确认无误后：\n\
+             python3 scripts/migrate-layout.py --apply --workspace {} --data {}\n\
+             （详见 docs/storage-layout-and-trigger-redesign.md §5），完成后重启 daemon。",
             config.workspace_dir.join("sessions").display(),
             data_dir.join("sessions").display(),
+            config.workspace_dir.display(),
+            data_dir.display(),
+            config.workspace_dir.display(),
+            data_dir.display(),
         );
         anyhow::bail!(
             "old storage layout detected (workspace/sessions exists, {}/sessions missing); run scripts/migrate-layout.py first",

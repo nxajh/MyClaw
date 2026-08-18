@@ -121,6 +121,11 @@ fn generate_default_config() -> String {
     r#"# MyClaw Configuration
 # See https://github.com/nxajh/MyClaw for documentation.
 
+# data_dir defaults to the platform data dir (e.g. ~/.local/share/myclaw on
+# Linux) when omitted, which does NOT sit under workspace_dir below. Pinning
+# both explicitly under the same root keeps `scripts/migrate-layout.py`'s
+# `--workspace`/`--data` defaults (~/.myclaw/workspace, ~/.myclaw) correct.
+data_dir = "~/.myclaw"
 workspace_dir = "~/.myclaw/workspace"
 
 [routing.chat]
