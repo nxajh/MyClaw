@@ -45,7 +45,7 @@ impl Tool for AgentResumeTool {
                 },
                 "extra_secs": {
                     "type": "integer",
-                    "description": "Optional fresh budget in seconds. Defaults to the delegation's original timeout; clamped to the agent's max_timeout."
+                    "description": "Optional fresh budget in seconds. Defaults to the delegation's original timeout; clamped to the global 1800s ceiling."
                 }
             },
             "required": ["sub_session_id"]

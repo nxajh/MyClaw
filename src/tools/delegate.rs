@@ -94,7 +94,7 @@ impl Tool for AgentDelegateTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Maximum wall-clock seconds for the sub-agent. Overrides the agent config default (600s). Hard ceiling is 1800s."
+                    "description": "Maximum wall-clock seconds for the sub-agent. Defaults to 1200s if omitted. Authoritative up to the hard ceiling of 1800s — nothing else can override or clamp it lower."
                 }
             },
             "required": ["agent", "task", "mode"]

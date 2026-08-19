@@ -810,7 +810,6 @@ mod tests {
             model: None,
             isolation: AgentIsolation::Shared,
             timeout: None,
-            max_timeout: None,
         }]));
         let manager = Arc::new(SessionManager::in_memory());
         Arc::new(DelegationCoordinator::new(
