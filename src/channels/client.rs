@@ -2737,4 +2737,144 @@ mod tests {
         assert_eq!(queued.len(), 1, "message should land in the full-key bus");
         assert!(queued[0].contains("123456"));
     }
+
+    /// Full-rk receivers (orchestrator replies carry the session key) must
+    /// keep hitting the bus through the exact candidate.
+    #[tokio::test]
+    async fn send_message_full_rk_receiver_hits_bus_directly() {
+        let channel = ClientChannel::new(ClientConfig::default());
+        let full_key = USER_KEY.to_string();
+        channel
+            .session_buses
+            .write()
+            .insert(full_key.clone(), Arc::new(SyncMutex::new(SessionOutputBus::new())));
+
+        let msg = ChannelOutboundMessage::text(USER_KEY, "direct hit");
+        channel.send_message(&msg).await.unwrap();
+
+        let bus = channel.session_buses.read().get(&full_key).unwrap().clone();
+        let queued = bus.lock().drain_messages();
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].contains("direct hit"));
+    }
+
+    /// Legacy key form: the resolver still maps `client:default:ws-3` to the
+    /// same uid as the live identity key. A receiver.id of `ws-3` (a bare
+    /// tail that only exists in the resolver) must resolve through
+    /// routing_keys_for onto the identity bus.
+    #[tokio::test]
+    async fn send_message_legacy_key_resolves_via_resolver_to_identity_bus() {
+        let channel = ClientChannel::new(ClientConfig::default());
+        let resolver = Arc::new(UserResolver::new());
+        resolver.set("client:default:ws-3".to_string(), USER_UID.to_string());
+        resolver.set(USER_KEY.to_string(), USER_UID.to_string());
+        channel.set_user_resolver(resolver);
+
+        // Only the identity-key bus exists — the legacy `ws-3` bus does not.
+        channel
+            .session_buses
+            .write()
+            .insert(USER_KEY.to_string(), Arc::new(SyncMutex::new(SessionOutputBus::new())));
+
+        let msg = ChannelOutboundMessage::text("ws-3", "legacy addressed");
+        channel.send_message(&msg).await.unwrap();
+
+        let bus = channel.session_buses.read().get(USER_KEY).unwrap().clone();
+        let queued = bus.lock().drain_messages();
+        assert_eq!(
+            queued.len(),
+            1,
+            "legacy key must resolve onto the identity bus via the resolver"
+        );
+        assert!(queued[0].contains("legacy addressed"));
+    }
+
+    /// Total miss → Err (not Ok-with-empty). notify_peer relies on this to
+    /// tell the user the peer's channel is unreachable instead of lying
+    /// about a delivered /link code.
+    #[tokio::test]
+    async fn send_message_unknown_recipient_returns_err() {
+        let channel = ClientChannel::new(ClientConfig::default());
+        channel
+            .session_buses
+            .write()
+            .insert(USER_KEY.to_string(), Arc::new(SyncMutex::new(SessionOutputBus::new())));
+
+        let msg = ChannelOutboundMessage::text("web-user:nobody", "should not deliver");
+        let err = channel
+            .send_message(&msg)
+            .await
+            .expect_err("total candidate miss must be an Err");
+        assert!(
+            err.to_string().contains("no live client bus"),
+            "unexpected error text: {err}"
+        );
+
+        // Nothing was pushed anywhere.
+        let bus = channel.session_buses.read().get(USER_KEY).unwrap().clone();
+        assert!(bus.lock().drain_messages().is_empty());
+    }
+
+    /// Cross-channel keys folded into the same uid (e.g. `telegram:*` from a
+    /// /link) must never become client bus candidates: the telegram bus does
+    /// not exist in this channel, and prefixing it would be wrong.
+    #[test]
+    fn bus_key_candidates_skips_cross_channel_keys() {
+        let resolver = Arc::new(UserResolver::new());
+        resolver.set(USER_KEY.to_string(), USER_UID.to_string());
+        resolver.set("telegram:default:12345".to_string(), USER_UID.to_string());
+        let holder: Arc<OnceLock<Arc<UserResolver>>> = Arc::new(OnceLock::new());
+        let _ = holder.set(resolver);
+
+        // Bare tail: candidates = [tail, client:default:tail] plus any
+        // client:default:* key of the same uid — never the telegram key.
+        let bare = bus_key_candidates(&holder, "web-user:default");
+        assert_eq!(
+            bare,
+            vec![
+                "web-user:default".to_string(),
+                USER_KEY.to_string(),
+            ],
+            "cross-channel keys must not appear: {bare:?}"
+        );
+
+        // Legacy key with a client:default sibling in the resolver.
+        let resolver2 = Arc::new(UserResolver::new());
+        resolver2.set("client:default:ws-3".to_string(), USER_UID.to_string());
+        resolver2.set(USER_KEY.to_string(), USER_UID.to_string());
+        resolver2.set("telegram:default:12345".to_string(), USER_UID.to_string());
+        let holder2: Arc<OnceLock<Arc<UserResolver>>> = Arc::new(OnceLock::new());
+        let _ = holder2.set(resolver2);
+        let legacy = bus_key_candidates(&holder2, "ws-3");
+        assert_eq!(
+            legacy,
+            vec![
+                "ws-3".to_string(),
+                "client:default:ws-3".to_string(),
+                USER_KEY.to_string(),
+            ],
+            "expected exact → normalized → resolver identity key: {legacy:?}"
+        );
+        assert!(!legacy.iter().any(|k| k.starts_with("telegram:")));
+    }
+
+    /// create_stream resolves through the same candidate list: a bare tail
+    /// must find the identity bus, and a miss must yield None (caller falls
+    /// back to non-streaming send).
+    #[test]
+    fn create_stream_resolves_bare_tail_and_misses_to_none() {
+        let channel = ClientChannel::new(ClientConfig::default());
+        channel
+            .session_buses
+            .write()
+            .insert(USER_KEY.to_string(), Arc::new(SyncMutex::new(SessionOutputBus::new())));
+
+        let stream = channel.create_stream("web-user:default");
+        assert!(stream.is_some(), "bare tail should resolve the identity bus");
+
+        assert!(
+            channel.create_stream("web-user:ghost").is_none(),
+            "miss must return None"
+        );
+    }
 }
