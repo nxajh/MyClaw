@@ -509,10 +509,24 @@ async fn build_tools(
     Arc<crate::tools::FriendToolsCtx>,
 ) {
     let mut tools = ToolRegistry::new();
-    let builtin = crate::tools::builtin_tools(Some(config.sessions_root()));
+    let (builtin, shell_registry) = crate::tools::builtin_tools(Some(config.sessions_root()));
     for tool in builtin {
         tools.register(tool);
     }
+
+    // Reconcile tracked shell processes against restart reality before any
+    // tool call can reach the registry — see `tools::shell` module docs.
+    // `myclaw restart` (SIGUSR1 hot switch) preserves shell children;
+    // anything else (`myclaw stop`, systemctl, a crash) goes through this
+    // deployment's `KillMode=control-group` and kills them along with the
+    // daemon, so those entries are marked lost rather than probed for
+    // liveness.
+    crate::tools::shell::adopt_after_restart(
+        &config.sessions_root(),
+        &shell_registry,
+        crate::hot_switch::is_hot_switch(),
+    )
+    .await;
 
     // AskUserTool resolves the channel via `Session::resolve_channel()` at
     // execute time — no per-tool channels map. Bound to the shared

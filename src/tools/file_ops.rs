@@ -7,9 +7,21 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// Resolve `path` to an absolute path and check it stays within the user's
-/// home directory (or current working directory for relative paths).
-/// Returns `Err` with a descriptive message if the resolved path would escape.
+/// Resolve `path` to a clean absolute path (expanding `.`/`..` components,
+/// without requiring the path to exist yet, so this works for writes too).
+///
+/// This used to also reject anything outside `$HOME`/cwd, but that boundary
+/// provided no real protection: the `shell` tool is granted at the exact
+/// same trust tier (see `agents::tool_executor::is_write_tool` /
+/// `needs_approval` — shell has no destination-path restriction of its own,
+/// only a small deny-list of process/service-management commands), so any
+/// caller that could reach `file_write` could equally reach an unrestricted
+/// `echo ... > /anywhere` via `shell`. The only thing the boundary caught
+/// was a well-behaved model passing a wrong relative path by mistake, at
+/// the cost of blocking legitimate writes outside the home directory (e.g.
+/// a mounted data disk). `crate::config::is_path_protected` (checked by
+/// callers) still denies specific sensitive paths like `~/.ssh/**`
+/// regardless of location.
 fn validate_path(path: &str) -> anyhow::Result<std::path::PathBuf> {
     let p = std::path::Path::new(path);
     let abs = if p.is_absolute() {
@@ -18,7 +30,6 @@ fn validate_path(path: &str) -> anyhow::Result<std::path::PathBuf> {
         std::env::current_dir()?.join(p)
     };
 
-    // Normalize without requiring the path to exist yet (for writes).
     let mut normalized = std::path::PathBuf::new();
     for component in abs.components() {
         match component {
@@ -28,20 +39,6 @@ fn validate_path(path: &str) -> anyhow::Result<std::path::PathBuf> {
             std::path::Component::CurDir => {}
             c => normalized.push(c),
         }
-    }
-
-    // Disallow paths outside home or cwd — catches ../../etc/passwd patterns.
-    let home = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("/home"));
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    if !normalized.starts_with(&home) && !normalized.starts_with(&cwd) {
-        anyhow::bail!(
-            "path '{}' resolves outside allowed directories (home: {}, cwd: {})",
-            path,
-            home.display(),
-            cwd.display()
-        );
     }
     Ok(normalized)
 }
