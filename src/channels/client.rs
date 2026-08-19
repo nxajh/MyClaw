@@ -41,6 +41,11 @@ use crate::config::channel::ClientConfig;
 
 // ── Session Output Bus ──────────────────────────────────────────────────────
 
+struct Subscriber {
+    conn_id: String,
+    sender: mpsc::Sender<String>,
+}
+
 /// Per-session output bus. Decouples turn execution from WebSocket connection
 /// lifetime. Survives disconnects; buffers events and messages for replay on
 /// reconnect. This is the single source of truth for output delivery — the WS
@@ -52,8 +57,9 @@ struct SessionOutputBus {
     event_buffer_capacity: usize,
     /// Non-streaming messages (send_message output) queued while no subscriber.
     message_queue: std::collections::VecDeque<String>,
-    /// Active WS subscriber: raw text mpsc → outgoing forwarder → ws_sink.
-    ws_sender: Option<mpsc::Sender<String>>,
+    /// Active WS subscribers: raw text mpsc → outgoing forwarder → ws_sink.
+    /// Multiple connections of the same identity may subscribe simultaneously.
+    subscribers: Vec<Subscriber>,
     /// Active session_id for event JSON injection (frontend filtering).
     session_id: String,
     /// Current turn's cancel token. Recreated each turn by create_stream.
@@ -68,18 +74,33 @@ impl SessionOutputBus {
             event_buffer: std::collections::VecDeque::new(),
             event_buffer_capacity: 256,
             message_queue: std::collections::VecDeque::new(),
-            ws_sender: None,
+            subscribers: Vec::new(),
             session_id: String::new(),
             cancel: CancellationToken::new(),
             turn_active: false,
         }
     }
 
-    /// Install a WS subscriber. Call drain_messages / drain_events afterwards
-    /// to replay buffered content.
-    fn subscribe(&mut self, ws_sender: mpsc::Sender<String>, session_id: String) {
-        self.ws_sender = Some(ws_sender);
+    /// Install a WS subscriber. Idempotent per conn_id (replaces the sender).
+    /// Returns true when the bus transitioned 0 -> 1 subscribers — the caller
+    /// should then replay buffered content (drain_messages / drain_events).
+    fn subscribe(
+        &mut self,
+        conn_id: String,
+        ws_sender: mpsc::Sender<String>,
+        session_id: String,
+    ) -> bool {
+        let was_empty = self.subscribers.is_empty();
+        if let Some(sub) = self.subscribers.iter_mut().find(|s| s.conn_id == conn_id) {
+            sub.sender = ws_sender;
+        } else {
+            self.subscribers.push(Subscriber {
+                conn_id,
+                sender: ws_sender,
+            });
+        }
         self.session_id = session_id;
+        was_empty
     }
 
     /// Drain queued non-streaming messages for replay (clears the queue).
@@ -92,33 +113,33 @@ impl SessionOutputBus {
         self.event_buffer.drain(..).collect()
     }
 
-    /// Detach subscriber (on WS disconnect). Bus survives for replay.
-    fn detach(&mut self) {
-        self.ws_sender = None;
+    /// Detach one subscriber (on WS disconnect). Bus survives for replay.
+    fn detach(&mut self, conn_id: &str) {
+        self.subscribers.retain(|s| s.conn_id != conn_id);
     }
 
-    /// Push a TurnEvent. If subscriber is online, forwards directly via
-    /// try_send (non-blocking). If offline, buffers for replay.
-    /// **Never fails** — this is the core decoupling invariant.
+    /// Push a TurnEvent. If subscribers are online, forwards directly via
+    /// try_send (non-blocking); failed subscribers are dropped. If offline,
+    /// buffers for replay. **Never fails** — this is the core decoupling
+    /// invariant.
     fn push_event(&mut self, event: TurnEvent) {
-        if self.ws_sender.is_some() {
-            if let Some(ref tx) = self.ws_sender {
-                let versioned = event.versioned();
-                let mut json_val = match serde_json::to_value(&versioned) {
-                    Ok(v) => v,
-                    Err(_) => return,
-                };
-                if let serde_json::Value::Object(ref mut map) = json_val {
-                    if !self.session_id.is_empty() {
-                        map.insert(
-                            "session_id".to_string(),
-                            serde_json::Value::String(self.session_id.clone()),
-                        );
-                    }
+        if !self.subscribers.is_empty() {
+            let versioned = event.versioned();
+            let mut json_val = match serde_json::to_value(&versioned) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            if let serde_json::Value::Object(ref mut map) = json_val {
+                if !self.session_id.is_empty() {
+                    map.insert(
+                        "session_id".to_string(),
+                        serde_json::Value::String(self.session_id.clone()),
+                    );
                 }
-                let json = json_val.to_string();
-                let _ = tx.try_send(json);
             }
+            let json = json_val.to_string();
+            self.subscribers
+                .retain(|sub| sub.sender.try_send(json.clone()).is_ok());
         } else {
             if self.event_buffer.len() >= self.event_buffer_capacity {
                 self.event_buffer.pop_front();
@@ -128,13 +149,22 @@ impl SessionOutputBus {
     }
 
     /// Push a non-streaming message (send_message output).
-    /// If subscriber is online, forwards immediately; else queues for replay.
+    /// If subscribers are online, forwards immediately; else queues for replay.
     fn push_message(&mut self, json: String) {
-        if let Some(ref tx) = self.ws_sender {
-            if tx.try_send(json.clone()).is_ok() {
+        if !self.subscribers.is_empty() {
+            let mut delivered = false;
+            self.subscribers.retain(|sub| match sub.sender.try_send(json.clone()) {
+                Ok(()) => {
+                    delivered = true;
+                    true
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => true,
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            });
+            if delivered {
                 return;
             }
-            // Channel full — fall through to queue
+            // All subscribers full or closed — fall through to queue
         }
         self.message_queue.push_back(json);
     }
@@ -593,11 +623,19 @@ impl ClientChannel {
                                                         };
                                                         let (queued_msgs, replay_events) = {
                                                             let mut bg = bus.lock();
-                                                            bg.subscribe(
+                                                            let first = bg.subscribe(
+                                                                conn_id_clone.clone(),
                                                                 ws_sender.clone(),
                                                                 session_id.clone(),
                                                             );
-                                                            (bg.drain_messages(), bg.drain_events())
+                                                            if first {
+                                                                (
+                                                                    bg.drain_messages(),
+                                                                    bg.drain_events(),
+                                                                )
+                                                            } else {
+                                                                (Vec::new(), Vec::new())
+                                                            }
                                                         };
                                                         for msg_json in queued_msgs {
                                                             let _ = ws_sender.send(msg_json).await;
@@ -803,11 +841,11 @@ impl ClientChannel {
                                                         .clone()
                                                 };
                                                 let mut bg = bus.lock();
-                                                if bg.ws_sender.is_none() {
-                                                    bg.subscribe(
-                                                        ws_sender.clone(),
-                                                        fwd_session_id.clone(),
-                                                    );
+                                                if bg.subscribe(
+                                                    conn_id_clone.clone(),
+                                                    ws_sender.clone(),
+                                                    fwd_session_id.clone(),
+                                                ) {
                                                     Some((bg.drain_messages(), bg.drain_events()))
                                                 } else {
                                                     None
@@ -960,7 +998,7 @@ impl ClientChannel {
                                 let buses = session_buses_clone.read();
                                 for sk in &owned_keys {
                                     if let Some(bus) = buses.get(sk) {
-                                        bus.lock().detach();
+                                        bus.lock().detach(&conn_id_clone);
                                     }
                                 }
                             }
@@ -1067,7 +1105,10 @@ impl Channel for ClientChannel {
             // (base64 data may be large / stale) — only text is queued.
             use base64::Engine;
             // Check if subscriber is online before encoding files
-            let subscriber_online = bus.lock().ws_sender.is_some();
+            let subscriber_online = {
+                let bg = bus.lock();
+                !bg.subscribers.is_empty()
+            };
             if !subscriber_online {
                 tracing::debug!(recipient = %recipient, "subscriber offline, skipping file messages");
                 return Ok(OutboundSendResult::empty());
