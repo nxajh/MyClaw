@@ -205,9 +205,9 @@ pub struct ClientChannel {
     tool_specs: Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
     /// Workspace directory for memory API (set once after construction).
     workspace_dir: Arc<OnceLock<std::path::PathBuf>>,
-    /// Knowledge dir ({base_dir}/memory) — single flat memory pool where
+    /// Memory root ({base_dir}/memory) — single flat memory pool where
     /// ownership is a frontmatter attribute (set once after construction).
-    knowledge_dir: Arc<OnceLock<std::path::PathBuf>>,
+    memory_root: Arc<OnceLock<std::path::PathBuf>>,
     /// Config file path for config read/write API (set once after construction).
     config_path: Arc<OnceLock<std::path::PathBuf>>,
     /// Skill manager for skills API (set once after construction). The
@@ -234,7 +234,7 @@ impl ClientChannel {
             session_manager: Arc::new(OnceLock::new()),
             tool_specs: Arc::new(RwLock::new(Vec::new())),
             workspace_dir: Arc::new(OnceLock::new()),
-            knowledge_dir: Arc::new(OnceLock::new()),
+            memory_root: Arc::new(OnceLock::new()),
             config_path: Arc::new(OnceLock::new()),
             skill_manager: Arc::new(OnceLock::new()),
             provider_registry: Arc::new(OnceLock::new()),
@@ -263,9 +263,9 @@ impl ClientChannel {
         let _ = self.workspace_dir.set(dir);
     }
 
-    /// Set the knowledge dir (called from daemon.rs after construction).
-    pub fn set_knowledge_dir(&self, dir: std::path::PathBuf) {
-        let _ = self.knowledge_dir.set(dir);
+    /// Set the memory root (called from daemon.rs after construction).
+    pub fn set_memory_root(&self, dir: std::path::PathBuf) {
+        let _ = self.memory_root.set(dir);
     }
 
     /// Set the config file path (called from daemon.rs after construction).
@@ -327,7 +327,7 @@ impl ClientChannel {
         let session_manager = self.session_manager.clone();
         let tool_specs = self.tool_specs.clone();
         let workspace_dir = self.workspace_dir.clone();
-        let knowledge_dir = self.knowledge_dir.clone();
+        let memory_root = self.memory_root.clone();
         let config_path = self.config_path.clone();
         let skill_manager = self.skill_manager.clone();
         let provider_registry = self.provider_registry.clone();
@@ -412,7 +412,7 @@ impl ClientChannel {
                         let session_manager_clone = session_manager.clone();
                         let tool_specs_clone = tool_specs.clone();
                         let workspace_dir_clone = workspace_dir.clone();
-                        let knowledge_dir_clone = knowledge_dir.clone();
+                        let memory_root_clone = memory_root.clone();
                         let config_path_clone = config_path.clone();
                         let skill_manager_clone = skill_manager.clone();
                         let provider_registry_clone = provider_registry.clone();
@@ -929,7 +929,7 @@ impl ClientChannel {
                                                     session_manager: &session_manager_clone,
                                                     tool_specs: &tool_specs_clone,
                                                     workspace_dir: &workspace_dir_clone,
-                                                    knowledge_dir: &knowledge_dir_clone,
+                                                    memory_root: &memory_root_clone,
                                                     config_path: &config_path_clone,
                                                     skill_manager: &skill_manager_clone,
                                                     provider_registry: &provider_registry_clone,
@@ -1320,7 +1320,7 @@ struct ApiContext<'a> {
     session_manager: &'a Arc<OnceLock<Arc<crate::agents::SessionManager>>>,
     tool_specs: &'a Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
     workspace_dir: &'a Arc<OnceLock<std::path::PathBuf>>,
-    knowledge_dir: &'a Arc<OnceLock<std::path::PathBuf>>,
+    memory_root: &'a Arc<OnceLock<std::path::PathBuf>>,
     config_path: &'a Arc<OnceLock<std::path::PathBuf>>,
     skill_manager: &'a Arc<OnceLock<Arc<RwLock<crate::agents::SkillManager>>>>,
     provider_registry: &'a Arc<OnceLock<Arc<dyn crate::providers::ProviderRegistry>>>,
@@ -1328,18 +1328,18 @@ struct ApiContext<'a> {
 }
 
 /// Resolve the memory directory for a scope.
-/// P1-B2: single flat knowledge dir for both scopes — ownership is a
+/// P1-B2: single flat memory root for both scopes — ownership is a
 /// frontmatter attribute (`scope` + `user_id`), not a path segment.
-/// Falls back to the legacy `{workspace}/memory` when the knowledge dir
+/// Falls back to the legacy `{workspace}/memory` when the memory root
 /// handle was not installed (older embedders / tests).
 fn memory_scope_dir(
     workspace: &std::path::Path,
     scope: &str,
     uid: &str,
-    knowledge_dir: Option<&std::path::Path>,
+    memory_root: Option<&std::path::Path>,
 ) -> std::path::PathBuf {
     let _ = (scope, uid);
-    match knowledge_dir {
+    match memory_root {
         Some(kd) => kd.to_path_buf(),
         None => workspace.join(crate::memory::MEMORY_DIR_NAME),
     }
@@ -1603,7 +1603,7 @@ fn handle_api_request(
 
         "memory.list" => {
             let scope = params["scope"].as_str().unwrap_or("all");
-            match ctx.knowledge_dir.get().cloned().or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME))) {
+            match ctx.memory_root.get().cloned().or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME))) {
                 Some(dir) => {
                     let dir = dir.as_path();
                     let uid = memory_user_id(ctx);
@@ -1680,7 +1680,7 @@ fn handle_api_request(
             };
             let content = params["content"].as_str().unwrap_or("");
             let dir_opt = ctx
-                .knowledge_dir
+                .memory_root
                 .get()
                 .cloned()
                 .or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME)));
@@ -1750,7 +1750,7 @@ fn handle_api_request(
             }
             let scope = params["scope"].as_str();
             let dir_opt = ctx
-                .knowledge_dir
+                .memory_root
                 .get()
                 .cloned()
                 .or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME)));
@@ -1831,7 +1831,7 @@ fn handle_api_request(
                 }).to_string();
             }
             let dir_opt = ctx
-                .knowledge_dir
+                .memory_root
                 .get()
                 .cloned()
                 .or_else(|| ctx.workspace_dir.get().map(|ws| ws.join(crate::memory::MEMORY_DIR_NAME)));
@@ -2465,7 +2465,7 @@ mod tests {
             session_manager: &sm,
             tool_specs: &ts,
             workspace_dir: &wd,
-            knowledge_dir: &kd,
+            memory_root: &kd,
             config_path: &cp,
             skill_manager: &sk,
             provider_registry: &pr,
@@ -2689,7 +2689,7 @@ mod tests {
             session_manager: &sm,
             tool_specs: &ts,
             workspace_dir: &wd,
-            knowledge_dir: &kd,
+            memory_root: &kd,
             config_path: &cp,
             skill_manager: &sk,
             provider_registry: &pr,

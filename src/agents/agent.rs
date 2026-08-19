@@ -284,10 +284,10 @@ impl Agent {
                         &history_clone,
                     );
                     session.attachments.diff_autonomy(&permission_mode, &history_clone);
-                    let knowledge_dir = &runtime.defaults.prompt.knowledge_dir;
+                    let memory_root = &runtime.defaults.prompt.memory_root;
                     let memory_entries: Vec<crate::memory::IndexEntry> =
-                        if !knowledge_dir.is_empty() {
-                            let memory_dir = std::path::Path::new(knowledge_dir);
+                        if !memory_root.is_empty() {
+                            let memory_dir = std::path::Path::new(memory_root);
                             let files = crate::memory::scan_memory_files(memory_dir);
                             files.iter().map(crate::memory::IndexEntry::from).collect()
                         } else {
@@ -632,7 +632,7 @@ impl Agent {
                         tool_registry: Arc::clone(&runtime.tools),
                         session_owner: session.owner.clone(),
                         session_id: session.id.clone(),
-                        knowledge_dir: runtime.defaults.prompt.knowledge_dir.clone(),
+                        memory_root: runtime.defaults.prompt.memory_root.clone(),
                         registry: Arc::clone(&runtime.providers) as Arc<dyn ProviderRegistry>,
                     };
                     tokio::spawn(async move {

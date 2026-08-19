@@ -40,8 +40,8 @@ pub struct SystemPromptConfig {
     /// Not read by the builder itself — kept here as runtime info that
     /// `build_runtime` exposes to the LLM as part of the working environment.
     pub workspace_dir: String,
-    /// Knowledge directory (contains memory/*.md files).
-    pub knowledge_dir: String,
+    /// Memory root directory (contains memory/*.md files).
+    pub memory_root: String,
     /// Permission mode — controls tool access level.
     pub permission_mode: PermissionMode,
     /// Run mode — controls execution context rules.
@@ -61,7 +61,7 @@ impl Default for SystemPromptConfig {
         Self {
             data_dir: String::new(),
             workspace_dir: String::new(),
-            knowledge_dir: String::new(),
+            memory_root: String::new(),
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
             identity_header: None,

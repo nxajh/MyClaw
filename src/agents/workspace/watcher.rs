@@ -115,14 +115,14 @@ impl WorkspaceWatcher {
     pub fn spawn_managed(
         skills_dir: PathBuf,
         agents_dir: PathBuf,
-        knowledge_dir: &Path,
+        memory_root: &Path,
         agent_registry: crate::agents::AgentRegistry,
         skill_manager: Arc<RwLock<super::skills::SkillManager>>,
     ) -> Result<ManagedWatcherGuard> {
         let watcher = Self::new(
             skills_dir.clone(),
             agents_dir.clone(),
-            knowledge_dir,
+            memory_root,
         )?;
         let mut rx = watcher.rx.clone();
 

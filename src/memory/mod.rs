@@ -101,10 +101,10 @@ pub fn should_inject(inject: &str) -> bool {
 
 // ── Directory management ───────────────────────────────────────────────────
 
-/// Ensure the knowledge directory exists.
-/// Returns the knowledge directory path.
-pub fn ensure_memory_dir(knowledge_dir: &str) -> std::io::Result<std::path::PathBuf> {
-    let memory_dir = Path::new(knowledge_dir);
+/// Ensure the memory root directory exists.
+/// Returns the memory root path.
+pub fn ensure_memory_dir(memory_root: &str) -> std::io::Result<std::path::PathBuf> {
+    let memory_dir = Path::new(memory_root);
     fs::create_dir_all(memory_dir)?;
     Ok(memory_dir.to_path_buf())
 }

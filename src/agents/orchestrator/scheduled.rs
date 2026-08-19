@@ -294,16 +294,16 @@ async fn send_to_target_internal(
 pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
     use crate::agents::memory_distill::{DistillState, has_pending_user_memories, run_memory_distill};
 
-    let knowledge_dir = orch.runtime.defaults.prompt.knowledge_dir.clone();
-    if knowledge_dir.is_empty() {
-        tracing::warn!("memory_distill: knowledge_dir not configured, skipped");
+    let memory_root = orch.runtime.defaults.prompt.memory_root.clone();
+    if memory_root.is_empty() {
+        tracing::warn!("memory_distill: memory_root not configured, skipped");
         return;
     }
 
     // Backoff: after 3 consecutive failures, pause for 2 hours.
-    // P1-B2: distill state is runtime state — sibling of the knowledge dir
+    // P1-B2: distill state is runtime state — sibling of the memory root
     // ({base_dir}/state/memory/distill.json), not inside the memory pool.
-    let state_dir = std::path::Path::new(&knowledge_dir)
+    let state_dir = std::path::Path::new(&memory_root)
         .parent()
         .map(|p| p.join("state").join("memory"))
         .unwrap_or_else(|| std::path::PathBuf::from("state/memory"));
@@ -317,7 +317,7 @@ pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
     }
 
     // Only distill when at least one user memory changed since the last pass.
-    if !has_pending_user_memories(&knowledge_dir, state.last_distill_ts.as_deref()) {
+    if !has_pending_user_memories(&memory_root, state.last_distill_ts.as_deref()) {
         tracing::debug!("memory_distill: no new user memories, skipped");
         return;
     }
@@ -366,7 +366,7 @@ pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
         provider,
         tool_specs,
         tool_registry: Arc::clone(&orch.runtime.tools),
-        knowledge_dir,
+        memory_root,
         registry: Arc::clone(&orch.runtime.providers) as Arc<dyn crate::providers::ProviderRegistry>,
     };
 

@@ -50,9 +50,9 @@ pub struct DistillInput {
     pub tool_specs: Vec<ToolSpec>,
     /// Tool registry for actual execution.
     pub tool_registry: Arc<ToolRegistry>,
-    /// Knowledge dir ({base_dir}/memory) — the single flat memory pool;
+    /// Memory root ({base_dir}/memory) — the single flat memory pool;
     /// user-layer entries are selected by frontmatter `scope=user` (P1-B2).
-    pub knowledge_dir: String,
+    pub memory_root: String,
     /// Provider registry for resolving model config (reasoning flag).
     pub registry: Arc<dyn ProviderRegistry>,
 }
@@ -173,14 +173,14 @@ impl DistillState {
 
 /// Whether any per-user memory file was modified after `last_distill_ts`.
 /// A `None` last-distill timestamp means "never distilled" → pending.
-pub fn has_pending_user_memories(knowledge_dir: &str, last_distill_ts: Option<&str>) -> bool {
+pub fn has_pending_user_memories(memory_root: &str, last_distill_ts: Option<&str>) -> bool {
     let last_distill = last_distill_ts
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
 
-    // P1-B2: single flat knowledge dir; user-layer entries are identified
+    // P1-B2: single flat memory root; user-layer entries are identified
     // by frontmatter scope=user (file mtime check does not need parsing).
-    let files = crate::memory::scan_memory_files(std::path::Path::new(knowledge_dir));
+    let files = crate::memory::scan_memory_files(std::path::Path::new(memory_root));
     for f in files {
         if f.scope.as_deref() != Some("user") {
             continue;
@@ -203,7 +203,7 @@ pub fn has_pending_user_memories(knowledge_dir: &str, last_distill_ts: Option<&s
 
 /// Collect per-user memory files into an anonymized input document.
 /// Returns (user_count, file_count, document).
-fn collect_user_memories(knowledge_dir: &str) -> (usize, usize, String) {
+fn collect_user_memories(memory_root: &str) -> (usize, usize, String) {
     let mut batches: Vec<(String, String)> = Vec::new();
     let mut total_files = 0usize;
     let mut total_chars = 0usize;
@@ -212,7 +212,7 @@ fn collect_user_memories(knowledge_dir: &str) -> (usize, usize, String) {
     // P1-B2: group flat-dir user-layer files by frontmatter user_id.
     let mut by_user: std::collections::BTreeMap<String, Vec<crate::memory::MemoryFile>> =
         std::collections::BTreeMap::new();
-    for f in crate::memory::scan_memory_files(std::path::Path::new(knowledge_dir)) {
+    for f in crate::memory::scan_memory_files(std::path::Path::new(memory_root)) {
         if f.scope.as_deref() != Some("user") {
             continue;
         }
@@ -478,7 +478,7 @@ fn build_rule_synthesis_prompt(
 }
 
 async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
-    let (user_count, file_count, input_doc) = collect_user_memories(&input.knowledge_dir);
+    let (user_count, file_count, input_doc) = collect_user_memories(&input.memory_root);
     if user_count == 0 {
         tracing::debug!("memory_distill: no user memories to distill");
         return Ok(0);
@@ -504,10 +504,10 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
             }
         });
 
-    let existing_index = build_existing_agent_index(&input.knowledge_dir);
+    let existing_index = build_existing_agent_index(&input.memory_root);
 
     // Snapshot agent memory state before pass 1 so we can diff after.
-    let before = snapshot_agent_memories(&input.knowledge_dir);
+    let before = snapshot_agent_memories(&input.memory_root);
 
     // ── Pass 1: extract facts/scenarios/reference from user memories ──
     tracing::info!("memory_distill: pass 1 (facts/scenarios)");
@@ -521,15 +521,15 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
         Arc::clone(&input.tool_registry),
         &session_shell,
         &thinking,
-        &input.knowledge_dir,
+        &input.memory_root,
     )
     .await?;
 
     let mut total_written = pass1_written;
 
     // ── Pass 2: synthesize rules from newly written agent memories ──
-    let after = snapshot_agent_memories(&input.knowledge_dir);
-    let new_memories = diff_agent_memories(&before, &after, &input.knowledge_dir);
+    let after = snapshot_agent_memories(&input.memory_root);
+    let new_memories = diff_agent_memories(&before, &after, &input.memory_root);
 
     if !new_memories.is_empty() {
         tracing::info!(
@@ -542,7 +542,7 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
             .collect::<String>();
 
         // Refresh index to include pass-1 writes.
-        let updated_index = build_existing_agent_index(&input.knowledge_dir);
+        let updated_index = build_existing_agent_index(&input.memory_root);
         let rule_prompt = build_rule_synthesis_prompt(&new_memories_doc, &updated_index);
         let messages2 = vec![ChatMessage::user_text(rule_prompt)];
         let pass2_written = run_distill_rounds(
@@ -553,7 +553,7 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
             Arc::clone(&input.tool_registry),
             &session_shell,
             &thinking,
-            &input.knowledge_dir,
+            &input.memory_root,
         )
         .await?;
         total_written += pass2_written;

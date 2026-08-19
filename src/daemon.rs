@@ -495,7 +495,7 @@ async fn build_tools(
     skills: &Arc<parking_lot::RwLock<SkillManager>>,
     shared_scheduler: &crate::agents::SharedScheduler,
     config: &crate::config::AppConfig,
-    _knowledge_dir: &str,
+    _memory_root: &str,
     user_resolver: &Arc<crate::agents::UserResolver>,
     ask_router: Arc<crate::agents::AskRouter>,
     known_users: &Arc<crate::agents::KnownUsersRegistry>,
@@ -558,9 +558,9 @@ async fn build_tools(
         shared_scheduler,
     ))));
 
-    // Memory tools — P1-B2: single flat knowledge dir ({base_dir}/memory),
+    // Memory tools — P1-B2: single flat memory root ({base_dir}/memory),
     // ownership expressed via frontmatter `scope`/`user_id` (not by path).
-    let kd = config.knowledge_dir.clone();
+    let kd = config.memory_root();
     let r = Arc::clone(user_resolver);
     tools.register(Arc::new(crate::tools::MemoryListTool::new(
         kd.clone(),
@@ -829,12 +829,12 @@ fn build_prompt_config(
     prompt: &crate::config::agent::PromptConfig,
     data_dir: &std::path::Path,
     workspace_dir: &std::path::Path,
-    knowledge_dir: &std::path::Path,
+    memory_root: &std::path::Path,
 ) -> SystemPromptConfig {
     SystemPromptConfig {
         data_dir: data_dir.to_string_lossy().to_string(),
         workspace_dir: workspace_dir.to_string_lossy().to_string(),
-        knowledge_dir: knowledge_dir.to_string_lossy().to_string(),
+        memory_root: memory_root.to_string_lossy().to_string(),
         permission_mode: agent.permission_mode,
         run_mode: RunMode::Interactive,
         max_chars: prompt.max_chars,
@@ -925,9 +925,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tracing::debug!(pid = %std::process::id(), path = %pid_file.display(), "PID file written");
     }
 
-    // Ensure knowledge directory exists
-    if let Err(e) = crate::memory::ensure_memory_dir(config.knowledge_dir.to_str().unwrap_or(".")) {
-        tracing::warn!(err = %e, "failed to create knowledge directory");
+    // Ensure memory root exists
+    if let Err(e) = crate::memory::ensure_memory_dir(config.memory_root().to_str().unwrap_or(".")) {
+        tracing::warn!(err = %e, "failed to create memory root");
     }
 
     // ── RFC §6 数据迁移（启动自动）──────────────────────────────────────────
@@ -1137,7 +1137,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         &skills_arc,
         &shared_scheduler,
         &config,
-        config.knowledge_dir.to_str().unwrap_or("."),
+        config.memory_root().to_str().unwrap_or("."),
         &user_resolver,
         Arc::clone(&ask_router),
         &known_users,
@@ -1190,7 +1190,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let _watcher = crate::agents::WorkspaceWatcher::spawn_managed(
         config.skills_root(),
         config.agents_root(),
-        &config.knowledge_dir,
+        &config.memory_root(),
         sub_agent_registry.as_ref().clone(),
         skills_arc.clone(),
     )?;
@@ -1378,7 +1378,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             cc.set_session_manager(session_manager.clone());
             cc.set_tool_specs(tools_arc.all_tools().iter().map(|t| t.spec()).collect());
             cc.set_workspace_dir(config.workspace_dir.clone());
-            cc.set_knowledge_dir(config.knowledge_dir.clone());
+            cc.set_memory_root(config.memory_root());
             cc.set_config_path(config.config_path.clone());
             cc.set_skill_manager(skills_arc.clone());
             cc.set_provider_registry(registry_arc.clone());
@@ -1427,7 +1427,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         &config.prompt,
         &config.base_dir,
         &config.workspace_dir,
-        &config.knowledge_dir,
+        &config.memory_root(),
     );
     let mcp_manager_arc = Arc::new(mcp_manager);
 
@@ -1453,7 +1453,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Vec::new(),
             config.skills_root(),
             config.agents_root(),
-            config.knowledge_dir.to_string_lossy().to_string(),
+            config.memory_root().to_string_lossy().to_string(),
             config.prompt.timezone_offset,
         );
         let context_engine = Arc::new(crate::agents::context_engine::ContextEngine::new(

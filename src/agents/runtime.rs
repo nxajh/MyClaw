@@ -34,7 +34,7 @@ use super::tool_registry::ToolRegistry;
 pub struct RuntimeDefaults {
     /// Default permission mode (overridden per turn by SessionOverride).
     pub permission_mode: PermissionMode,
-    /// Base prompt config — workspace/knowledge dirs (as strings, used
+    /// Base prompt config — workspace dir / memory root (as strings, used
     /// by SystemPromptBuilder + file-tool path resolution), identity
     /// header, native_tools, …
     pub prompt: SystemPromptConfig,

@@ -55,7 +55,7 @@
 //! - **base dir**（`base_dir`，默认 `~/.myclaw`）：系统数据库 +
 //!   系统配置 + 运行时状态。daemon 启动依赖的实体（`sessions/`、`users/`、
 //!   `jobs/`、`memory/`、`agents/`、`skills/`、`backups/`、`state/`）全部
-//!   在这里。派生路径见 [`AppConfig::sessions_root`] 等方法。
+//!   在这里。派生路径见 [`AppConfig::sessions_root`] / [`AppConfig::memory_root`] 等方法。
 //! - **workspace dir**（`workspace_dir`，默认 `{base_dir}/workspace`）：agent
 //!   工作台（cwd、代码仓库、过程产物）。daemon 启动不依赖其中任何东西，
 //!   可整体清理重建。
@@ -98,10 +98,6 @@ struct RawConfig {
     /// 默认 `{base_dir}/workspace`。
     #[serde(default)]
     workspace_dir: Option<String>,
-
-    /// 知识库目录路径。默认为 {base_dir}/memory（已弃用显式配置）。
-    #[serde(default)]
-    knowledge_dir: Option<String>,
 
     /// Provider configurations.
     #[serde(default)]
@@ -385,8 +381,6 @@ pub struct AppConfig {
     /// Workspace directory (absolute path) — agent working area (process
     /// artifacts, repositories). Defaults to `{base_dir}/workspace`.
     pub workspace_dir: PathBuf,
-    /// Knowledge directory (absolute path). Defaults to {base_dir}/memory.
-    pub knowledge_dir: PathBuf,
     /// Path to the config file.
     pub config_path: PathBuf,
     /// Provider configurations.
@@ -451,6 +445,11 @@ impl AppConfig {
     /// Job (cron/webhook) entity root: `{base_dir}/jobs`.
     pub fn jobs_root(&self) -> PathBuf {
         self.base_dir.join("jobs")
+    }
+
+    /// Memory wiki root: `{base_dir}/memory`.
+    pub fn memory_root(&self) -> PathBuf {
+        self.base_dir.join("memory")
     }
 
     /// Skills root: `{base_dir}/skills`.
@@ -519,7 +518,7 @@ impl ConfigLoader {
         Self::expand_env_vars(&mut raw);
 
         // Resolve base_dir: explicit path or the default_base_dir() base
-        // (~/.myclaw) that everything else (workspace_dir, knowledge_dir,
+        // (~/.myclaw) that everything else (workspace_dir, memory_root(),
         // sessions_root(), users_root(), etc.) nests under.
         let base_dir = raw
             .base_dir
@@ -532,25 +531,13 @@ impl ConfigLoader {
             .map(|dir| Self::expand_path(&dir))
             .unwrap_or_else(|| base_dir.join("workspace"));
 
-        // Resolve knowledge_dir: explicit path (deprecated) or default
-        // `{base_dir}/memory`.
-        let knowledge_dir = match raw.knowledge_dir {
-            Some(d) => {
-                let expanded = Self::expand_path(&d);
-                tracing::warn!(
-                    explicit = %expanded.display(),
-                    recommended = %base_dir.join("memory").display(),
-                    "knowledge_dir 显式配置已弃用，建议迁移至 {{base_dir}}/memory"
-                );
-                expanded
-            }
-            None => base_dir.join("memory"),
-        };
+        // Memory root is not configurable — always derived from base_dir
+        // (`{base_dir}/memory`, see `AppConfig::memory_root`), like
+        // sessions/users/jobs/skills/agents/backups.
 
         Ok(AppConfig {
             base_dir,
             workspace_dir,
-            knowledge_dir,
             config_path,
             providers: raw.providers,
             routing: raw.routing,
@@ -712,7 +699,7 @@ models = ["gpt-4o"]
         let config = ConfigLoader::from_toml("").unwrap();
         assert_eq!(config.base_dir, default_base_dir());
         assert_eq!(config.workspace_dir, config.base_dir.join("workspace"));
-        assert_eq!(config.knowledge_dir, config.base_dir.join("memory"));
+        assert_eq!(config.memory_root(), config.base_dir.join("memory"));
         assert_eq!(config.sessions_root(), config.base_dir.join("sessions"));
         assert_eq!(config.users_root(), config.base_dir.join("users"));
     }
@@ -723,7 +710,7 @@ models = ["gpt-4o"]
         let config = ConfigLoader::from_toml(toml_str).unwrap();
         assert_eq!(config.base_dir, PathBuf::from("/tmp/myclaw-explicit-base-dir"));
         assert_eq!(config.workspace_dir, config.base_dir.join("workspace"));
-        assert_eq!(config.knowledge_dir, config.base_dir.join("memory"));
+        assert_eq!(config.memory_root(), config.base_dir.join("memory"));
     }
 
     #[test]

@@ -89,7 +89,7 @@ struct MemoryAudit<'a> {
 fn append_memory_audit(base_dir: &Path, session: &Session, audit: MemoryAudit<'_>) {
     // P1-B2: audit is runtime state, lives on the data side
     // ({base_dir}/state/memory/memory_audit.jsonl), not under the
-    // knowledge dir (which is now the flat agent/user memory pool).
+    // memory root (which is the flat agent/user memory pool).
     let audit_dir = base_dir.join("state").join("memory").join(".audit");
     if let Err(e) = std::fs::create_dir_all(&audit_dir) {
         tracing::warn!(err = %e, "memory audit: failed to create audit dir");
@@ -151,10 +151,10 @@ fn validate_name(name: &str) -> Result<(), String> {
 }
 
 /// Scan memory files visible to a user: all agent-scope entries plus the
-/// user's own user-scope entries, from the single flat knowledge dir
+/// user's own user-scope entries, from the single flat memory root
 /// (ownership via frontmatter, not path). Dedup by name, agent layer wins.
-fn scan_merged(knowledge_dir: &Path, user_id: &str) -> Vec<crate::memory::MemoryFile> {
-    let mut files: Vec<crate::memory::MemoryFile> = crate::memory::scan_memory_files(knowledge_dir)
+fn scan_merged(memory_root: &Path, user_id: &str) -> Vec<crate::memory::MemoryFile> {
+    let mut files: Vec<crate::memory::MemoryFile> = crate::memory::scan_memory_files(memory_root)
         .into_iter()
         .filter(|f| f.scope.as_deref().unwrap_or("agent") == "agent" || f.user_id.as_deref() == Some(user_id))
         .collect();
@@ -335,17 +335,17 @@ fn resolve_scope(args: &serde_json::Value) -> &'static str {
 }
 
 /// Directory for a scope's memory files.
-/// P1-B2: single flat knowledge dir for both scopes — ownership is a
+/// P1-B2: single flat memory root for both scopes — ownership is a
 /// frontmatter attribute (`scope` + `user_id`), not a path segment.
-fn scope_memory_dir(knowledge_dir: &Path, _scope: &str, _user_id: &str) -> PathBuf {
-    knowledge_dir.to_path_buf()
+fn scope_memory_dir(memory_root: &Path, _scope: &str, _user_id: &str) -> PathBuf {
+    memory_root.to_path_buf()
 }
 
 /// Scan memory files from a single scope (not merged), filtered by
 /// frontmatter ownership. `scope=user` requires an exact `user_id` match;
 /// a missing `scope` field is treated as the agent layer.
-fn scan_scope(knowledge_dir: &Path, scope: &str, user_id: &str) -> Vec<crate::memory::MemoryFile> {
-    crate::memory::scan_memory_files(&scope_memory_dir(knowledge_dir, scope, user_id))
+fn scan_scope(memory_root: &Path, scope: &str, user_id: &str) -> Vec<crate::memory::MemoryFile> {
+    crate::memory::scan_memory_files(&scope_memory_dir(memory_root, scope, user_id))
         .into_iter()
         .filter(|f| {
             let f_scope = f.scope.as_deref().unwrap_or("agent");
@@ -602,14 +602,14 @@ tags: [{}]",
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemoryListTool {
-    knowledge_dir: PathBuf,
+    memory_root: PathBuf,
     resolver: Arc<UserResolver>,
 }
 
 impl MemoryListTool {
-    pub fn new(knowledge_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
+    pub fn new(memory_root: PathBuf, resolver: Arc<UserResolver>) -> Self {
         Self {
-            knowledge_dir,
+            memory_root,
             resolver,
         }
     }
@@ -645,7 +645,7 @@ impl Tool for MemoryListTool {
     ) -> anyhow::Result<ToolResult> {
         let type_filter = normalize_optional_filter(args["memory_type"].as_str());
         let user_id = user_id_for(session, &self.resolver);
-        let files = scan_merged(&self.knowledge_dir, &user_id);
+        let files = scan_merged(&self.memory_root, &user_id);
         let entries: Vec<crate::memory::IndexEntry> = files
             .iter()
             .filter(|mf| {
@@ -707,14 +707,14 @@ impl Tool for MemoryListTool {
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemoryViewTool {
-    knowledge_dir: PathBuf,
+    memory_root: PathBuf,
     resolver: Arc<UserResolver>,
 }
 
 impl MemoryViewTool {
-    pub fn new(knowledge_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
+    pub fn new(memory_root: PathBuf, resolver: Arc<UserResolver>) -> Self {
         Self {
-            knowledge_dir,
+            memory_root,
             resolver,
         }
     }
@@ -760,7 +760,7 @@ impl Tool for MemoryViewTool {
         };
 
         let user_id = user_id_for(session, &self.resolver);
-        let files = scan_merged(&self.knowledge_dir, &user_id);
+        let files = scan_merged(&self.memory_root, &user_id);
         let file = files.iter().find(|f| f.name == name);
 
         match file {
@@ -811,14 +811,14 @@ impl Tool for MemoryViewTool {
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemorySearchTool {
-    knowledge_dir: PathBuf,
+    memory_root: PathBuf,
     resolver: Arc<UserResolver>,
 }
 
 impl MemorySearchTool {
-    pub fn new(knowledge_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
+    pub fn new(memory_root: PathBuf, resolver: Arc<UserResolver>) -> Self {
         Self {
-            knowledge_dir,
+            memory_root,
             resolver,
         }
     }
@@ -887,7 +887,7 @@ impl Tool for MemorySearchTool {
         let include_related = args["include_related"].as_bool().unwrap_or(false);
 
         let user_id = user_id_for(session, &self.resolver);
-        let files = scan_merged(&self.knowledge_dir, &user_id);
+        let files = scan_merged(&self.memory_root, &user_id);
 
         let mut results: Vec<(i32, &crate::memory::MemoryFile)> = Vec::new();
         for mf in &files {
@@ -975,15 +975,15 @@ impl Tool for MemorySearchTool {
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemoryManageTool {
-    knowledge_dir: PathBuf,
+    memory_root: PathBuf,
     base_dir: PathBuf,
     resolver: Arc<UserResolver>,
 }
 
 impl MemoryManageTool {
-    pub fn new(knowledge_dir: PathBuf, base_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
+    pub fn new(memory_root: PathBuf, base_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
         Self {
-            knowledge_dir,
+            memory_root,
             base_dir,
             resolver,
         }
@@ -1144,7 +1144,7 @@ impl MemoryManageTool {
         // P1-B2: flat dir — names are unique across scopes; an add that
         // collides with an existing name owned by another scope must be
         // rejected instead of silently overwriting the file.
-        let all_files = crate::memory::scan_memory_files(&self.knowledge_dir);
+        let all_files = crate::memory::scan_memory_files(&self.memory_root);
         if let Some(existing) = all_files.iter().find(|f| f.name == name) {
             let existing_scope = existing.scope.as_deref().unwrap_or("agent");
             return Err(format!(
@@ -1174,7 +1174,7 @@ impl MemoryManageTool {
         );
         let file_content = format!("{}{}", frontmatter, content);
 
-        let target = scope_memory_dir(&self.knowledge_dir, scope, user_id).join(&filename);
+        let target = scope_memory_dir(&self.memory_root, scope, user_id).join(&filename);
         // Ensure the memory dir exists
         let _ = std::fs::create_dir_all(target.parent().unwrap_or(&target));
         atomic_write(&target, &file_content)
@@ -1214,7 +1214,7 @@ impl MemoryManageTool {
         validate_name(name)?;
         let scope = resolve_scope(args);
 
-        let files = scan_scope(&self.knowledge_dir, scope, user_id);
+        let files = scan_scope(&self.memory_root, scope, user_id);
         let existing = files
             .iter()
             .find(|f| f.name == name)
@@ -1325,7 +1325,7 @@ impl MemoryManageTool {
             );
         }
 
-        let files = scan_scope(&self.knowledge_dir, scope, user_id);
+        let files = scan_scope(&self.memory_root, scope, user_id);
         let existing = files
             .iter()
             .find(|f| f.name == name)
