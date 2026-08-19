@@ -1,5 +1,10 @@
 # MyClaw 配置文件
 # 文档: https://github.com/nxajh/MyClaw
+#
+# 路径布局（storage-layout redesign）：
+#   base_dir     系统数据根（默认 ~/.myclaw；sessions/users/jobs/memory/
+#                skills/agents/backups/state 全部派生自它，不可单独配置）
+#   workspace_dir agent 工作台（默认 {base_dir}/workspace）
 
 workspace_dir = "~/.myclaw/workspace"
 
