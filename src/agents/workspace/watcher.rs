@@ -27,7 +27,7 @@ pub struct ChangeSet {
 
 /// 文件系统监视器。
 ///
-/// 监视 skills/ 和 agents/ 目录变化（P1: 随 data dir），通知 AgentLoop。
+/// 监视 skills/ 和 agents/ 目录变化（P1: 随 base dir），通知 AgentLoop。
 /// 通过 `rx` channel 发送变化信号。
 pub struct WorkspaceWatcher {
     /// 变化信号接收端（AgentLoop 持有）

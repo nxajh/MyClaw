@@ -28,7 +28,7 @@ pub async fn run(
         Arc::new(parking_lot::RwLock::new(myclaw::SkillManager::new()));
     // P1-B2: memory pool is the knowledge dir; audit log lives under data.
     let knowledge_dir = cfg.knowledge_dir.clone();
-    let data_dir = cfg.data_dir.clone();
+    let base_dir = cfg.base_dir.clone();
     tools.register(Arc::new(myclaw::tools::SkillTool::new(Arc::clone(
         &skills_arc,
     ))));
@@ -55,7 +55,7 @@ pub async fn run(
     )));
     tools.register(Arc::new(myclaw::tools::MemoryManageTool::new(
         knowledge_dir,
-        data_dir,
+        base_dir,
         resolver,
     )));
     let tools_arc = Arc::new(tools);

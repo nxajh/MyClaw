@@ -20,18 +20,18 @@ M = migrate_layout
 class MigrateLayoutTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        base = Path(self.tmp.name)
-        self.ws = base / "ws"
-        self.data = base / "data"
+        tmp_root = Path(self.tmp.name)
+        self.ws = tmp_root / "ws"
+        self.base = tmp_root / "base"
         self.ws.mkdir()
-        self.data.mkdir()
+        self.base.mkdir()
         # 测试环境屏蔽真实 daemon 自检（/proc 会扫到本机在跑的 myclaw）
-        M.check_daemon_stopped = lambda data: None
-        # data 侧预置：已有 memory（1 个无 scope 的 agent md）与 state
-        (self.data / "memory").mkdir()
-        (self.data / "memory" / "preexisting.md").write_text("---\nname: p\n---\nbody\n")
-        (self.data / "state").mkdir()
-        (self.data / "state" / "wechat_buf.json").write_text("{}")
+        M.check_daemon_stopped = lambda base: None
+        # base 侧预置：已有 memory（1 个无 scope 的 agent md）与 state
+        (self.base / "memory").mkdir()
+        (self.base / "memory" / "preexisting.md").write_text("---\nname: p\n---\nbody\n")
+        (self.base / "state").mkdir()
+        (self.base / "state" / "wechat_buf.json").write_text("{}")
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -113,7 +113,7 @@ class MigrateLayoutTest(unittest.TestCase):
 
     def test_full_apply_idempotent_and_rollback(self) -> None:
         self.build_old_layout()
-        ws, d = self.ws, self.data
+        ws, d = self.ws, self.base
         M.apply(ws, d)
 
         # sessions
@@ -158,7 +158,7 @@ class MigrateLayoutTest(unittest.TestCase):
         self.assertIn('scope: "user"', user_proj)
         self.assertIn('type: "project"', user_proj)
         self.assertIn('user_id: "myclaw/u/019fe342-6a03-7561-86de-0c2327a8c3de"', user_proj)
-        # agent 层（workspace/memory，data/memory 已存在时也不能被 pick() 无视）
+        # agent 层（workspace/memory，base/memory 已存在时也不能被 pick() 无视）
         # .versions/.audit/遗留 type 分区同样全部归位
         self.assertTrue(
             (d / "memory" / ".versions" / "agent-topic" / "v1__20260101__ccc.md").exists())
@@ -199,9 +199,9 @@ class MigrateLayoutTest(unittest.TestCase):
 
     def test_memory_name_conflict_fails_fast(self) -> None:
         self.build_old_layout()
-        (self.data / "memory" / "agent-one.md").write_text("---\n---\n")
+        (self.base / "memory" / "agent-one.md").write_text("---\n---\n")
         with self.assertRaises(SystemExit):
-            M.dry_run(self.ws, self.data)
+            M.dry_run(self.ws, self.base)
 
     def test_inject_frontmatter(self) -> None:
         f = migrate_layout.inject_frontmatter

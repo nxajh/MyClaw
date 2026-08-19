@@ -50,7 +50,7 @@ pub struct DistillInput {
     pub tool_specs: Vec<ToolSpec>,
     /// Tool registry for actual execution.
     pub tool_registry: Arc<ToolRegistry>,
-    /// Knowledge dir ({data_dir}/memory) — the single flat memory pool;
+    /// Knowledge dir ({base_dir}/memory) — the single flat memory pool;
     /// user-layer entries are selected by frontmatter `scope=user` (P1-B2).
     pub knowledge_dir: String,
     /// Provider registry for resolving model config (reasoning flag).
@@ -108,7 +108,7 @@ pub struct DistillState {
 
 impl DistillState {
     /// State file lives directly in the given dir (P1-B2: the caller passes
-    /// {data_dir}/state/memory — runtime state, not the memory pool).
+    /// {base_dir}/state/memory — runtime state, not the memory pool).
     fn path(state_dir: &std::path::Path) -> std::path::PathBuf {
         state_dir.join("distill.json")
     }

@@ -86,11 +86,11 @@ struct MemoryAudit<'a> {
     args: &'a serde_json::Value,
 }
 
-fn append_memory_audit(data_dir: &Path, session: &Session, audit: MemoryAudit<'_>) {
+fn append_memory_audit(base_dir: &Path, session: &Session, audit: MemoryAudit<'_>) {
     // P1-B2: audit is runtime state, lives on the data side
-    // ({data_dir}/state/memory/memory_audit.jsonl), not under the
+    // ({base_dir}/state/memory/memory_audit.jsonl), not under the
     // knowledge dir (which is now the flat agent/user memory pool).
-    let audit_dir = data_dir.join("state").join("memory").join(".audit");
+    let audit_dir = base_dir.join("state").join("memory").join(".audit");
     if let Err(e) = std::fs::create_dir_all(&audit_dir) {
         tracing::warn!(err = %e, "memory audit: failed to create audit dir");
         return;
@@ -976,15 +976,15 @@ impl Tool for MemorySearchTool {
 
 pub struct MemoryManageTool {
     knowledge_dir: PathBuf,
-    data_dir: PathBuf,
+    base_dir: PathBuf,
     resolver: Arc<UserResolver>,
 }
 
 impl MemoryManageTool {
-    pub fn new(knowledge_dir: PathBuf, data_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
+    pub fn new(knowledge_dir: PathBuf, base_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
         Self {
             knowledge_dir,
-            data_dir,
+            base_dir,
             resolver,
         }
     }
@@ -1180,7 +1180,7 @@ impl MemoryManageTool {
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
         append_memory_audit(
-            &self.data_dir,
+            &self.base_dir,
             session,
             MemoryAudit {
                 user_id,
@@ -1288,7 +1288,7 @@ impl MemoryManageTool {
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
         append_memory_audit(
-            &self.data_dir,
+            &self.base_dir,
             session,
             MemoryAudit {
                 user_id,
@@ -1337,7 +1337,7 @@ impl MemoryManageTool {
         std::fs::remove_file(&existing.path)
             .map_err(|e| format!("Failed to remove memory file: {}", e))?;
         append_memory_audit(
-            &self.data_dir,
+            &self.base_dir,
             session,
             MemoryAudit {
                 user_id,

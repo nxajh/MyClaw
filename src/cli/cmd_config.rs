@@ -78,7 +78,7 @@ pub async fn run(cli: &Cli, action: ConfigAction) -> Result<()> {
                 &cfg.agents_root(),
             );
             if !agents.is_empty() {
-                println!("[[agents]] (from data dir agents/)");
+                println!("[[agents]] (from base dir agents/)");
                 for agent in &agents {
                     println!("  name = \"{}\"", agent.name);
                     if let Some(ref desc) = agent.description {
@@ -121,11 +121,12 @@ fn generate_default_config() -> String {
     r#"# MyClaw Configuration
 # See https://github.com/nxajh/MyClaw for documentation.
 
-# data_dir defaults to the platform data dir (e.g. ~/.local/share/myclaw on
-# Linux) when omitted, which does NOT sit under workspace_dir below. Pinning
-# both explicitly under the same root keeps `scripts/migrate-layout.py`'s
-# `--workspace`/`--data` defaults (~/.myclaw/workspace, ~/.myclaw) correct.
-data_dir = "~/.myclaw"
+# base_dir already defaults to ~/.myclaw when omitted (see
+# config::default_base_dir — the single source of truth every other path
+# default, migration.rs, and scripts/migrate-layout.py derive from). Spelled
+# out explicitly here anyway so the base of the tree memory/users/workspace
+# all nest under is never ambiguous from reading this file alone.
+base_dir = "~/.myclaw"
 workspace_dir = "~/.myclaw/workspace"
 
 [routing.chat]

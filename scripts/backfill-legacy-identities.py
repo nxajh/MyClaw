@@ -11,14 +11,14 @@ routing_key）。在此之前，同一渠道下的历史身份是按连接 / 旧
 的 override 聚合会话——旧连接身份从未被登记为 override，所以它们名下的会话
 在新身份体系里"消失"了（数据都还在 `sessions/`，只是列表查不到）。
 
-本脚本扫描 `{data}/sessions/*/meta.json` 收集所有旧 owner，把与 `--like`
+本脚本扫描 `{base}/sessions/*/meta.json` 收集所有旧 owner，把与 `--like`
 指定的参考 routing_key 共享同一 `channel:account:` 前缀、且尚未登记 override
 的 owner，全部指向参考 key 当前解析到的 user_id。
 
 用法：
-    python3 scripts/backfill-legacy-identities.py --data ~/.myclaw \\
+    python3 scripts/backfill-legacy-identities.py --base ~/.myclaw \\
         --like client:default:web-user:default --dry-run
-    python3 scripts/backfill-legacy-identities.py --data ~/.myclaw \\
+    python3 scripts/backfill-legacy-identities.py --base ~/.myclaw \\
         --like client:default:web-user:default --apply
 
 必须先停机（daemon 存活则拒绝执行）：UserResolver 只在启动时从磁盘加载一次，
@@ -40,8 +40,8 @@ from typing import Any
 OWNER_RE = re.compile(r'"owner"\s*:\s*"([^"]*)"')
 
 
-def check_daemon_stopped(data: Path) -> None:
-    pid_file = data / "myclaw.pid"
+def check_daemon_stopped(base: Path) -> None:
+    pid_file = base / "myclaw.pid"
     if pid_file.exists():
         raw = pid_file.read_text().strip()
         if raw.isdigit() and Path(f"/proc/{raw}").exists():
@@ -91,7 +91,7 @@ def scan_owners(sessions_dir: Path) -> set[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="回填历史渠道身份到当前 UserResolver override")
-    ap.add_argument("--data", type=Path, required=True, help="data_dir（含 sessions/、user_resolver.json）")
+    ap.add_argument("--base", type=Path, required=True, help="base_dir（含 sessions/、user_resolver.json）")
     ap.add_argument(
         "--like",
         required=True,
@@ -104,8 +104,8 @@ def main() -> None:
     if args.dry_run == args.apply:
         ap.error("--dry-run 和 --apply 二选一")
 
-    data = args.data.expanduser().resolve()
-    resolver_path = data / "user_resolver.json"
+    base = args.base.expanduser().resolve()
+    resolver_path = base / "user_resolver.json"
     doc = load_resolver(resolver_path)
     overrides: dict[str, str] = doc["overrides"]
 
@@ -121,7 +121,7 @@ def main() -> None:
         sys.exit(f"错误：--like 应为 channel:account:... 形式的 routing_key，收到 {args.like!r}")
     prefix = f"{parts[0]}:{parts[1]}:"
 
-    owners = scan_owners(data / "sessions")
+    owners = scan_owners(base / "sessions")
     candidates = sorted(
         o for o in owners if o.startswith(prefix) and o not in overrides
     )
@@ -139,7 +139,7 @@ def main() -> None:
         print("\n（--dry-run，未写入。确认无误后加 --apply 执行。）")
         return
 
-    check_daemon_stopped(data)
+    check_daemon_stopped(base)
 
     backup_path = resolver_path.with_name(
         f"user_resolver.json.bak.{time.strftime('%Y%m%d%H%M%S')}"

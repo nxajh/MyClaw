@@ -161,7 +161,7 @@ pub type SharedTaskState = Arc<RwLock<TaskState>>;
 /// process-global shared state, so sessions can never see each other's tasks.
 #[derive(Debug, Clone)]
 pub struct TaskBoards {
-    /// Sessions storage root (`{data_dir}/sessions`).
+    /// Sessions storage root (`{base_dir}/sessions`).
     sessions_root: PathBuf,
     /// Namespace for generated task FQIDs (`<ns>/t/<uuidv7>`).
     namespace: String,

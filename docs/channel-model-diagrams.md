@@ -72,7 +72,7 @@ TelegramChannel (HTTP polling，supports_edit=true)
 │  stall_messages: ReactionTracker
 ├─ stall_timeout_secs                            空跑监控
 ├─ bot_username: Mutex<Option<String>>           自检后填充
-└─ data_dir: PathBuf                             dedup 持久化
+└─ base_dir: PathBuf                             dedup 持久化
 
 QQBotChannel (HTTP + WebSocket)
 ├─ config: QQBotAccountConfig                    含 allowed_users/allowed_groups
