@@ -1068,8 +1068,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             None,
             None,
             dummy_tx,
-            config.workspace_dir.join(".last_channel"),
-            config.workspace_dir.join(".last_recipient"),
+            config.last_channel_path(),
+            config.last_recipient_path(),
         );
         let count = migrator.migrate_from_markdown(&cron_dir);
         if count > 0 {
@@ -1101,8 +1101,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         heartbeat_config,
         distill_config,
         scheduler_tx.clone(),
-        config.workspace_dir.join(".last_channel"),
-        config.workspace_dir.join(".last_recipient"),
+        config.last_channel_path(),
+        config.last_recipient_path(),
     );
 
     // Global base dir (known_users.json, user_resolver.json) — computed early
@@ -1237,7 +1237,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let delegator = DelegationCoordinator::new(
             sub_agent_registry.clone(),
             Arc::clone(&session_manager),
-            config.workspace_dir.join("worktrees"),
+            config.worktrees_root(),
             &config.system.namespace,
             config.delegation.max_depth,
         );
@@ -1570,7 +1570,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Scheduler tasks ────────────────────────────────────────────────────
 
     if scheduler_config.webhook.enabled {
-        let wh_dir = config.workspace_dir.join("webhooks");
+        let wh_dir = config.webhooks_dir();
         let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
             ctx: Arc::clone(orchestrator.ctx()),
@@ -1946,7 +1946,7 @@ mod tests {
 /// recent messages instead of skipping everything the old process already
 /// fetched.  The dedup layer in TelegramChannel will filter any duplicates.
 fn reset_telegram_offset(base_dir: &std::path::Path) {
-    let offset_path = base_dir.join("telegram_offset");
+    let offset_path = crate::config::telegram_offset_path(base_dir);
     if offset_path.exists() {
         if let Err(e) = std::fs::remove_file(&offset_path) {
             tracing::warn!(err = %e, path = %offset_path.display(),

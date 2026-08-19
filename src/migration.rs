@@ -372,7 +372,7 @@ fn migrate_resolver(
     to_ns: &str,
     root_fqid: Option<&str>,
 ) -> Result<()> {
-    let path = base_dir.join("user_resolver.json");
+    let path = crate::config::user_resolver_path(base_dir);
     if !path.exists() {
         return Ok(());
     }
