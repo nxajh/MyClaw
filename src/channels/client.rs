@@ -888,10 +888,21 @@ impl ClientChannel {
 
                                         "cancel" => {
                                             // Cancel current turn via the bus's cancel token.
+                                            // session_key_clone is already the
+                                            // identity rk (exact hit), but go
+                                            // through the same resolver path as
+                                            // send_message for uniformity.
+                                            let candidates = bus_key_candidates(
+                                                &user_resolver_clone,
+                                                &session_key_clone,
+                                            );
                                             let buses = session_buses_clone.read();
-                                            if let Some(bus) = buses.get(&session_key_clone) {
-                                                bus.lock().cancel.cancel();
-                                                tracing::debug!(session = %session_key_clone, "turn cancelled by client");
+                                            for key in &candidates {
+                                                if let Some(bus) = buses.get(key) {
+                                                    bus.lock().cancel.cancel();
+                                                    tracing::debug!(session = %key, "turn cancelled by client");
+                                                    break;
+                                                }
                                             }
                                         }
 
@@ -1015,6 +1026,60 @@ impl ClientChannel {
 static CLIENT_CAPS: crate::channels::message::ChannelCapabilities =
     crate::channels::message::ChannelCapabilities::client();
 
+/// Candidate session-bus keys for a receiver address, priority-ordered and
+/// deduped. `ClientChannel` buses are keyed by the identity routing key
+/// (`client:default:web-user:{user}`), but `receiver.id` arrives in three
+/// forms depending on the caller:
+///
+/// 1. the full rk itself (orchestrator replies — `session_key_clone`),
+/// 2. a bare channel-local tail such as `web-user:default`
+///    (`friends.rs::notify_peer` splits the peer rk and passes the tail), or
+/// 3. a legacy key like `ws-3` that only the user resolver still knows about
+///    (mapped to the same uid as the live identity key).
+///
+/// Candidate order: exact match → normalized `client:default:{recipient}`
+/// (skipped when already prefixed) → every `client:default:*` key the
+/// resolver folds into the same uid (cross-channel keys like `telegram:*`
+/// belong to other channels and are skipped). First candidate that hits a
+/// live bus wins.
+fn bus_key_candidates(
+    user_resolver: &Arc<OnceLock<Arc<crate::agents::UserResolver>>>,
+    recipient: &str,
+) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    let push = |key: String, out: &mut Vec<String>| {
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    };
+
+    // 1. Exact form as given.
+    push(recipient.to_string(), &mut candidates);
+
+    // 2. Normalized identity rk (only when the id is not already a full
+    //    client rk — `web-user:default` and `ws-3` both need the prefix,
+    //    `client:default:web-user:default` does not).
+    let rk = if recipient.starts_with("client:") {
+        recipient.to_string()
+    } else {
+        format!("client:default:{recipient}")
+    };
+    push(rk.clone(), &mut candidates);
+
+    // 3. Resolver: full rk → uid → all of that uid's routing keys, keeping
+    //    only keys that could name a bus in *this* channel.
+    if let Some(resolver) = user_resolver.get() {
+        let uid = resolver.resolve(&rk);
+        for key in resolver.routing_keys_for(&uid) {
+            if key.starts_with("client:default:") {
+                push(key, &mut candidates);
+            }
+        }
+    }
+
+    candidates
+}
+
 #[async_trait]
 impl Channel for ClientChannel {
     fn name(&self) -> &str {
@@ -1038,37 +1103,46 @@ impl Channel for ClientChannel {
         // reconnect. This replaces the old session_owners → connections →
         // ws_sender chain which silently dropped messages on disconnect.
         //
-        // session_buses is keyed by the full session key (e.g.
-        // "client:default:web-user:default" — see ChannelInboundMessage's
-        // receiver field, set to session_key_clone, and session_buses.entry()
-        // insertion). But the generic cross-channel convention — used by
-        // every other Channel impl, and by friends.rs::notify_peer (the
-        // /link verification-code push) — is that receiver.id is a bare,
-        // channel-local address with no channel:account prefix. Without this
-        // normalization, notify_peer's receiver.id ("web-user:default")
-        // never matches any bus key, send_message silently no-ops (still
-        // returns Ok(..), so /link reports "code sent" while nothing is
-        // ever delivered), and the mismatch is invisible unless you go
-        // looking for the "no session bus found" warning.
+        // session_buses is keyed by the identity routing key (e.g.
+        // "client:default:web-user:default"), but receiver.id may arrive as
+        // the full rk, a bare channel-local tail ("web-user:default" —
+        // friends.rs::notify_peer / the /link code push), or a legacy key
+        // ("ws-3") only the resolver still maps. bus_key_candidates covers
+        // all three forms; the first live bus wins.
+        //
+        // A total miss is an Err, not a silent no-op: callers like
+        // notify_peer must be able to tell the user "channel unreachable"
+        // instead of reporting "code sent" while nothing was delivered.
         let recipient = msg.receiver.id.clone();
-        let recipient = if recipient.starts_with("client:") {
-            recipient
-        } else {
-            format!("client:default:{recipient}")
-        };
+        let candidates = bus_key_candidates(&self.user_resolver, &recipient);
 
         // Clone the Arc to the bus before any .await — parking_lot guards
         // are not Send and must not cross await points.
         let bus = {
             let buses = self.session_buses.read();
-            match buses.get(&recipient) {
-                Some(b) => Arc::clone(b),
+            let mut found = None;
+            for key in &candidates {
+                if let Some(b) = buses.get(key) {
+                    tracing::debug!(
+                        recipient = %recipient,
+                        resolved_key = %key,
+                        "send_message resolved bus key"
+                    );
+                    found = Some((Arc::clone(b), key.clone()));
+                    break;
+                }
+            }
+            match found {
+                Some((b, key)) => (b, key),
                 None => {
-                    tracing::warn!(recipient = %recipient, "no session bus found for send_message");
-                    return Ok(OutboundSendResult::empty());
+                    return Err(anyhow::anyhow!(
+                        "recipient {} has no live client bus; not deliverable via client channel",
+                        recipient
+                    ));
                 }
             }
         };
+        let (bus, recipient) = (bus.0, bus.1);
 
         if msg.content.files.is_empty() {
             let json = serde_json::json!({
@@ -1090,7 +1164,10 @@ impl Channel for ClientChannel {
             };
             if !subscriber_online {
                 tracing::debug!(recipient = %recipient, "subscriber offline, skipping file messages");
-                return Ok(OutboundSendResult::empty());
+                return Err(anyhow::anyhow!(
+                    "recipient {} has no live client bus subscriber; files are not queued on disconnect",
+                    recipient
+                ));
             }
             for (idx, file) in msg.content.files.iter().enumerate() {
                 let mut reader = file.body.open().await?;
@@ -1137,14 +1214,21 @@ impl Channel for ClientChannel {
     /// is currently subscribed for this target — caller falls through to
     /// the non-streaming `send` path.
     fn create_stream(&self, reply_target: &str) -> Option<Box<dyn crate::channels::TurnStream>> {
+        // Same address forms as send_message: reply_target is usually the
+        // full identity rk, but cross-channel callers may pass a bare tail
+        // or legacy key. Miss → None (caller falls back to non-streaming).
+        let candidates = bus_key_candidates(&self.user_resolver, reply_target);
         let buses = self.session_buses.read();
-        let bus = buses.get(reply_target)?;
+        let bus = candidates
+            .iter()
+            .find_map(|key| buses.get(key))
+            .map(Arc::clone)?;
         let mut bus_guard = bus.lock();
         // Fresh cancel token per turn
         bus_guard.cancel = CancellationToken::new();
         bus_guard.turn_active = true;
         Some(Box::new(ClientTurnStream {
-            bus: Arc::clone(bus),
+            bus: Arc::clone(&bus),
             status: crate::channels::StreamDelivery::Pending,
             finished: false,
         }))
