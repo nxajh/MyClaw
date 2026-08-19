@@ -708,10 +708,16 @@ fn warn_missing_agent_tool_references(
 }
 
 /// List top-level directory names under `sessions_dir` that are neither a
-/// bare uuid nor the `.legacy` archive — i.e. session directories still on
+/// bare uuid nor a known archive dir — i.e. session directories still on
 /// the pre-P1-A `myclaw_s_<uuid>` naming. Missing `sessions_dir` yields no
 /// results (nothing to flag before it's ever been created).
+///
+/// Two archive dirs are intentional and excluded: `.legacy` (migrate-layout.py's
+/// P1 layout migration, B11) and `.migration-backups` (this crate's own
+/// in-process RFC §6 namespace/FQID migration, `src/migration.rs` — a
+/// completely separate migration system from the Python script, predating it).
 fn find_legacy_session_dirs(sessions_dir: &std::path::Path) -> Vec<String> {
+    const KNOWN_ARCHIVE_DIRS: &[&str] = &[".legacy", ".migration-backups"];
     let Ok(entries) = std::fs::read_dir(sessions_dir) else {
         return Vec::new();
     };
@@ -720,7 +726,8 @@ fn find_legacy_session_dirs(sessions_dir: &std::path::Path) -> Vec<String> {
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if name == ".legacy" || uuid::Uuid::parse_str(&name).is_ok() {
+            if KNOWN_ARCHIVE_DIRS.contains(&name.as_str()) || uuid::Uuid::parse_str(&name).is_ok()
+            {
                 None
             } else {
                 Some(name)
@@ -1896,6 +1903,7 @@ mod tests {
         std::fs::create_dir_all(sessions.join("myclaw_s_019fe564-15dd-7a40-af78-ed900edac08d"))
             .unwrap();
         std::fs::create_dir_all(sessions.join(".legacy")).unwrap();
+        std::fs::create_dir_all(sessions.join(".migration-backups")).unwrap();
         std::fs::write(sessions.join("active.json"), "{}").unwrap();
 
         let stale = find_legacy_session_dirs(&sessions);
