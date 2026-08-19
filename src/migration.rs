@@ -208,11 +208,10 @@ pub struct MigrationReport {
 
 // ── 入口 ─────────────────────────────────────────────────────────────────────
 
-/// 默认 data_dir（与 daemon 一致：`ProjectDirs::data_dir`）。
+/// 默认 data_dir。委托给 `config::default_data_dir`（单一权威来源），不再
+/// 自己重新算一遍——两份独立实现曾经因为改一处忘改另一处而分叉过。
 pub fn default_data_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "myclaw")
-        .map(|d| d.data_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::config::default_data_dir()
 }
 
 /// 构建迁移计划（干跑用；也可直接 [`MigrationPlan::apply`]）。

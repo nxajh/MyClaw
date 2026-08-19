@@ -52,7 +52,7 @@
 //!
 //! 系统数据分两个根：
 //!
-//! - **data dir**（`data_dir`，默认 `~/.local/share/myclaw`）：系统数据库 +
+//! - **data dir**（`data_dir`，默认 `~/.myclaw`）：系统数据库 +
 //!   系统配置 + 运行时状态。daemon 启动依赖的实体（`sessions/`、`users/`、
 //!   `jobs/`、`memory/`、`agents/`、`skills/`、`backups/`、`state/`）全部
 //!   在这里。派生路径见 [`AppConfig::sessions_root`] 等方法。
@@ -90,8 +90,7 @@ use routing::RoutingConfig;
 /// Raw configuration as parsed from TOML — before env var expansion.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RawConfig {
-    /// Data directory path（系统数据库 + 配置 + 运行时状态）。
-    /// 默认 `ProjectDirs::from("","","myclaw").data_dir()`。
+    /// Data directory path（系统数据库 + 配置 + 运行时状态）。默认 `~/.myclaw`。
     #[serde(default)]
     data_dir: Option<String>,
 
@@ -428,12 +427,14 @@ use std::sync::OnceLock;
 
 static SAFETY_CONFIG: OnceLock<SafetyConfig> = OnceLock::new();
 
-/// Default data dir — `ProjectDirs::from("","","myclaw").data_dir()`
-/// (same derivation the daemon and migration use).
-fn default_data_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "myclaw")
-        .map(|d| d.data_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(".myclaw"))
+/// Default data dir — `~/.myclaw`. Single source of truth: everything else
+/// that needs this default (migration.rs, TelegramChannel's telegram_offset
+/// fallback, migrate-layout.py) must derive from this, not recompute its own
+/// platform-specific guess — a prior XDG-based implementation here diverged
+/// from those other call sites' hardcoded `~/.myclaw` assumption and caused
+/// data to split across two untracked directory trees on real deployments.
+pub fn default_data_dir() -> PathBuf {
+    PathBuf::from(shellexpand::tilde("~/.myclaw").to_string())
 }
 
 impl AppConfig {
@@ -517,8 +518,9 @@ impl ConfigLoader {
         // Expand environment variables in all string fields.
         Self::expand_env_vars(&mut raw);
 
-        // Resolve data_dir: explicit path or the platform data dir
-        // (`ProjectDirs::from("","","myclaw").data_dir()`).
+        // Resolve data_dir: explicit path or the default_data_dir() base
+        // (~/.myclaw) that everything else (workspace_dir, knowledge_dir,
+        // sessions_root(), users_root(), etc.) nests under.
         let data_dir = raw
             .data_dir
             .map(|dir| Self::expand_path(&dir))
@@ -697,6 +699,31 @@ models = ["gpt-4o"]
         assert!(config.providers.is_empty());
         assert!(config.channels.enabled_channels().is_empty());
         assert_eq!(config.agent.permission_mode, agent::PermissionMode::Default);
+    }
+
+    #[test]
+    fn default_data_dir_is_dot_myclaw_under_home() {
+        let home = shellexpand::tilde("~").to_string();
+        assert_eq!(default_data_dir(), PathBuf::from(home).join(".myclaw"));
+    }
+
+    #[test]
+    fn unset_data_dir_puts_workspace_and_memory_under_the_default() {
+        let config = ConfigLoader::from_toml("").unwrap();
+        assert_eq!(config.data_dir, default_data_dir());
+        assert_eq!(config.workspace_dir, config.data_dir.join("workspace"));
+        assert_eq!(config.knowledge_dir, config.data_dir.join("memory"));
+        assert_eq!(config.sessions_root(), config.data_dir.join("sessions"));
+        assert_eq!(config.users_root(), config.data_dir.join("users"));
+    }
+
+    #[test]
+    fn explicit_data_dir_still_bases_workspace_and_memory_on_it() {
+        let toml_str = r#"data_dir = "/tmp/myclaw-explicit-data-dir""#;
+        let config = ConfigLoader::from_toml(toml_str).unwrap();
+        assert_eq!(config.data_dir, PathBuf::from("/tmp/myclaw-explicit-data-dir"));
+        assert_eq!(config.workspace_dir, config.data_dir.join("workspace"));
+        assert_eq!(config.knowledge_dir, config.data_dir.join("memory"));
     }
 
     #[test]

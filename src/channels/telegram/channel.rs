@@ -144,9 +144,7 @@ impl TelegramChannel {
             streaming_mode: config.streaming_mode,
             tts: config.tts,
             streaming_targets: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            data_dir: directories::ProjectDirs::from("", "", "myclaw")
-                .map(|d| d.data_dir().to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from(".myclaw")),
+            data_dir: crate::config::default_data_dir(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
@@ -155,6 +153,15 @@ impl TelegramChannel {
         };
         crate::channels::warn_if_locked_down(&ch);
         ch
+    }
+
+    /// Install the real configured data_dir (`telegram_offset` lives at
+    /// `{data_dir}/telegram_offset`). `new()` defaults to
+    /// `config::default_data_dir()` so this is only needed when the
+    /// composition root's `AppConfig.data_dir` differs from that default.
+    pub fn with_data_dir(mut self, data_dir: std::path::PathBuf) -> Self {
+        self.data_dir = data_dir;
+        self
     }
 
     fn api_url(&self, method: &str) -> String {

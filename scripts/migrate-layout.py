@@ -700,22 +700,16 @@ def dry_run(ws: Path, data: Path) -> None:
 
 
 def default_data_dir() -> Path:
-    """必须与 Rust 侧 `default_data_dir()`（src/config/mod.rs、src/migration.rs）
-    一致：`directories::ProjectDirs::from("", "", "myclaw").data_dir()`。
+    """必须与 Rust 侧 `default_data_dir()`（src/config/mod.rs，唯一权威来源，
+    `src/migration.rs` 也委托给它）一致：`~/.myclaw`，不分平台。
 
-    该函数曾硬编码为 `~/.myclaw`，与 daemon 实际解析出的路径（Linux 下遵循
-    XDG Base Directory：`~/.local/share/myclaw`）不一致——用默认参数跑迁移会把
-    数据搬到 daemon 从不读取的目录，看起来像"数据全部消失/关联丢失"。
+    该函数一度实现成 XDG Base Directory 解析（`~/.local/share/myclaw`），
+    对不上 daemon 实际使用的 `~/.myclaw`——用默认参数跑迁移会把数据搬到
+    daemon 从不读取的目录，看起来像"数据全部消失/关联丢失"。Rust 侧后来
+    把默认值统一改成了字面量 `~/.myclaw`（不再依赖平台相关的 XDG/Application
+    Support 解析），这里跟着简化，两边不再可能因为平台判断细节分叉。
     """
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "myclaw"
-    if sys.platform.startswith("win"):
-        appdata = os.environ.get("APPDATA")
-        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
-        return base / "myclaw" / "data"
-    xdg_data_home = os.environ.get("XDG_DATA_HOME")
-    base = Path(xdg_data_home) if xdg_data_home else Path.home() / ".local" / "share"
-    return base / "myclaw"
+    return Path.home() / ".myclaw"
 
 
 def main() -> None:

@@ -59,7 +59,6 @@ clap = { version = "4", features = ["derive", "string"] }
 clap_complete = "4"
 shellexpand = "3.1"
 tempfile = "3"
-directories = "5"
 toml = "0.8"
 async-trait = "0.1"
 notify = { version = "7", features = ["macos_kqueue"] }

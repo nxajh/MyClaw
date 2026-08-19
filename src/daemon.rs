@@ -774,9 +774,10 @@ fn build_channel_accounts(
                     channels.push((
                         "telegram".to_string(),
                         account_id.clone(),
-                        Arc::new(crate::channels::telegram::TelegramChannel::new(
-                            account_cfg.clone(),
-                        )),
+                        Arc::new(
+                            crate::channels::telegram::TelegramChannel::new(account_cfg.clone())
+                                .with_data_dir(config.data_dir.clone()),
+                        ),
                     ));
                 }
             }
@@ -899,7 +900,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // messages it never finished processing.  Clear the offset file so
         // getUpdates returns recent messages.  The Telegram channel's dedup
         // layer will filter out any duplicates.
-        reset_telegram_offset();
+        reset_telegram_offset(&config.data_dir);
 
         // ── Queue processing ──────────────────────────────────────────────
         // Queue drain is handled later (after session backend initialization)
@@ -1927,10 +1928,7 @@ mod tests {
 /// Reset the persisted Telegram update offset so that `getUpdates` returns
 /// recent messages instead of skipping everything the old process already
 /// fetched.  The dedup layer in TelegramChannel will filter any duplicates.
-fn reset_telegram_offset() {
-    let data_dir = directories::ProjectDirs::from("", "", "myclaw")
-        .map(|d| d.data_dir().to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from(".myclaw"));
+fn reset_telegram_offset(data_dir: &std::path::Path) {
     let offset_path = data_dir.join("telegram_offset");
     if offset_path.exists() {
         if let Err(e) = std::fs::remove_file(&offset_path) {
