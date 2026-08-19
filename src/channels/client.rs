@@ -386,34 +386,31 @@ impl ClientChannel {
 
                         connection_count += 1;
                         let conn_id = format!("ws-{}", connection_count);
-                        let session_key = format!("client:{}", conn_id);
 
                         let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
                         // Create mpsc channel for outgoing messages to this client.
                         let (ws_sender, mut ws_receiver) = mpsc::channel::<String>(64);
 
-                        // Register connection.
+                        // Register connection. conn_id is only for logging and
+                        // connection bookkeeping — bus keys are identity-based
+                        // (client:default:web-user:{user}), assigned on auth.
                         {
                             let mut conns = connections.write();
                             conns.insert(
                                 conn_id.clone(),
                                 ClientConnection {
                                     ws_sender: ws_sender.clone(),
-                                    active_session: session_key.clone(),
-                                    sessions: {
-                                        let mut set = std::collections::HashSet::new();
-                                        set.insert(session_key.clone());
-                                        set
-                                    },
+                                    active_session: String::new(),
+                                    sessions: std::collections::HashSet::new(),
                                 },
                             );
-                            let mut owners = session_owners.write();
-                            owners.insert(session_key.clone(), conn_id.clone());
                         }
 
                         let conn_id_clone = conn_id.clone();
-                        let mut session_key_clone = session_key.clone();
+                        // Identity routing key. Initially unset; assigned on auth
+                        // (or on first message for token-less TUI flows).
+                        let mut session_key_clone = String::new();
                         let message_tx_clone = message_tx.clone();
                         let session_buses_clone = session_buses.clone();
                         let connections_clone = connections.clone();
@@ -431,7 +428,6 @@ impl ClientChannel {
                         tracing::info!(
                             conn_id = %conn_id,
                             peer = %peer_addr,
-                            session = %session_key,
                             "WebSocket client connected"
                         );
 
@@ -545,130 +541,99 @@ impl ClientChannel {
                                                 .filter(|id| !id.is_empty())
                                                 .unwrap_or("default");
                                             client_user_id = format!("web-user:{}", client_user);
+                                            // client_id is a per-browser device id — no longer
+                                            // part of the bus key. Logged for tracing only.
                                             if let Some(cid) = parsed["client_id"].as_str() {
                                                 let cid = cid.trim();
                                                 if !cid.is_empty() {
-                                                    let new_client_id = format!("web:{}", cid);
-
-                                                    // Phase 6: migrate bus to stable session_key
-                                                    // so reconnects route to the same bus.
-                                                    let old_sk = session_key_clone.clone();
-                                                    let new_sk =
-                                                        format!("client:default:{}", new_client_id);
-                                                    if new_sk != old_sk {
-                                                        // Migrate bus
-                                                        {
-                                                            let mut buses =
-                                                                session_buses_clone.write();
-                                                            if let Some(bus) = buses.remove(&old_sk)
-                                                            {
-                                                                buses.insert(new_sk.clone(), bus);
-                                                            } else {
-                                                                buses
-                                                                    .entry(new_sk.clone())
-                                                                    .or_insert_with(|| {
-                                                                        Arc::new(SyncMutex::new(
-                                                                            SessionOutputBus::new(),
-                                                                        ))
-                                                                    });
-                                                            }
-                                                        }
-                                                        // Migrate session_owners
-                                                        {
-                                                            let mut owners =
-                                                                session_owners_clone.write();
-                                                            owners.remove(&old_sk);
-                                                            owners.insert(
-                                                                new_sk.clone(),
-                                                                conn_id_clone.clone(),
-                                                            );
-                                                        }
-                                                        // Update connection sessions set
-                                                        {
-                                                            let mut conns =
-                                                                connections_clone.write();
-                                                            if let Some(conn) =
-                                                                conns.get_mut(&conn_id_clone)
-                                                            {
-                                                                conn.sessions.remove(&old_sk);
-                                                                conn.sessions
-                                                                    .insert(new_sk.clone());
-                                                                conn.active_session =
-                                                                    new_sk.clone();
-                                                            }
-                                                        }
-                                                        session_key_clone = new_sk;
-                                                        // Subscribe + replay buffered content
-                                                        let api_user = format!(
-                                                            "client:default:{}",
-                                                            client_user_id
-                                                        );
-                                                        let session_id = session_manager_clone
-                                                            .get()
-                                                            .and_then(|sm| {
-                                                                sm.active_session_id(&api_user)
-                                                            })
-                                                            .unwrap_or_default();
-                                                        let bus = {
-                                                            let mut buses =
-                                                                session_buses_clone.write();
-                                                            buses
-                                                                .entry(session_key_clone.clone())
-                                                                .or_insert_with(|| {
-                                                                    Arc::new(SyncMutex::new(
-                                                                        SessionOutputBus::new(),
-                                                                    ))
-                                                                })
-                                                                .clone()
-                                                        };
-                                                        let (queued_msgs, replay_events) = {
-                                                            let mut bg = bus.lock();
-                                                            let first = bg.subscribe(
-                                                                conn_id_clone.clone(),
-                                                                ws_sender.clone(),
-                                                                session_id.clone(),
-                                                            );
-                                                            if first {
-                                                                (
-                                                                    bg.drain_messages(),
-                                                                    bg.drain_events(),
-                                                                )
-                                                            } else {
-                                                                (Vec::new(), Vec::new())
-                                                            }
-                                                        };
-                                                        for msg_json in queued_msgs {
-                                                            let _ = ws_sender.send(msg_json).await;
-                                                        }
-                                                        for event in replay_events {
-                                                            let versioned = event.versioned();
-                                                            let mut jv =
-                                                                serde_json::to_value(&versioned)
-                                                                    .unwrap_or_default();
-                                                            if let serde_json::Value::Object(
-                                                                ref mut map,
-                                                            ) = jv
-                                                            {
-                                                                map.insert(
-                                                                    "session_id".to_string(),
-                                                                    serde_json::Value::String(
-                                                                        session_id.clone(),
-                                                                    ),
-                                                                );
-                                                            }
-                                                            let _ = ws_sender
-                                                                .send(jv.to_string())
-                                                                .await;
-                                                        }
-                                                        tracing::info!(
-                                                            conn_id = %conn_id_clone,
-                                                            old_session = %old_sk,
-                                                            new_session = %session_key_clone,
-                                                            "session migrated to stable key on auth"
-                                                        );
-                                                    }
+                                                    tracing::debug!(
+                                                        conn_id = %conn_id_clone,
+                                                        client_id = %cid,
+                                                        "auth client_id received (informational)"
+                                                    );
                                                 }
                                             }
+                                            // Identity bus key == the identity routing key
+                                            // used by send_message / notify_peer, so
+                                            // cross-channel pushes always hit this bus.
+                                            session_key_clone =
+                                                format!("client:default:{}", client_user_id);
+                                            // Track identity ownership on the connection.
+                                            {
+                                                let mut conns = connections_clone.write();
+                                                if let Some(conn) =
+                                                    conns.get_mut(&conn_id_clone)
+                                                {
+                                                    conn.sessions
+                                                        .insert(session_key_clone.clone());
+                                                    conn.active_session =
+                                                        session_key_clone.clone();
+                                                }
+                                            }
+                                            // Ensure bus + subscribe + (0->1) replay.
+                                            let api_user =
+                                                format!("client:default:{}", client_user_id);
+                                            let session_id = session_manager_clone
+                                                .get()
+                                                .and_then(|sm| {
+                                                    sm.active_session_id(&api_user)
+                                                })
+                                                .unwrap_or_default();
+                                            let bus = {
+                                                let mut buses = session_buses_clone.write();
+                                                buses
+                                                    .entry(session_key_clone.clone())
+                                                    .or_insert_with(|| {
+                                                        Arc::new(SyncMutex::new(
+                                                            SessionOutputBus::new(),
+                                                        ))
+                                                    })
+                                                    .clone()
+                                            };
+                                            let (queued_msgs, replay_events) = {
+                                                let mut bg = bus.lock();
+                                                let first = bg.subscribe(
+                                                    conn_id_clone.clone(),
+                                                    ws_sender.clone(),
+                                                    session_id.clone(),
+                                                );
+                                                if first {
+                                                    (
+                                                        bg.drain_messages(),
+                                                        bg.drain_events(),
+                                                    )
+                                                } else {
+                                                    (Vec::new(), Vec::new())
+                                                }
+                                            };
+                                            for msg_json in queued_msgs {
+                                                let _ = ws_sender.send(msg_json).await;
+                                            }
+                                            for event in replay_events {
+                                                let versioned = event.versioned();
+                                                let mut jv =
+                                                    serde_json::to_value(&versioned)
+                                                        .unwrap_or_default();
+                                                if let serde_json::Value::Object(
+                                                    ref mut map,
+                                                ) = jv
+                                                {
+                                                    map.insert(
+                                                        "session_id".to_string(),
+                                                        serde_json::Value::String(
+                                                            session_id.clone(),
+                                                        ),
+                                                    );
+                                                }
+                                                let _ = ws_sender
+                                                    .send(jv.to_string())
+                                                    .await;
+                                            }
+                                            tracing::info!(
+                                                conn_id = %conn_id_clone,
+                                                session = %session_key_clone,
+                                                "session bound to identity key on auth"
+                                            );
                                         } else {
                                             let err = serde_json::json!({
                                                 "type": "error",
@@ -820,8 +785,22 @@ impl ClientChannel {
                                             }
 
                                             // Ensure session bus exists + subscribe (in case
-                                            // auth wasn't called, e.g. TUI). For WebUI the
-                                            // bus was already subscribed during auth migration.
+                                            // auth wasn't called, e.g. token-less TUI). For
+                                            // WebUI the bus was already subscribed during auth.
+                                            // session_key_clone is already the identity rk;
+                                            // derive it from client_user_id if still unset.
+                                            if session_key_clone.is_empty() {
+                                                session_key_clone =
+                                                    format!("client:default:{}", client_user_id);
+                                                let mut conns = connections_clone.write();
+                                                if let Some(conn) = conns.get_mut(&conn_id_clone)
+                                                {
+                                                    conn.sessions
+                                                        .insert(session_key_clone.clone());
+                                                    conn.active_session =
+                                                        session_key_clone.clone();
+                                                }
+                                            }
                                             let fwd_api_user =
                                                 format!("client:default:{}", client_user_id);
                                             let fwd_session_id = session_manager_clone
