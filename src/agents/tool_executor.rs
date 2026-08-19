@@ -135,9 +135,13 @@ impl ToolExecutor {
 
     /// Tools exempt from the Default-mode approval gate.
     /// `agent_delegate` and `agent_kill` manage sub-agent lifecycles —
-    /// blocking them on approval would deadlock delegation.
+    /// blocking them on approval would deadlock delegation. `shell_kill`
+    /// is the same shape of problem: it only terminates a process the
+    /// agent itself already started (no new side effect), and gating a
+    /// runaway-process abort behind approval defeats the point of having
+    /// a fast kill path at all.
     fn is_approval_exempt(name: &str) -> bool {
-        matches!(name, "agent_delegate" | "agent_kill")
+        matches!(name, "agent_delegate" | "agent_kill" | "shell_kill")
     }
 
     /// Determine whether a tool call needs user approval in Default mode.

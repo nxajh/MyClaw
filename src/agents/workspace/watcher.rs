@@ -37,7 +37,7 @@ pub struct WorkspaceWatcher {
 }
 
 impl WorkspaceWatcher {
-    /// P1 variant: hot-reload roots supplied directly (data-dir derived).
+    /// P1 variant: hot-reload roots supplied directly (base-dir derived).
     pub fn new(
         skills_dir: PathBuf,
         agents_dir: PathBuf,

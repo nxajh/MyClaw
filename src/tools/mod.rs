@@ -63,7 +63,7 @@ pub use search_cooldown::SearchProviderCooldown;
 pub use send_message::SendMessageTool;
 pub use session_query::SessionQueryTool;
 pub use sessions_yield::SessionsYieldTool;
-pub use shell::{ShellPollTool, ShellTool};
+pub use shell::{ShellKillTool, ShellPollTool, ShellTool};
 pub use skill_manage_tool::SkillManageTool;
 pub use skill_tool::SkillTool;
 pub use skills_list_tool::SkillsListTool;
@@ -82,13 +82,23 @@ use std::sync::Arc;
 /// the daemon (router / channels / scheduler / etc). Tools requiring such
 /// state — `ask_user`, `web_search`, `agent_delegate`, `agent_list`,
 /// `agent_kill`, `sessions_yield`, `tool_search` — are registered by daemon.rs::build_tools.
-pub fn builtin_tools(sessions_dir: Option<std::path::PathBuf>) -> Vec<Arc<dyn Tool>> {
+///
+/// Also returns the shell process registry so the daemon can run
+/// `shell::adopt_after_restart` on it at startup before any tool call can
+/// reach it — bare CLI callers (no persistent session dir, no daemon to
+/// restart) can ignore it.
+pub fn builtin_tools(
+    sessions_dir: Option<std::path::PathBuf>,
+) -> (Vec<Arc<dyn Tool>>, shell::ShellRegistry) {
     let shell = ShellTool::new(sessions_dir);
-    let shell_poll = ShellPollTool::new(shell.bg_registry());
-    vec![
+    let shell_registry = shell.registry();
+    let shell_poll = ShellPollTool::new(shell.registry(), shell.sessions_dir());
+    let shell_kill = ShellKillTool::new(shell.registry());
+    let tools = vec![
         // Core tools
-        Arc::new(shell),
+        Arc::new(shell) as Arc<dyn Tool>,
         Arc::new(shell_poll),
+        Arc::new(shell_kill),
         Arc::new(FileReadTool::new()),
         Arc::new(FileWriteTool::new()),
         Arc::new(FileEditTool::new()),
@@ -99,5 +109,6 @@ pub fn builtin_tools(sessions_dir: Option<std::path::PathBuf>) -> Vec<Arc<dyn To
         Arc::new(HttpRequestTool::new()),
         // Utility tools
         Arc::new(CalculatorTool::new()),
-    ]
+    ];
+    (tools, shell_registry)
 }

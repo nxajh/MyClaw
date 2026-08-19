@@ -235,6 +235,7 @@ pub fn is_write_tool(name: &str) -> bool {
     matches!(
         name,
         "shell"
+            | "shell_kill"
             | "file_write"
             | "file_edit"
             | "file_delete"

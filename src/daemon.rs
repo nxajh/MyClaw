@@ -509,10 +509,24 @@ async fn build_tools(
     Arc<crate::tools::FriendToolsCtx>,
 ) {
     let mut tools = ToolRegistry::new();
-    let builtin = crate::tools::builtin_tools(Some(config.sessions_root()));
+    let (builtin, shell_registry) = crate::tools::builtin_tools(Some(config.sessions_root()));
     for tool in builtin {
         tools.register(tool);
     }
+
+    // Reconcile tracked shell processes against restart reality before any
+    // tool call can reach the registry — see `tools::shell` module docs.
+    // `myclaw restart` (SIGUSR1 hot switch) preserves shell children;
+    // anything else (`myclaw stop`, systemctl, a crash) goes through this
+    // deployment's `KillMode=control-group` and kills them along with the
+    // daemon, so those entries are marked lost rather than probed for
+    // liveness.
+    crate::tools::shell::adopt_after_restart(
+        &config.sessions_root(),
+        &shell_registry,
+        crate::hot_switch::is_hot_switch(),
+    )
+    .await;
 
     // AskUserTool resolves the channel via `Session::resolve_channel()` at
     // execute time — no per-tool channels map. Bound to the shared
@@ -827,12 +841,12 @@ fn build_channel_accounts(
 fn build_prompt_config(
     agent: &crate::config::agent::AgentConfig,
     prompt: &crate::config::agent::PromptConfig,
-    data_dir: &std::path::Path,
+    base_dir: &std::path::Path,
     workspace_dir: &std::path::Path,
     memory_root: &std::path::Path,
 ) -> SystemPromptConfig {
     SystemPromptConfig {
-        data_dir: data_dir.to_string_lossy().to_string(),
+        base_dir: base_dir.to_string_lossy().to_string(),
         workspace_dir: workspace_dir.to_string_lossy().to_string(),
         memory_root: memory_root.to_string_lossy().to_string(),
         permission_mode: agent.permission_mode,
@@ -941,19 +955,19 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // {base_dir}/sessions 缺失）时拒绝启动 —— 布局迁移由外置脚本完成
     // （见 docs/storage-layout-and-trigger-redesign.md §5），daemon 不做
     // 双读兼容。先停机执行迁移脚本再重启。
-    if config.workspace_dir.join("sessions").exists() && !base_dir.join("sessions").exists() {
+    if config.workspace_dir.join("sessions").exists() && !config.sessions_root().exists() {
         eprintln!(
             "检测到旧存储布局：{} 存在而 {} 缺失。\n\
              布局迁移已改为外置脚本，daemon 不再自动迁移。\n\
              请先停机执行（务必显式传入下面两个路径 —— 脚本的内置默认值\n\
              可能与本次 daemon 实际解析出的 workspace_dir/base_dir 不一致，\n\
              传错路径会把数据搬到 daemon 读不到的地方）：\n\
-             python3 scripts/migrate-layout.py --dry-run --workspace {} --data {}\n\
+             python3 scripts/migrate-layout.py --dry-run --workspace {} --base {}\n\
              确认无误后：\n\
-             python3 scripts/migrate-layout.py --apply --workspace {} --data {}\n\
+             python3 scripts/migrate-layout.py --apply --workspace {} --base {}\n\
              （详见 docs/storage-layout-and-trigger-redesign.md §5），完成后重启 daemon。",
             config.workspace_dir.join("sessions").display(),
-            base_dir.join("sessions").display(),
+            config.sessions_root().display(),
             config.workspace_dir.display(),
             base_dir.display(),
             config.workspace_dir.display(),
@@ -970,15 +984,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // 允许这种状态长期存在——裸化是 B9 迁移步骤的职责，发现残留就拒绝启动，
     // 逼着先跑迁移脚本，而不是让两种目录命名无限期共存。
     {
-        let stale = find_legacy_session_dirs(&base_dir.join("sessions"));
+        let stale = find_legacy_session_dirs(&config.sessions_root());
         if !stale.is_empty() {
             eprintln!(
                 "检测到 {} 个非裸-uuid 会话目录（举例：{}）。\n\
                  P1-A 裸 uuid 目录布局要求 {{base_dir}}/sessions 下只允许裸 uuid \n\
                  目录（`.legacy` 归档除外）。请先停机执行：\n\
-                 python3 scripts/migrate-layout.py --dry-run --workspace {} --data {}\n\
+                 python3 scripts/migrate-layout.py --dry-run --workspace {} --base {}\n\
                  确认无误后：\n\
-                 python3 scripts/migrate-layout.py --apply --workspace {} --data {}\n\
+                 python3 scripts/migrate-layout.py --apply --workspace {} --base {}\n\
                  完成后重启 daemon。",
                 stale.len(),
                 stale.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
@@ -1186,7 +1200,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // `agents/` (AGENT.md) and `skills/` (SKILL.md) are picked up live via
     // `AgentRegistry::reload_from_dir` / `SkillManager::reload` — no daemon
     // restart needed.
-    // P1: agents/skills 热加载目录随 data dir（系统配置面）。
+    // P1: agents/skills 热加载目录随 base dir（系统配置面）。
     let _watcher = crate::agents::WorkspaceWatcher::spawn_managed(
         config.skills_root(),
         config.agents_root(),

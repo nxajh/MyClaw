@@ -1024,39 +1024,42 @@ impl Agent {
             }
 
             for call in &pending_calls {
-                // If this call was the one that killed the daemon, check
-                // whether it can resume from a checkpoint (shell journal).
-                // Multi-segment shell commands write a `.shell_journal` that
-                // allows resuming from the first un-executed segment.
+                // If this call was the one that killed the daemon, don't
+                // blindly re-execute it — for `shell` in particular, a
+                // tracked process can survive a `myclaw restart` hot switch
+                // (see `crate::tools::shell::latest_entry_summary`), so
+                // re-invoking would spawn a second copy racing the first.
+                // Synthesize a result describing what's known instead and
+                // let the LLM decide.
                 if interrupted_id.as_deref() == Some(call.id.as_str()) {
-                    let can_resume = call.name == "shell"
-                        && crate::tools::shell::ShellJournal::exists(
-                            runtime.sessions_dir.as_deref(),
-                            &session.id,
-                        );
-
-                    if !can_resume {
-                        let msg = "[recovery: this command was interrupted by a \
+                    let detail = if call.name == "shell" {
+                        runtime
+                            .sessions_dir
+                            .as_deref()
+                            .and_then(|dir| crate::tools::shell::latest_entry_summary(dir, &session.id))
+                    } else {
+                        None
+                    };
+                    let msg = match detail {
+                        Some(d) => format!(
+                            "[recovery: this command was interrupted by a daemon restart and was not re-executed. {}]",
+                            d
+                        ),
+                        None => "[recovery: this command was interrupted by a \
                                    daemon restart and will not be re-executed. \
                                    It may have partially or fully completed. \
-                                   Check the current state before proceeding.]";
-                        session.add_tool_result(
-                            call.id.clone(),
-                            &call.name,
-                            msg.to_string(),
-                            true,
-                        );
-                        persist_last(session);
-                        continue;
-                    }
-                    // Fall through: re-execute the shell call — the tool
-                    // will detect the journal and resume from the
-                    // appropriate segment.
-                    tracing::info!(
+                                   Check the current state before proceeding.]"
+                            .to_string(),
+                    };
+                    tracing::warn!(
                         session = %session.id,
                         call_id = %call.id,
-                        "recovery: shell journal found — resuming from checkpoint"
+                        tool = %call.name,
+                        "recovery: interrupted call not re-executed"
                     );
+                    session.add_tool_result(call.id.clone(), &call.name, msg, true);
+                    persist_last(session);
+                    continue;
                 }
 
                 let result = tool_executor

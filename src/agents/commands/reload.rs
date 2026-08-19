@@ -17,11 +17,11 @@ pub async fn cmd_stop(ctx: CommandContext<'_>) -> String {
 }
 
 pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
-    // Reloading requires data_dir for skills and agents
-    let data_dir = std::path::PathBuf::from(&ctx.runtime.defaults.prompt.data_dir);
+    // Reloading requires base_dir for skills and agents
+    let base_dir = std::path::PathBuf::from(&ctx.runtime.defaults.prompt.base_dir);
 
     // 1. Re-scan skills
-    let skills_dir = data_dir.join("skills");
+    let skills_dir = base_dir.join("skills");
     let new_defs = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
     let new_skills: Vec<crate::agents::Skill> = new_defs
         .iter()
@@ -33,7 +33,7 @@ pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
     }
 
     // 2. Re-scan agents
-    let agents_dir = data_dir.join("agents");
+    let agents_dir = base_dir.join("agents");
     let agent_count = ctx.runtime.agents.reload_from_dir(&agents_dir);
 
     // 3. No need to reset attachment manager — next diff rebuilds from history.
