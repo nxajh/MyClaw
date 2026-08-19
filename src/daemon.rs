@@ -826,10 +826,12 @@ fn build_channel_accounts(
 fn build_prompt_config(
     agent: &crate::config::agent::AgentConfig,
     prompt: &crate::config::agent::PromptConfig,
+    data_dir: &std::path::Path,
     workspace_dir: &std::path::Path,
     knowledge_dir: &std::path::Path,
 ) -> SystemPromptConfig {
     SystemPromptConfig {
+        data_dir: data_dir.to_string_lossy().to_string(),
         workspace_dir: workspace_dir.to_string_lossy().to_string(),
         knowledge_dir: knowledge_dir.to_string_lossy().to_string(),
         permission_mode: agent.permission_mode,
@@ -1184,7 +1186,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // `AgentRegistry::reload_from_dir` / `SkillManager::reload` — no daemon
     // restart needed.
     // P1: agents/skills 热加载目录随 data dir（系统配置面）。
-    let _watcher = crate::agents::WorkspaceWatcher::spawn_managed_with_roots(
+    let _watcher = crate::agents::WorkspaceWatcher::spawn_managed(
         config.skills_root(),
         config.agents_root(),
         &config.knowledge_dir,
@@ -1422,6 +1424,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let prompt_config = build_prompt_config(
         &config.agent,
         &config.prompt,
+        &config.data_dir,
         &config.workspace_dir,
         &config.knowledge_dir,
     );
