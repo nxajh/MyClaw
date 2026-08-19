@@ -37,18 +37,8 @@ pub struct WorkspaceWatcher {
 }
 
 impl WorkspaceWatcher {
-    pub fn new(workspace_dir: &Path, knowledge_dir: &Path) -> Result<Self> {
-        // P1: skills/agents 热加载目录随 base dir（系统配置面）。此构造器保留
-        // 旧签名（workspace 侧）以兼容既有调用；daemon 侧请用 `new_with_roots`。
-        Self::new_with_roots(
-            workspace_dir.join("skills"),
-            workspace_dir.join("agents"),
-            knowledge_dir,
-        )
-    }
-
     /// P1 variant: hot-reload roots supplied directly (base-dir derived).
-    pub fn new_with_roots(
+    pub fn new(
         skills_dir: PathBuf,
         agents_dir: PathBuf,
         memory_dir: &Path,
@@ -123,32 +113,16 @@ impl WorkspaceWatcher {
     /// Callers no longer need to subscribe to `rx`; the watcher is the
     /// authoritative reloader. Returns a guard whose Drop terminates the task.
     pub fn spawn_managed(
-        workspace_dir: &Path,
-        knowledge_dir: &Path,
-        agent_registry: crate::agents::AgentRegistry,
-        skill_manager: Arc<RwLock<super::skills::SkillManager>>,
-    ) -> Result<ManagedWatcherGuard> {
-        Self::spawn_managed_with_roots(
-            workspace_dir.join("skills"),
-            workspace_dir.join("agents"),
-            knowledge_dir,
-            agent_registry,
-            skill_manager,
-        )
-    }
-
-    /// P1 variant: reload roots supplied directly (base-dir derived).
-    pub fn spawn_managed_with_roots(
         skills_dir: PathBuf,
         agents_dir: PathBuf,
-        knowledge_dir: &Path,
+        memory_root: &Path,
         agent_registry: crate::agents::AgentRegistry,
         skill_manager: Arc<RwLock<super::skills::SkillManager>>,
     ) -> Result<ManagedWatcherGuard> {
-        let watcher = Self::new_with_roots(
+        let watcher = Self::new(
             skills_dir.clone(),
             agents_dir.clone(),
-            knowledge_dir,
+            memory_root,
         )?;
         let mut rx = watcher.rx.clone();
 

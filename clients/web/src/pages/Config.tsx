@@ -18,7 +18,7 @@ interface RawConfig {
 
 // ── TOML Simple Regex Parser & Injector ──────────────────────────────────────
 
-const KNOWLEDGE_DIR_REG = /^knowledge_dir\s*=\s*"([^"]*)"/m
+const BASE_DIR_REG = /^base_dir\s*=\s*"([^"]*)"/m
 const PORT_REG = /^port\s*=\s*(\d+)/m
 
 export default function Config() {
@@ -128,23 +128,23 @@ export default function Config() {
 
   // Extract Form parameters from the raw draft content
   const formParams = useMemo(() => {
-    const knowledgeDirMatch = draft.match(KNOWLEDGE_DIR_REG)
+    const baseDirMatch = draft.match(BASE_DIR_REG)
     const portMatch = draft.match(PORT_REG)
     return {
-      knowledgeDir: knowledgeDirMatch ? knowledgeDirMatch[1] : '',
+      baseDir: baseDirMatch ? baseDirMatch[1] : '',
       port: portMatch ? portMatch[1] : ''
     }
   }, [draft])
 
   // Mutate TOML draft content from Form inputs
-  const handleUpdateFormParam = (key: 'knowledge_dir' | 'port', value: string) => {
+  const handleUpdateFormParam = (key: 'base_dir' | 'port', value: string) => {
     let newDraft = draft
-    if (key === 'knowledge_dir') {
-      if (KNOWLEDGE_DIR_REG.test(draft)) {
-        newDraft = draft.replace(KNOWLEDGE_DIR_REG, `knowledge_dir = "${value}"`)
+    if (key === 'base_dir') {
+      if (BASE_DIR_REG.test(draft)) {
+        newDraft = draft.replace(BASE_DIR_REG, `base_dir = "${value}"`)
       } else {
         // Find insert place or append
-        newDraft = `knowledge_dir = "${value}"\n` + draft
+        newDraft = `base_dir = "${value}"\n` + draft
       }
     } else if (key === 'port') {
       const portVal = parseInt(value, 10) || 0
@@ -267,15 +267,15 @@ export default function Config() {
           {viewMode === 'form' ? (
             <div className={`space-y-4 ${panelCls} p-5`}>
               <div className="space-y-1.5">
-                <label className="text-sm font-medium text-zinc-400">Knowledge Workspace Directory</label>
+                <label className="text-sm font-medium text-zinc-400">Base Data Directory</label>
                 <input
                   type="text"
-                  value={formParams.knowledgeDir}
-                  onChange={(e) => handleUpdateFormParam('knowledge_dir', e.target.value)}
-                  placeholder="e.g. /home/ubuntu/.myclaw/workspace"
+                  value={formParams.baseDir}
+                  onChange={(e) => handleUpdateFormParam('base_dir', e.target.value)}
+                  placeholder="e.g. /home/ubuntu/.myclaw"
                   className={inputCls}
                 />
-                <p className="text-xs text-zinc-500">The absolute path where memory and logs are located</p>
+                <p className="text-xs text-zinc-500">System data root (sessions/users/jobs/memory); the workspace lives at {`{base_dir}`}/workspace</p>
               </div>
 
               <div className="space-y-1.5">

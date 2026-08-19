@@ -237,7 +237,7 @@ src/memory/mod.rs:62:pub struct LinkRef {
 src/memory/mod.rs:70:pub struct IndexEntry {
 src/memory/mod.rs:79:impl From<&MemoryFile> for IndexEntry {
 src/memory/mod.rs:96:pub fn should_inject(inject: &str) -> bool {
-src/memory/mod.rs:104:pub fn ensure_memory_dir(knowledge_dir: &str) -> std::io::Result<std::path::PathBuf> {
+src/memory/mod.rs:104:pub fn ensure_memory_dir(memory_root: &str) -> std::io::Result<std::path::PathBuf> {
 src/memory/mod.rs:114:pub fn scan_memory_files(memory_dir: &Path) -> Vec<MemoryFile> {
 src/memory/mod.rs:138:fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
 src/memory/mod.rs:208:fn strip_yaml_quotes(s: &str) -> &str {

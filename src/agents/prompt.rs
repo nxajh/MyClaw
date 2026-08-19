@@ -34,12 +34,14 @@ pub use crate::config::agent::{PermissionMode, RunMode};
 /// Runtime concerns (timezone, model selection) live in `AgentConfig`.
 #[derive(Debug, Clone)]
 pub struct SystemPromptConfig {
+    /// Base directory (contains system config, agents, skills).
+    pub base_dir: String,
     /// Workspace directory (for AGENT.md lookup at the caller).
     /// Not read by the builder itself — kept here as runtime info that
     /// `build_runtime` exposes to the LLM as part of the working environment.
     pub workspace_dir: String,
-    /// Knowledge directory (contains memory/*.md files).
-    pub knowledge_dir: String,
+    /// Memory root directory (contains memory/*.md files).
+    pub memory_root: String,
     /// Permission mode — controls tool access level.
     pub permission_mode: PermissionMode,
     /// Run mode — controls execution context rules.
@@ -57,8 +59,9 @@ pub struct SystemPromptConfig {
 impl Default for SystemPromptConfig {
     fn default() -> Self {
         Self {
+            base_dir: String::new(),
             workspace_dir: String::new(),
-            knowledge_dir: String::new(),
+            memory_root: String::new(),
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
             identity_header: None,

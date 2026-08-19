@@ -40,8 +40,8 @@ pub struct ForkInput {
     pub session_owner: String,
     /// Real session ID for provenance annotation (e.g. `myclaw/s/019fe564-...`).
     pub session_id: String,
-    /// Knowledge directory (memory files live here).
-    pub knowledge_dir: String,
+    /// Memory root directory (memory files live here).
+    pub memory_root: String,
     /// Provider registry for resolving model config (reasoning flag).
     pub registry: Arc<dyn ProviderRegistry>,
 }
@@ -220,7 +220,7 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
 
     // Assemble messages: compacted recent context + extraction prompt.
     let mut messages = compact_fork_messages(input.messages);
-    let extraction_prompt = build_extraction_prompt(&input.knowledge_dir, &input.session_id);
+    let extraction_prompt = build_extraction_prompt(&input.memory_root, &input.session_id);
     messages.push(ChatMessage::user_text(extraction_prompt));
 
     let provider = input.provider;
@@ -487,10 +487,10 @@ async fn collect_fork_stream(mut stream: BoxStream<StreamEvent>) -> Result<ForkR
 ///
 /// Independent from `context_engine::build_memory_prompt` — tuned for
 /// turn-end extraction (not compaction), with its own taxonomy and rules.
-fn build_extraction_prompt(knowledge_dir: &str, session_id: &str) -> String {
+fn build_extraction_prompt(memory_root: &str, session_id: &str) -> String {
     // Build existing memory index so the model avoids duplicates.
-    let existing_index = if !knowledge_dir.is_empty() {
-        let memory_dir = std::path::Path::new(knowledge_dir);
+    let existing_index = if !memory_root.is_empty() {
+        let memory_dir = std::path::Path::new(memory_root);
         let files = crate::memory::scan_memory_files(memory_dir);
         if files.is_empty() {
             String::from("(empty — no memories yet)")

@@ -9,7 +9,7 @@ use super::workspace::skills::SkillManager;
 /// Hot-loadable shared resources, held in Arc for sharing between
 /// CompactionExecutor instances. Most fields are kept for future
 /// summarizer features (hot-reload of skills/agents during compaction,
-/// memory dir lookups) — `knowledge_dir` is the only one actively read
+/// memory dir lookups) — `memory_root` is the only one actively read
 /// today by `build_memory_prompt`.
 #[allow(dead_code)]
 pub struct ResourceProvider {
@@ -19,7 +19,7 @@ pub struct ResourceProvider {
     pub(crate) skills_dir: PathBuf,
     pub(crate) agents_dir: PathBuf,
     /// Absolute path to the memory/ directory (for diff_memory scanning).
-    pub(crate) knowledge_dir: String,
+    pub(crate) memory_root: String,
     /// Timezone offset in hours (for date injection).
     pub(crate) timezone_offset: i32,
 }
@@ -31,7 +31,7 @@ impl ResourceProvider {
         mcp_instructions: Vec<(String, String)>,
         skills_dir: PathBuf,
         agents_dir: PathBuf,
-        knowledge_dir: String,
+        memory_root: String,
         timezone_offset: i32,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -40,7 +40,7 @@ impl ResourceProvider {
             mcp_instructions,
             skills_dir,
             agents_dir,
-            knowledge_dir,
+            memory_root,
             timezone_offset,
         })
     }

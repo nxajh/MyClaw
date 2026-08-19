@@ -26,8 +26,8 @@ pub async fn run(
     tools.register(Arc::new(myclaw::tools::ListDirTool::new()));
     let skills_arc: Arc<parking_lot::RwLock<myclaw::SkillManager>> =
         Arc::new(parking_lot::RwLock::new(myclaw::SkillManager::new()));
-    // P1-B2: memory pool is the knowledge dir; audit log lives under data.
-    let knowledge_dir = cfg.knowledge_dir.clone();
+    // P1-B2: memory pool is {base_dir}/memory; audit log lives under data.
+    let memory_root = cfg.memory_root();
     let base_dir = cfg.base_dir.clone();
     tools.register(Arc::new(myclaw::tools::SkillTool::new(Arc::clone(
         &skills_arc,
@@ -39,22 +39,22 @@ pub async fn run(
         Arc::clone(&skills_arc),
         cfg.skills_root(),
     )));
-    // Memory tools — P1-B2 flat knowledge dir, ownership via frontmatter.
+    // Memory tools — P1-B2 flat memory root, ownership via frontmatter.
     let resolver = Arc::new(myclaw::UserResolver::new());
     tools.register(Arc::new(myclaw::tools::MemoryListTool::new(
-        knowledge_dir.clone(),
+        memory_root.clone(),
         Arc::clone(&resolver),
     )));
     tools.register(Arc::new(myclaw::tools::MemoryViewTool::new(
-        knowledge_dir.clone(),
+        memory_root.clone(),
         Arc::clone(&resolver),
     )));
     tools.register(Arc::new(myclaw::tools::MemorySearchTool::new(
-        knowledge_dir.clone(),
+        memory_root.clone(),
         Arc::clone(&resolver),
     )));
     tools.register(Arc::new(myclaw::tools::MemoryManageTool::new(
-        knowledge_dir,
+        memory_root,
         base_dir,
         resolver,
     )));

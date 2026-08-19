@@ -25,7 +25,7 @@ mod tests {
         tags: &str,
         content: &str,
     ) {
-        // P1-B2: dir IS the knowledge dir (flat memory pool).
+        // P1-B2: dir IS the memory root (flat memory pool).
         let memory_dir = dir;
         std::fs::create_dir_all(&memory_dir).unwrap();
         std::fs::write(
@@ -286,7 +286,7 @@ mod tests {
         .await;
         assert!(out["success"].as_bool().unwrap_or(false));
 
-        // P1-B2: flat knowledge dir — user-scope files land in the same
+        // P1-B2: flat memory root — user-scope files land in the same
         // dir, marked scope=user + user_id in frontmatter.
         let user_file = std::fs::read_to_string(dir.path().join("scope-user-test.md")).unwrap();
         assert!(user_file.contains("scope: user"));
