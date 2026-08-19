@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// P3 身份绑定: `set` is also the write path for the `/link` flow (user
 /// proves control of both channels with a one-time code). `persistent()`
-/// snapshots overrides to `{data_dir}/user_resolver.json` on every `set`.
+/// snapshots overrides to `{base_dir}/user_resolver.json` on every `set`.
 #[derive(Debug, Default)]
 pub struct UserResolver {
     overrides: RwLock<std::collections::HashMap<String, String>>,
@@ -45,10 +45,10 @@ impl UserResolver {
         Self::default()
     }
 
-    /// Persistent resolver backed by `{data_dir}/user_resolver.json`.
+    /// Persistent resolver backed by `{base_dir}/user_resolver.json`.
     /// Loads existing overrides at startup; every `set` writes through.
-    pub fn persistent(data_dir: &Path) -> Self {
-        let data_path = data_dir.join("user_resolver.json");
+    pub fn persistent(base_dir: &Path) -> Self {
+        let data_path = base_dir.join("user_resolver.json");
         let resolver = Self {
             overrides: RwLock::new(std::collections::HashMap::new()),
             data_path: data_path.clone(),
@@ -67,7 +67,7 @@ impl UserResolver {
     }
 
     /// Pin a routing_key to a specific user_id. Persists immediately when
-    /// backed by a data dir (identity links must survive restarts).
+    /// backed by a base dir (identity links must survive restarts).
     pub fn set(&self, routing_key: impl Into<String>, user_id: impl Into<String>) {
         self.overrides
             .write()
@@ -140,7 +140,7 @@ impl UserResolver {
                 tracing::warn!(
                     path = %parent.display(),
                     err = %e,
-                    "user_resolver: failed to create data dir"
+                    "user_resolver: failed to create base dir"
                 );
                 return;
             }
@@ -311,7 +311,7 @@ mod tests {
     fn resolver_persistent_ignores_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let r = UserResolver::persistent(dir.path());
-        // No file yet — resolves to identity, and the data dir isn't created
+        // No file yet — resolves to identity, and the base dir isn't created
         // until the first set.
         assert_eq!(r.resolve("telegram:default:42"), "telegram:default:42");
         assert!(!dir.path().join("user_resolver.json").exists());

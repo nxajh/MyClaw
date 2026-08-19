@@ -302,7 +302,7 @@ pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
 
     // Backoff: after 3 consecutive failures, pause for 2 hours.
     // P1-B2: distill state is runtime state — sibling of the knowledge dir
-    // ({data_dir}/state/memory/distill.json), not inside the memory pool.
+    // ({base_dir}/state/memory/distill.json), not inside the memory pool.
     let state_dir = std::path::Path::new(&knowledge_dir)
         .parent()
         .map(|p| p.join("state").join("memory"))

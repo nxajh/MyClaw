@@ -109,7 +109,7 @@ pub struct TelegramChannel {
     /// redundant "still thinking" messages alongside the live preview.
     streaming_targets: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Directory for persisting state (e.g. Telegram update offset).
-    data_dir: std::path::PathBuf,
+    base_dir: std::path::PathBuf,
     /// Shared HTTP client with connection pool.
     http: reqwest::Client,
     /// Lightweight ring buffer of recent sent messages (max 100 entries) for
@@ -144,7 +144,7 @@ impl TelegramChannel {
             streaming_mode: config.streaming_mode,
             tts: config.tts,
             streaming_targets: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            data_dir: crate::config::default_data_dir(),
+            base_dir: crate::config::default_base_dir(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
@@ -155,12 +155,12 @@ impl TelegramChannel {
         ch
     }
 
-    /// Install the real configured data_dir (`telegram_offset` lives at
-    /// `{data_dir}/telegram_offset`). `new()` defaults to
-    /// `config::default_data_dir()` so this is only needed when the
-    /// composition root's `AppConfig.data_dir` differs from that default.
-    pub fn with_data_dir(mut self, data_dir: std::path::PathBuf) -> Self {
-        self.data_dir = data_dir;
+    /// Install the real configured base_dir (`telegram_offset` lives at
+    /// `{base_dir}/telegram_offset`). `new()` defaults to
+    /// `config::default_base_dir()` so this is only needed when the
+    /// composition root's `AppConfig.base_dir` differs from that default.
+    pub fn with_base_dir(mut self, base_dir: std::path::PathBuf) -> Self {
+        self.base_dir = base_dir;
         self
     }
 
@@ -189,7 +189,7 @@ impl TelegramChannel {
 
     /// Path to the file that persists the Telegram update offset.
     fn offset_path(&self) -> std::path::PathBuf {
-        self.data_dir.join("telegram_offset")
+        self.base_dir.join("telegram_offset")
     }
 
     /// Load the persisted update offset from disk.

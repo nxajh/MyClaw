@@ -558,7 +558,7 @@ async fn build_tools(
         shared_scheduler,
     ))));
 
-    // Memory tools — P1-B2: single flat knowledge dir ({data_dir}/memory),
+    // Memory tools — P1-B2: single flat knowledge dir ({base_dir}/memory),
     // ownership expressed via frontmatter `scope`/`user_id` (not by path).
     let kd = config.knowledge_dir.clone();
     let r = Arc::clone(user_resolver);
@@ -576,7 +576,7 @@ async fn build_tools(
     )));
     tools.register(Arc::new(crate::tools::MemoryManageTool::new(
         kd,
-        config.data_dir.clone(),
+        config.base_dir.clone(),
         r,
     )));
 
@@ -623,7 +623,7 @@ async fn build_tools(
     (tools, task_boards, send_message_tool, friend_ctx)
 }
 
-/// Build SkillManager from SKILL.md files in the data dir (P1: `{data_dir}/skills`).
+/// Build SkillManager from SKILL.md files in the base dir (P1: `{base_dir}/skills`).
 fn build_skill_manager(config: &crate::config::AppConfig) -> SkillManager {
     let mut manager = SkillManager::new();
     let skills_dir = config.skills_root();
@@ -648,7 +648,7 @@ fn build_sub_agents(
     if !agents.is_empty() {
         tracing::info!(
             agent_count = agents.len(),
-            "sub-agents loaded from data dir"
+            "sub-agents loaded from base dir"
         );
     }
     agents
@@ -776,7 +776,7 @@ fn build_channel_accounts(
                         account_id.clone(),
                         Arc::new(
                             crate::channels::telegram::TelegramChannel::new(account_cfg.clone())
-                                .with_data_dir(config.data_dir.clone()),
+                                .with_base_dir(config.base_dir.clone()),
                         ),
                     ));
                 }
@@ -900,7 +900,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // messages it never finished processing.  Clear the offset file so
         // getUpdates returns recent messages.  The Telegram channel's dedup
         // layer will filter out any duplicates.
-        reset_telegram_offset(&config.data_dir);
+        reset_telegram_offset(&config.base_dir);
 
         // ── Queue processing ──────────────────────────────────────────────
         // Queue drain is handled later (after session backend initialization)
@@ -934,45 +934,45 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // UserRegistry、JsonFileBackend（sessions/）等组件加载之前执行，否则迁移
     // 后的 FQID 与组件内存态不一致。失败不阻断启动（注册表对旧数据降级兼容，
     // .bak 备份保留可手动恢复）。
-    let data_dir = config.data_dir.clone();
+    let base_dir = config.base_dir.clone();
     // P1 布局重构 fail-fast：检测到旧布局（workspace/sessions 存在而
-    // {data_dir}/sessions 缺失）时拒绝启动 —— 布局迁移由外置脚本完成
+    // {base_dir}/sessions 缺失）时拒绝启动 —— 布局迁移由外置脚本完成
     // （见 docs/storage-layout-and-trigger-redesign.md §5），daemon 不做
     // 双读兼容。先停机执行迁移脚本再重启。
-    if config.workspace_dir.join("sessions").exists() && !data_dir.join("sessions").exists() {
+    if config.workspace_dir.join("sessions").exists() && !base_dir.join("sessions").exists() {
         eprintln!(
             "检测到旧存储布局：{} 存在而 {} 缺失。\n\
              布局迁移已改为外置脚本，daemon 不再自动迁移。\n\
              请先停机执行（务必显式传入下面两个路径 —— 脚本的内置默认值\n\
-             可能与本次 daemon 实际解析出的 workspace_dir/data_dir 不一致，\n\
+             可能与本次 daemon 实际解析出的 workspace_dir/base_dir 不一致，\n\
              传错路径会把数据搬到 daemon 读不到的地方）：\n\
              python3 scripts/migrate-layout.py --dry-run --workspace {} --data {}\n\
              确认无误后：\n\
              python3 scripts/migrate-layout.py --apply --workspace {} --data {}\n\
              （详见 docs/storage-layout-and-trigger-redesign.md §5），完成后重启 daemon。",
             config.workspace_dir.join("sessions").display(),
-            data_dir.join("sessions").display(),
+            base_dir.join("sessions").display(),
             config.workspace_dir.display(),
-            data_dir.display(),
+            base_dir.display(),
             config.workspace_dir.display(),
-            data_dir.display(),
+            base_dir.display(),
         );
         anyhow::bail!(
             "old storage layout detected (workspace/sessions exists, {}/sessions missing); run scripts/migrate-layout.py first",
-            data_dir.display()
+            base_dir.display()
         );
     }
-    // P1-A 裸 uuid 目录 fail-fast：{data_dir}/sessions 下不允许任何非裸-uuid
+    // P1-A 裸 uuid 目录 fail-fast：{base_dir}/sessions 下不允许任何非裸-uuid
     // 目录存在（`.legacy` 归档目录除外）。JsonFileBackend 的读路径能容忍
     // 遗留 `myclaw_s_<uuid>` 命名（避免静默丢会话），但那是运行时兜底，不是
     // 允许这种状态长期存在——裸化是 B9 迁移步骤的职责，发现残留就拒绝启动，
     // 逼着先跑迁移脚本，而不是让两种目录命名无限期共存。
     {
-        let stale = find_legacy_session_dirs(&data_dir.join("sessions"));
+        let stale = find_legacy_session_dirs(&base_dir.join("sessions"));
         if !stale.is_empty() {
             eprintln!(
                 "检测到 {} 个非裸-uuid 会话目录（举例：{}）。\n\
-                 P1-A 裸 uuid 目录布局要求 {{data_dir}}/sessions 下只允许裸 uuid \n\
+                 P1-A 裸 uuid 目录布局要求 {{base_dir}}/sessions 下只允许裸 uuid \n\
                  目录（`.legacy` 归档除外）。请先停机执行：\n\
                  python3 scripts/migrate-layout.py --dry-run --workspace {} --data {}\n\
                  确认无误后：\n\
@@ -981,18 +981,18 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
                 stale.len(),
                 stale.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
                 config.workspace_dir.display(),
-                data_dir.display(),
+                base_dir.display(),
                 config.workspace_dir.display(),
-                data_dir.display(),
+                base_dir.display(),
             );
             anyhow::bail!(
                 "{} legacy-named session directories found under {}/sessions; run scripts/migrate-layout.py first",
                 stale.len(),
-                data_dir.display()
+                base_dir.display()
             );
         }
     }
-    if let Err(e) = crate::migration::run_auto(&config.workspace_dir, &data_dir, &config.system.namespace)
+    if let Err(e) = crate::migration::run_auto(&config.workspace_dir, &base_dir, &config.system.namespace)
     {
         tracing::warn!(err = %e, "migration: 自动迁移失败（继续以原数据启动）");
     }
@@ -1034,7 +1034,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tokio::sync::mpsc::channel::<crate::agents::SchedulerEvent>(100);
 
     // Build shared scheduler (owns all cron job data).
-    // P1-B2: job storage moved to the data side — {data_dir}/jobs with
+    // P1-B2: job storage moved to the data side — {base_dir}/jobs with
     // per-job {id}/meta.json; the legacy single-file jobs.json (workspace
     // or data side) is a read-only fallback inside Scheduler::new.
     let jobs_root = config.jobs_root();
@@ -1089,13 +1089,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         config.workspace_dir.join(".last_recipient"),
     );
 
-    // Global data dir (known_users.json, user_resolver.json) — computed early
+    // Global base dir (known_users.json, user_resolver.json) — computed early
     // (before the RFC §6 auto-migration) so the migration, the registry and the
     // identity resolver share one location.
 
     // G39: shared user resolver — defaults to identity (user_id == routing_key).
     // P3: persisted; `/link` folds routing_keys into one user_id via `set`.
-    let user_resolver = Arc::new(crate::agents::UserResolver::persistent(&data_dir));
+    let user_resolver = Arc::new(crate::agents::UserResolver::persistent(&base_dir));
 
     // Shared AskRouter — wired into both AskUserTool (register side, inside
     // build_tools) and the Orchestrator (fulfill side, set on OrchestratorParts
@@ -1106,18 +1106,18 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Orchestrator records every inbound message; slash commands query.
     // P3: with_resolver folds contacts/mailbox keys for linked identities.
     let known_users = Arc::new(
-        crate::agents::KnownUsersRegistry::new(&data_dir)
+        crate::agents::KnownUsersRegistry::new(&base_dir)
             .with_resolver(Arc::clone(&user_resolver)),
     );
-    known_users.migrate_legacy(&data_dir);
+    known_users.migrate_legacy(&base_dir);
 
     // P4 用户实体注册表（uid/email/username，P1-B1 目录化
-    // `{data_dir}/users/{uuid}/meta.json`；旧 users.json 仅兜底读）。存量
+    // `{base_dir}/users/{uuid}/meta.json`；旧 users.json 仅兜底读）。存量
     // identity 一次性迁移归 `myclaw/u/root`（幂等：root 已存在即跳过）。
     // P4 第二波：namespace 取自 `[system] namespace`（默认 myclaw，存量
     // users.json/resolver 绑定零影响；改 namespace 的迁移见 RFC §2.2，本波不做）。
     let user_registry = Arc::new(crate::agents::UserRegistry::with_namespace(
-        &data_dir,
+        &base_dir,
         &config.system.namespace,
     ));
     user_registry.migrate_legacy_to_root(&known_users, &user_resolver);
@@ -1184,7 +1184,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // `agents/` (AGENT.md) and `skills/` (SKILL.md) are picked up live via
     // `AgentRegistry::reload_from_dir` / `SkillManager::reload` — no daemon
     // restart needed.
-    // P1: agents/skills 热加载目录随 data dir（系统配置面）。
+    // P1: agents/skills 热加载目录随 base dir（系统配置面）。
     let _watcher = crate::agents::WorkspaceWatcher::spawn_managed_with_roots(
         config.skills_root(),
         config.agents_root(),
@@ -1511,7 +1511,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         delegation_rx,
         scheduler_rx: Some(scheduler_rx),
         workspace_dir: config.workspace_dir.clone(),
-        data_dir: data_dir.clone(),
+        base_dir: base_dir.clone(),
         scheduler: Some(shared_scheduler.clone()),
         ask_router: Arc::clone(&ask_router),
         known_users: Arc::clone(&known_users),
@@ -1928,8 +1928,8 @@ mod tests {
 /// Reset the persisted Telegram update offset so that `getUpdates` returns
 /// recent messages instead of skipping everything the old process already
 /// fetched.  The dedup layer in TelegramChannel will filter any duplicates.
-fn reset_telegram_offset(data_dir: &std::path::Path) {
-    let offset_path = data_dir.join("telegram_offset");
+fn reset_telegram_offset(base_dir: &std::path::Path) {
+    let offset_path = base_dir.join("telegram_offset");
     if offset_path.exists() {
         if let Err(e) = std::fs::remove_file(&offset_path) {
             tracing::warn!(err = %e, path = %offset_path.display(),

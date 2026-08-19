@@ -27,14 +27,14 @@ pub fn run(cli: &Cli, to_namespace: &str, yes: bool) -> Result<()> {
         );
     }
 
-    // 3. 配置 → workspace_dir / data_dir（迁移入口参数）。
+    // 3. 配置 → workspace_dir / base_dir（迁移入口参数）。
     let cfg = load_config(cli)?;
     let workspace_dir = cfg.workspace_dir.clone();
-    let data_dir = myclaw::migration::default_data_dir();
+    let base_dir = myclaw::migration::default_base_dir();
     let from_ns = cfg.system.namespace.clone();
 
     // 4. 干跑：构建计划并展示。
-    let plan = myclaw::migration::build_plan(&workspace_dir, &data_dir, to_ns, false)
+    let plan = myclaw::migration::build_plan(&workspace_dir, &base_dir, to_ns, false)
         .context("构建迁移计划失败")?;
     if plan.is_empty() {
         println!("✅ 无需迁移：数据已符合目标命名空间 {to_ns}");

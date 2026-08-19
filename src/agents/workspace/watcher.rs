@@ -27,7 +27,7 @@ pub struct ChangeSet {
 
 /// 文件系统监视器。
 ///
-/// 监视 skills/ 和 agents/ 目录变化（P1: 随 data dir），通知 AgentLoop。
+/// 监视 skills/ 和 agents/ 目录变化（P1: 随 base dir），通知 AgentLoop。
 /// 通过 `rx` channel 发送变化信号。
 pub struct WorkspaceWatcher {
     /// 变化信号接收端（AgentLoop 持有）
@@ -38,7 +38,7 @@ pub struct WorkspaceWatcher {
 
 impl WorkspaceWatcher {
     pub fn new(workspace_dir: &Path, knowledge_dir: &Path) -> Result<Self> {
-        // P1: skills/agents 热加载目录随 data dir（系统配置面）。此构造器保留
+        // P1: skills/agents 热加载目录随 base dir（系统配置面）。此构造器保留
         // 旧签名（workspace 侧）以兼容既有调用；daemon 侧请用 `new_with_roots`。
         Self::new_with_roots(
             workspace_dir.join("skills"),
@@ -47,7 +47,7 @@ impl WorkspaceWatcher {
         )
     }
 
-    /// P1 variant: hot-reload roots supplied directly (data-dir derived).
+    /// P1 variant: hot-reload roots supplied directly (base-dir derived).
     pub fn new_with_roots(
         skills_dir: PathBuf,
         agents_dir: PathBuf,
@@ -137,7 +137,7 @@ impl WorkspaceWatcher {
         )
     }
 
-    /// P1 variant: reload roots supplied directly (data-dir derived).
+    /// P1 variant: reload roots supplied directly (base-dir derived).
     pub fn spawn_managed_with_roots(
         skills_dir: PathBuf,
         agents_dir: PathBuf,

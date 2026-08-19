@@ -172,7 +172,7 @@ pub struct DistillConfig {
 pub struct Scheduler {
     /// Jobs data protected by RwLock for concurrent access.
     jobs: RwLock<JobsFile>,
-    /// P1-B2: jobs entity root (`{data_dir}/jobs`). Each job lives at
+    /// P1-B2: jobs entity root (`{base_dir}/jobs`). Each job lives at
     /// `{root}/{dir_name(id)}/meta.json`; the legacy single-file
     /// `{root}/jobs.json` is read as a fallback (pre-migration layouts).
     jobs_root: PathBuf,
@@ -218,7 +218,7 @@ impl Scheduler {
         last_channel_file: PathBuf,
         last_recipient_file: PathBuf,
     ) -> SharedScheduler {
-        // P1-B2: `path` is the jobs root dir ({data_dir}/jobs). Accept a
+        // P1-B2: `path` is the jobs root dir ({base_dir}/jobs). Accept a
         // jobs.json path too (older embedders): normalize to its parent.
         let (jobs_root, legacy_path) = if path.extension().is_some_and(|e| e == "json") {
             let legacy = path.clone();

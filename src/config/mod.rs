@@ -6,7 +6,7 @@
 //! # Configuration file structure
 //!
 //! ```toml
-//! data_dir = "~/.myclaw"
+//! base_dir = "~/.myclaw"
 //! workspace_dir = "~/.myclaw/workspace"
 //!
 //! [providers.openai]
@@ -52,11 +52,11 @@
 //!
 //! 系统数据分两个根：
 //!
-//! - **data dir**（`data_dir`，默认 `~/.myclaw`）：系统数据库 +
+//! - **base dir**（`base_dir`，默认 `~/.myclaw`）：系统数据库 +
 //!   系统配置 + 运行时状态。daemon 启动依赖的实体（`sessions/`、`users/`、
 //!   `jobs/`、`memory/`、`agents/`、`skills/`、`backups/`、`state/`）全部
 //!   在这里。派生路径见 [`AppConfig::sessions_root`] 等方法。
-//! - **workspace dir**（`workspace_dir`，默认 `{data_dir}/workspace`）：agent
+//! - **workspace dir**（`workspace_dir`，默认 `{base_dir}/workspace`）：agent
 //!   工作台（cwd、代码仓库、过程产物）。daemon 启动不依赖其中任何东西，
 //!   可整体清理重建。
 
@@ -92,14 +92,14 @@ use routing::RoutingConfig;
 struct RawConfig {
     /// Data directory path（系统数据库 + 配置 + 运行时状态）。默认 `~/.myclaw`。
     #[serde(default)]
-    data_dir: Option<String>,
+    base_dir: Option<String>,
 
     /// Workspace directory path（agent 工作台，过程产物）。
-    /// 默认 `{data_dir}/workspace`。
+    /// 默认 `{base_dir}/workspace`。
     #[serde(default)]
     workspace_dir: Option<String>,
 
-    /// 知识库目录路径。默认为 {data_dir}/memory（已弃用显式配置）。
+    /// 知识库目录路径。默认为 {base_dir}/memory（已弃用显式配置）。
     #[serde(default)]
     knowledge_dir: Option<String>,
 
@@ -380,12 +380,12 @@ fn glob_match_chars(pat: &[char], seg: &[char]) -> bool {
 pub struct AppConfig {
     /// Data directory (absolute path) — system database + config + runtime
     /// state (sessions/users/jobs/memory/agents/skills/…). See the module
-    /// docs for the data-dir / workspace split.
-    pub data_dir: PathBuf,
+    /// docs for the base-dir / workspace split.
+    pub base_dir: PathBuf,
     /// Workspace directory (absolute path) — agent working area (process
-    /// artifacts, repositories). Defaults to `{data_dir}/workspace`.
+    /// artifacts, repositories). Defaults to `{base_dir}/workspace`.
     pub workspace_dir: PathBuf,
-    /// Knowledge directory (absolute path). Defaults to {data_dir}/memory.
+    /// Knowledge directory (absolute path). Defaults to {base_dir}/memory.
     pub knowledge_dir: PathBuf,
     /// Path to the config file.
     pub config_path: PathBuf,
@@ -427,45 +427,45 @@ use std::sync::OnceLock;
 
 static SAFETY_CONFIG: OnceLock<SafetyConfig> = OnceLock::new();
 
-/// Default data dir — `~/.myclaw`. Single source of truth: everything else
+/// Default base dir — `~/.myclaw`. Single source of truth: everything else
 /// that needs this default (migration.rs, TelegramChannel's telegram_offset
 /// fallback, migrate-layout.py) must derive from this, not recompute its own
 /// platform-specific guess — a prior XDG-based implementation here diverged
 /// from those other call sites' hardcoded `~/.myclaw` assumption and caused
 /// data to split across two untracked directory trees on real deployments.
-pub fn default_data_dir() -> PathBuf {
+pub fn default_base_dir() -> PathBuf {
     PathBuf::from(shellexpand::tilde("~/.myclaw").to_string())
 }
 
 impl AppConfig {
-    /// Session storage root: `{data_dir}/sessions`.
+    /// Session storage root: `{base_dir}/sessions`.
     pub fn sessions_root(&self) -> PathBuf {
-        self.data_dir.join("sessions")
+        self.base_dir.join("sessions")
     }
 
-    /// User entity root: `{data_dir}/users`.
+    /// User entity root: `{base_dir}/users`.
     pub fn users_root(&self) -> PathBuf {
-        self.data_dir.join("users")
+        self.base_dir.join("users")
     }
 
-    /// Job (cron/webhook) entity root: `{data_dir}/jobs`.
+    /// Job (cron/webhook) entity root: `{base_dir}/jobs`.
     pub fn jobs_root(&self) -> PathBuf {
-        self.data_dir.join("jobs")
+        self.base_dir.join("jobs")
     }
 
-    /// Skills root: `{data_dir}/skills`.
+    /// Skills root: `{base_dir}/skills`.
     pub fn skills_root(&self) -> PathBuf {
-        self.data_dir.join("skills")
+        self.base_dir.join("skills")
     }
 
-    /// Sub-agent definitions root: `{data_dir}/agents`.
+    /// Sub-agent definitions root: `{base_dir}/agents`.
     pub fn agents_root(&self) -> PathBuf {
-        self.data_dir.join("agents")
+        self.base_dir.join("agents")
     }
 
-    /// Migration backups root: `{data_dir}/backups`.
+    /// Migration backups root: `{base_dir}/backups`.
     pub fn backups_root(&self) -> PathBuf {
-        self.data_dir.join("backups")
+        self.base_dir.join("backups")
     }
 }
 
@@ -518,37 +518,37 @@ impl ConfigLoader {
         // Expand environment variables in all string fields.
         Self::expand_env_vars(&mut raw);
 
-        // Resolve data_dir: explicit path or the default_data_dir() base
+        // Resolve base_dir: explicit path or the default_base_dir() base
         // (~/.myclaw) that everything else (workspace_dir, knowledge_dir,
         // sessions_root(), users_root(), etc.) nests under.
-        let data_dir = raw
-            .data_dir
+        let base_dir = raw
+            .base_dir
             .map(|dir| Self::expand_path(&dir))
-            .unwrap_or_else(default_data_dir);
+            .unwrap_or_else(default_base_dir);
 
-        // Resolve workspace_dir: explicit path or default `{data_dir}/workspace`.
+        // Resolve workspace_dir: explicit path or default `{base_dir}/workspace`.
         let workspace_dir = raw
             .workspace_dir
             .map(|dir| Self::expand_path(&dir))
-            .unwrap_or_else(|| data_dir.join("workspace"));
+            .unwrap_or_else(|| base_dir.join("workspace"));
 
         // Resolve knowledge_dir: explicit path (deprecated) or default
-        // `{data_dir}/memory`.
+        // `{base_dir}/memory`.
         let knowledge_dir = match raw.knowledge_dir {
             Some(d) => {
                 let expanded = Self::expand_path(&d);
                 tracing::warn!(
                     explicit = %expanded.display(),
-                    recommended = %data_dir.join("memory").display(),
-                    "knowledge_dir 显式配置已弃用，建议迁移至 {{data_dir}}/memory"
+                    recommended = %base_dir.join("memory").display(),
+                    "knowledge_dir 显式配置已弃用，建议迁移至 {{base_dir}}/memory"
                 );
                 expanded
             }
-            None => data_dir.join("memory"),
+            None => base_dir.join("memory"),
         };
 
         Ok(AppConfig {
-            data_dir,
+            base_dir,
             workspace_dir,
             knowledge_dir,
             config_path,
@@ -702,28 +702,28 @@ models = ["gpt-4o"]
     }
 
     #[test]
-    fn default_data_dir_is_dot_myclaw_under_home() {
+    fn default_base_dir_is_dot_myclaw_under_home() {
         let home = shellexpand::tilde("~").to_string();
-        assert_eq!(default_data_dir(), PathBuf::from(home).join(".myclaw"));
+        assert_eq!(default_base_dir(), PathBuf::from(home).join(".myclaw"));
     }
 
     #[test]
-    fn unset_data_dir_puts_workspace_and_memory_under_the_default() {
+    fn unset_base_dir_puts_workspace_and_memory_under_the_default() {
         let config = ConfigLoader::from_toml("").unwrap();
-        assert_eq!(config.data_dir, default_data_dir());
-        assert_eq!(config.workspace_dir, config.data_dir.join("workspace"));
-        assert_eq!(config.knowledge_dir, config.data_dir.join("memory"));
-        assert_eq!(config.sessions_root(), config.data_dir.join("sessions"));
-        assert_eq!(config.users_root(), config.data_dir.join("users"));
+        assert_eq!(config.base_dir, default_base_dir());
+        assert_eq!(config.workspace_dir, config.base_dir.join("workspace"));
+        assert_eq!(config.knowledge_dir, config.base_dir.join("memory"));
+        assert_eq!(config.sessions_root(), config.base_dir.join("sessions"));
+        assert_eq!(config.users_root(), config.base_dir.join("users"));
     }
 
     #[test]
-    fn explicit_data_dir_still_bases_workspace_and_memory_on_it() {
-        let toml_str = r#"data_dir = "/tmp/myclaw-explicit-data-dir""#;
+    fn explicit_base_dir_still_bases_workspace_and_memory_on_it() {
+        let toml_str = r#"base_dir = "/tmp/myclaw-explicit-base-dir""#;
         let config = ConfigLoader::from_toml(toml_str).unwrap();
-        assert_eq!(config.data_dir, PathBuf::from("/tmp/myclaw-explicit-data-dir"));
-        assert_eq!(config.workspace_dir, config.data_dir.join("workspace"));
-        assert_eq!(config.knowledge_dir, config.data_dir.join("memory"));
+        assert_eq!(config.base_dir, PathBuf::from("/tmp/myclaw-explicit-base-dir"));
+        assert_eq!(config.workspace_dir, config.base_dir.join("workspace"));
+        assert_eq!(config.knowledge_dir, config.base_dir.join("memory"));
     }
 
     #[test]

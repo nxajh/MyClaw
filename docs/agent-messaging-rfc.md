@@ -58,7 +58,7 @@ Claude Code v2.1.224 引入 cross-session messaging(SendMessage/ListAgents)。�
 - 绑定由**用户行为驱动**:在新渠道 `/link @昵称` 认领身份,框架向**被认领账号**推送 6 位一次性验证码(框架模板直发,零 LLM token),新渠道回 `/link_confirm 验证码` 证明同时掌握两渠道,验证通过后 `resolver.set(rk, uid)` + `migrate_identity`。
 - 验证码安全边界:6 位数字、10 分钟 TTL、3 次错误作废、不能绑自己、已绑定渠道拒绝重复绑定(暂无解绑,报错提示);目标渠道不可达时回滚 pending。
 - 绑定仅**命令通道**(同 block/unblock 哲学),不进工具集——安全敏感操作,防 LLM 误触发。
-- `UserResolver` 持久化(`{data_dir}/user_resolver.json`,version 1,`set()` 即写盘):绑定关系跨重启保留;待确认验证码状态仅内存(重启后重新 `/link` 即可)。
+- `UserResolver` 持久化(`{base_dir}/user_resolver.json`,version 1,`set()` 即写盘):绑定关系跨重启保留;待确认验证码状态仅内存(重启后重新 `/link` 即可)。
 - 折叠语义:contacts / mailbox / sender 身份 / last_seen 一律经 `resolve_uid()` 按"人"折叠;`users` 表保持 routing_key 键(登记簿语义,渠道级活跃度各自记录)。
 - `migrate_identity(old_rk, new_uid)`:绑定成功时把旧 rk 的 mailbox 并入新身份、owner 维度联系人合并、其他好友侧指向旧 rk 的关系重指新身份(昵称跟随折叠身份)。
 
@@ -274,11 +274,11 @@ bob 侧:   contacts["<bob_user_id>"]["<alice_user_id>"] = { "status": "accepted"
 ### P3:跨渠道身份绑定(方案 B:用户主动)
 
 改动:
-- `agents/user_profile.rs`:`UserResolver` 持久化(`persistent(data_dir)` + `user_resolver.json`,version 1,`set()` 即写盘)
+- `agents/user_profile.rs`:`UserResolver` 持久化(`persistent(base_dir)` + `user_resolver.json`,version 1,`set()` 即写盘)
 - `agents/known_users.rs`:`with_resolver()` / `resolve_uid()` 折叠接入 + `migrate_identity()`(mailbox 合并、owner 维度合并、peer 键重指)
 - `agents/commands/link.rs`(新):`/link` + `/link_confirm` 命令(验证码绑定流程,仅命令通道)
 - `tools/send_message.rs` + `commands/friends.rs`:sender 身份折叠(`resolve_uid`)
-- `daemon.rs`:user_resolver 与 known_users 共享 data_dir 接线
+- `daemon.rs`:user_resolver 与 known_users 共享 base_dir 接线
 
 验收:
 - [x] 新渠道 `/link @昵称` → 被认领账号所在渠道收到 6 位一次性验证码(框架模板直发,零 LLM token)
@@ -290,7 +290,7 @@ bob 侧:   contacts["<bob_user_id>"]["<alice_user_id>"] = { "status": "accepted"
 ### P4:用户实体层(邮箱 + uid 双标识 + 用户自助)
 
 改动(第一波):
-- `agents/user_registry.rs`(新):UserRegistry + `users.json`(version 1)持久化(`persistent(data_dir)`,每次变更写盘);`User{uid,email,nickname,active,created_ms}`;register / set_email(旧邮箱释放+唯一性回滚) / set_nickname / find_by_uid / find_by_email(大小写归一);validate_uid(`[a-z0-9_]+` 3–32 位 + 保留字 root/admin/system/bot/help/register)/ validate_email / validate_nickname(不允许 `/`);ensure_root
+- `agents/user_registry.rs`(新):UserRegistry + `users.json`(version 1)持久化(`persistent(base_dir)`,每次变更写盘);`User{uid,email,nickname,active,created_ms}`;register / set_email(旧邮箱释放+唯一性回滚) / set_nickname / find_by_uid / find_by_email(大小写归一);validate_uid(`[a-z0-9_]+` 3–32 位 + 保留字 root/admin/system/bot/help/register)/ validate_email / validate_nickname(不允许 `/`);ensure_root
 - `agents/commands/register.rs`(新):`/register <邮箱> <uid>`(创建 User + 当前 rk 经 resolver 绑定 FQID + migrate_identity 折叠;已注册拒绝)/ `/email set <邮箱>` / `/nickname set <昵称>`;`pub(crate) parse_target`(u/uid / 完整 FQID / 邮箱;`@昵称` → 第二波明确报错)命令/工具层共用
 - `agents/orchestrator/inbound.rs`:Gate 拦截器挂 chain 第 4 位(AskReply→Callback→CrashRecovery→Gate→SlashCommand→DispatchTurn);白名单 register/email/link/link_confirm/help/whoami;未注册 rk 的其余入站直接框架模板回复(GATE_PROMPT,零 LLM token),注册判定 = `user_registry.is_user_id(resolve_uid(rk))`
 - `agents/known_users.rs`:删 ContactEntry.nickname 快照(显示实时化)+ `rk_keys`/`rekey_legacy_to`(迁移用);提醒文案 recipient 渲染为 u/uid 或邮箱
@@ -314,7 +314,7 @@ bob 侧:   contacts["<bob_user_id>"]["<alice_user_id>"] = { "status": "accepted"
 - `agents/runtime.rs`:`AgentRuntime.user_registry: Option<Arc<UserRegistry>>` + `with_user_registry`(不影响 new 调用点)
 - `agents/agent.rs`:`collect_stream` 加 `user_registry` 参数;chunk 过 RefRenderer、返回 text 整段 render_refs(Done push / fallback send / history 同源,已渲染)
 - `config/mod.rs`:`MessagingConfig`(`namespace` 默认 `myclaw`)+ `SmtpConfig`(host/port/username/password/from 全 Option,支持 `${ENV}` 展开);`AppConfig.messaging`
-- `daemon.rs`:UserRegistry 改 `with_namespace(&data_dir, &config.messaging.namespace)`(默认 myclaw 存量零影响)+ agent_runtime `.with_user_registry(...)`
+- `daemon.rs`:UserRegistry 改 `with_namespace(&base_dir, &config.messaging.namespace)`(默认 myclaw 存量零影响)+ agent_runtime `.with_user_registry(...)`
 
 验收(第二波):
 - [x] 入站 `@u/uid` 精确解析不限关系;`@昵称` 仅关系内实时昵称比对;未找到/重名多命中 → 框架模板拦截(零 token);邮箱 `a@b.com` 不误伤(单测 `resolve_*` 9 项)

@@ -205,7 +205,7 @@ pub struct ClientChannel {
     tool_specs: Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
     /// Workspace directory for memory API (set once after construction).
     workspace_dir: Arc<OnceLock<std::path::PathBuf>>,
-    /// Knowledge dir ({data_dir}/memory) — single flat memory pool where
+    /// Knowledge dir ({base_dir}/memory) — single flat memory pool where
     /// ownership is a frontmatter attribute (set once after construction).
     knowledge_dir: Arc<OnceLock<std::path::PathBuf>>,
     /// Config file path for config read/write API (set once after construction).

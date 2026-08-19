@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MyClaw 存储布局迁移脚本（P1）。设计文档：docs/storage-layout-and-trigger-redesign.md §5。
 
-旧布局（实体数据在 workspace 下）→ 新布局（sessions/users/jobs/memory 等归 data dir，
+旧布局（实体数据在 workspace 下）→ 新布局（sessions/users/jobs/memory 等归 base dir，
 session 目录裸 uuid、users/jobs 拆分目录化、memory 平铺 + frontmatter scope 属性）。
 
 用法：
@@ -97,8 +97,8 @@ def inject_frontmatter(
 # ── 前置自检 ────────────────────────────────────────────────────────────────
 
 
-def check_daemon_stopped(data: Path) -> None:
-    pid_file = data / "myclaw.pid"
+def check_daemon_stopped(base: Path) -> None:
+    pid_file = base / "myclaw.pid"
     if pid_file.exists():
         raw = pid_file.read_text().strip()
         if raw.isdigit() and Path(f"/proc/{raw}").exists():
@@ -121,13 +121,13 @@ def check_daemon_stopped(data: Path) -> None:
 # 的子目录：
 #   .versions/{name}/v{N}__{date}__{hash}.md —— memory_tool.rs 的版本归档，
 #       目标同样是扁平池下的 .versions/{name}/（不区分用户，与运行时布局一致）
-#   .audit/ —— 运行时审计日志，目标是 {data}/state/memory/.audit/（不在
-#       memory 池里，memory_tool.rs 写在 data_dir/state/memory/.audit）
+#   .audit/ —— 运行时审计日志，目标是 {base}/state/memory/.audit/（不在
+#       memory 池里，memory_tool.rs 写在 base_dir/state/memory/.audit）
 #   其它任意子目录（如 project/、reference/）—— 更早期"按 type 分子目录"的
 #       遗留布局，拍平进 memory 池并补 type: <目录名>（MemoryFile.mem_type 是
 #       必填字段，缺失直接解析失败、对整个系统不可见，不只是分类丢失）
 def migrate_memory_subdir_extras(
-    p: Plan, memdir: Path, D: Any, scope: str, user_id: str | None, note_prefix: str
+    p: Plan, memdir: Path, B: Any, scope: str, user_id: str | None, note_prefix: str
 ) -> None:
     if not memdir.is_dir():
         return
@@ -135,7 +135,7 @@ def migrate_memory_subdir_extras(
     if versions_dir.is_dir():
         for f in sorted(versions_dir.rglob("*.md")):
             rel_path = f.relative_to(versions_dir)
-            dst = D("memory", ".versions", *rel_path.parts)
+            dst = B("memory", ".versions", *rel_path.parts)
             if dst.exists():
                 if dst.read_bytes() == f.read_bytes():
                     continue  # 内容一致（哈希落在文件名里）——之前已迁移过，幂等跳过
@@ -147,7 +147,7 @@ def migrate_memory_subdir_extras(
             if f.is_dir():
                 continue
             rel_path = f.relative_to(audit_dir)
-            dst = D("state", "memory", ".audit", *rel_path.parts)
+            dst = B("state", "memory", ".audit", *rel_path.parts)
             if dst.exists():
                 print(f"提示：{rel_path} 目标已存在，保留旧文件，跳过迁移源 {f}")
                 continue
@@ -157,7 +157,7 @@ def migrate_memory_subdir_extras(
             continue
         mem_type = sub.name
         for f in sorted(sub.rglob("*.md")):
-            dst = D("memory", f.name)
+            dst = B("memory", f.name)
             if dst.exists():
                 print(f"警告：遗留 type={mem_type} 分区 memory 同名跳过 {f.name}")
                 continue
@@ -168,33 +168,33 @@ def migrate_memory_subdir_extras(
 # ── 计划构建 ────────────────────────────────────────────────────────────────
 
 
-def build_plan(ws: Path, data: Path) -> Plan:
+def build_plan(ws: Path, base: Path) -> Plan:
     p = Plan()
 
     def W(*parts: str) -> Path:
         return ws.joinpath(*parts)
 
-    def D(*parts: str) -> Path:
-        return data.joinpath(*parts)
+    def B(*parts: str) -> Path:
+        return base.joinpath(*parts)
 
-    # ── A 组：目录搬迁（workspace → data dir） ──
-    # A1 backups 先搬（tar 备份要落在 data/backups/pre-layout/ 里）
-    if W("backups").exists() and not D("backups").exists():
-        p.add(kind="move", src=W("backups"), dst=D("backups"), note="A1 backups/ → data")
-    if W("sessions").exists() and not D("sessions").exists():
-        p.add(kind="move", src=W("sessions"), dst=D("sessions"), note="A2 sessions/ → data")
-    if W("users").exists() and not D("users").exists():
-        p.add(kind="move", src=W("users"), dst=D("users"), note="A3 users/ → data")
-    # A4 memory：逐 md 合并进 data/memory（data 侧可能已有少量文件）。子目录
+    # ── A 组：目录搬迁（workspace → base dir） ──
+    # A1 backups 先搬（tar 备份要落在 base/backups/pre-layout/ 里）
+    if W("backups").exists() and not B("backups").exists():
+        p.add(kind="move", src=W("backups"), dst=B("backups"), note="A1 backups/ → base")
+    if W("sessions").exists() and not B("sessions").exists():
+        p.add(kind="move", src=W("sessions"), dst=B("sessions"), note="A2 sessions/ → base")
+    if W("users").exists() and not B("users").exists():
+        p.add(kind="move", src=W("users"), dst=B("users"), note="A3 users/ → base")
+    # A4 memory：逐 md 合并进 base/memory（base 侧可能已有少量文件）。子目录
     # （.versions/.audit/遗留 type 分区，如 project/、reference/）单独归位——
     # 历史上这里只扫第一层 *.md，子目录内容会被无声漏掉。
     if W("memory").is_dir():
         for f in sorted(W("memory").glob("*.md")):
-            dst = D("memory", f.name)
+            dst = B("memory", f.name)
             if dst.exists():
-                sys.exit(f"错误：memory 名称冲突 {f.name}（data/memory 已存在同名文件）——人工决断后重跑")
+                sys.exit(f"错误：memory 名称冲突 {f.name}（base/memory 已存在同名文件）——人工决断后重跑")
             p.add(kind="move", src=f, dst=dst, note="A4 memory 平铺合并")
-        migrate_memory_subdir_extras(p, W("memory"), D, "agent", None, "A4")
+        migrate_memory_subdir_extras(p, W("memory"), B, "agent", None, "A4")
     if W("memory").is_dir():
         # rmdir_empty_tree 自底向上清空壳，含文件移出后留下的空子目录
         # （.versions/xxx/、.audit/、遗留 type 分区）；真有文件剩下会保留+警告，
@@ -209,31 +209,31 @@ def build_plan(ws: Path, data: Path) -> Plan:
             m = UUID_ANY_RE.search(jid)
             if not m:
                 sys.exit(f"错误：jobs.json 条目无 FQID uuid：{jid!r}")
-            p.add(kind="created", dst=D("jobs", m.group(0), "meta.json"),
+            p.add(kind="created", dst=B("jobs", m.group(0), "meta.json"),
                   note="A5 jobs.json 拆分", meta={"entry": e})
         rl = W("cron", "run_logs")
         if rl.is_dir():
             for f in sorted(rl.iterdir()):
                 m = UUID_ANY_RE.search(f.name)
                 if m:
-                    p.add(kind="move", src=f, dst=D("jobs", m.group(0), "history.jsonl"),
+                    p.add(kind="move", src=f, dst=B("jobs", m.group(0), "history.jsonl"),
                           note="A5 run_logs → history.jsonl")
                 else:
                     print(f"警告：run_logs 无法解析 uuid，跳过 {f.name}")
         p.add(kind="move", src=jobs_json,
-              dst=D("backups", "pre-layout", "jobs.json.bak"), note="A5 旧 jobs.json 归备份")
+              dst=B("backups", "pre-layout", "jobs.json.bak"), note="A5 旧 jobs.json 归备份")
     # A6 agents / skills
     for name in ("agents", "skills"):
-        if W(name).exists() and not D(name).exists():
-            p.add(kind="move", src=W(name), dst=D(name), note=f"A6 {name}/ → data")
+        if W(name).exists() and not B(name).exists():
+            p.add(kind="move", src=W(name), dst=B(name), note=f"A6 {name}/ → base")
     # A7 旧 sessions 归档批次目录
     for d in sorted(ws.glob("sessions.*-archive*")):
         if d.is_dir():
-            p.add(kind="move", src=d, dst=D("sessions", ".legacy", d.name),
+            p.add(kind="move", src=d, dst=B("sessions", ".legacy", d.name),
                   note="A7 归档批次 → .legacy")
-    # A8 .state：tasks.json → sessions/.legacy；其余 → data/state
+    # A8 .state：tasks.json → sessions/.legacy；其余 → base/state
     #
-    # 目标已存在（常见场景：新代码已经在 data/state 直接跑起来一段时间，
+    # 目标已存在（常见场景：新代码已经在 base/state 直接跑起来一段时间，
     # workspace/.state 那份是重构前的遗留数据）不再整体报错退出——逐文件
     # 合并，已存在的目标条目原样跳过（execute_action 的 move 本来就是这个
     # 语义，这里只是让目录级冲突也享受同样的幂等 skip，而不是卡住整个迁移）。
@@ -242,32 +242,32 @@ def build_plan(ws: Path, data: Path) -> Plan:
     if W(".state").is_dir():
         for f in sorted(W(".state").iterdir()):
             if f.name.startswith("tasks.json"):
-                p.add(kind="move", src=f, dst=D("sessions", ".legacy", f.name),
+                p.add(kind="move", src=f, dst=B("sessions", ".legacy", f.name),
                       note="A8 全局任务板归档（P1 起任务板 per-session）")
             elif f.is_dir():
                 # 先保证目标目录本身存在——目录可能是空的（没有文件触发
-                # mkdir(parents=True)），但仍需要在 data 侧占位存在。
-                p.add(kind="mkdir", dst=D("state", f.name), note="A8 目录合并占位")
+                # mkdir(parents=True)），但仍需要在 base 侧占位存在。
+                p.add(kind="mkdir", dst=B("state", f.name), note="A8 目录合并占位")
                 for child in sorted(f.rglob("*")):
                     if child.is_dir():
                         continue
-                    p.add(kind="move", src=child, dst=D("state", f.name, str(child.relative_to(f))),
-                          note="A8 .state 运行时状态 → data/state（目录合并）")
+                    p.add(kind="move", src=child, dst=B("state", f.name, str(child.relative_to(f))),
+                          note="A8 .state 运行时状态 → base/state（目录合并）")
                 p.add(kind="removed_dir", src=f, note="A8 .state 子目录清壳")
             else:
-                p.add(kind="move", src=f, dst=D("state", f.name),
-                      note="A8 .state 运行时状态 → data/state")
+                p.add(kind="move", src=f, dst=B("state", f.name),
+                      note="A8 .state 运行时状态 → base/state")
         p.add(kind="removed_dir", src=W(".state"), note="A8 .state 清壳")
 
-    # ── B 组：实体形态迁移（data dir 内） ──
+    # ── B 组：实体形态迁移（base dir 内） ──
     # 扫描位置带回退：A 组未执行时（dry-run / round1）实体仍在 ws 侧，扫等价位置
     def pick(name: str) -> Path:
-        d, w = D(name), W(name)
+        d, w = B(name), W(name)
         return d if d.is_dir() else (w if w.is_dir() else d)
 
-    # B 组动作的 dst 一律指向 data 侧（src 用扫描侧：dry-run/round1 回退到 ws，
-    # 执行时 round2 重建为 data 侧）
-    d_sess = D("sessions")
+    # B 组动作的 dst 一律指向 base 侧（src 用扫描侧：dry-run/round1 回退到 ws，
+    # 执行时 round2 重建为 base 侧）
+    d_sess = B("sessions")
 
     # B9 session 目录裸化
     sess = pick("sessions")
@@ -315,12 +315,12 @@ def build_plan(ws: Path, data: Path) -> Plan:
                         continue
                     user_id = f"{NAMESPACE}/u/{udir.name}"
                     for f in sorted(memdir.glob("*.md")):
-                        dst = D("memory", f.name)
+                        dst = B("memory", f.name)
                         if dst.exists():
                             sys.exit(f"错误：memory 名称冲突 {f.name}（user 层迁移目标已存在）——人工决断")
                         p.add(kind="move", src=f, dst=dst, note="B12 user memory 平铺",
                               meta={"scope": "user", "user_id": user_id})
-                    migrate_memory_subdir_extras(p, memdir, D, "user", user_id, "B12")
+                    migrate_memory_subdir_extras(p, memdir, B, "user", user_id, "B12")
             dbl = main / NAMESPACE / "u"
             if dbl.is_dir():
                 for udir in sorted(dbl.iterdir()):
@@ -330,28 +330,28 @@ def build_plan(ws: Path, data: Path) -> Plan:
                             continue
                         user_id = f"{NAMESPACE}/u/{udir.name}"
                         for f in sorted(memdir.glob("*.md")):
-                            dst = D("memory", f.name)
+                            dst = B("memory", f.name)
                             if dst.exists():
                                 print(f"警告：双前缀 memory 同名跳过 {f.name}")
                                 continue
                             p.add(kind="move", src=f, dst=dst, note="B12 双前缀并入主用户",
                                   meta={"scope": "user", "user_id": user_id})
-                        migrate_memory_subdir_extras(p, memdir, D, "user", user_id, "B12 双前缀")
+                        migrate_memory_subdir_extras(p, memdir, B, "user", user_id, "B12 双前缀")
             root_mem = main / "root" / "memory"
             if root_mem.is_dir():
                 # root 不注入共享池——.versions/遗留 type 分区也一并按原相对
                 # 路径归档到 .legacy-root-memory，不补 scope/type（原样保留）。
                 for f in sorted(root_mem.rglob("*.md")):
                     rel_path = f.relative_to(root_mem)
-                    p.add(kind="move", src=f, dst=D("users", ".legacy-root-memory", *rel_path.parts),
+                    p.add(kind="move", src=f, dst=B("users", ".legacy-root-memory", *rel_path.parts),
                           note="B12 root memory 归档（不注入）")
         if (users / NAMESPACE).exists():
             p.add(kind="removed_dir", src=users / NAMESPACE,
                   note="B12 users/myclaw 清壳（.legacy-rk-archive 保留）")
     # B13 agent 层 memory 补 scope: agent（凡无 scope 键的；A4 已经把
-    # workspace/memory 的内容——含子目录——并入 data/memory，这里只需要对
+    # workspace/memory 的内容——含子目录——并入 base/memory，这里只需要对
     # 落位后仍缺 scope 键的文件补齐，不用再 pick() 二选一）。
-    mem_dir = D("memory")
+    mem_dir = B("memory")
     if mem_dir.is_dir():
         for f in sorted(mem_dir.glob("*.md")):
             txt = f.read_text()
@@ -359,7 +359,7 @@ def build_plan(ws: Path, data: Path) -> Plan:
                 p.add(kind="modified", src=f, note="B13 agent memory 补 scope",
                       meta={"scope": "agent"})
     # B14 users.json（若存在）拆分为 users/{uuid}/meta.json
-    uj = D("users.json")
+    uj = B("users.json")
     if uj.exists():
         reg = json.loads(uj.read_text())
         entries = reg.get("users", reg) if isinstance(reg, dict) else {}
@@ -370,12 +370,12 @@ def build_plan(ws: Path, data: Path) -> Plan:
                 continue
             body = dict(user) if isinstance(user, dict) else {"value": user}
             body.setdefault("id", uid)
-            p.add(kind="created", dst=D("users", m.group(0), "meta.json"),
+            p.add(kind="created", dst=B("users", m.group(0), "meta.json"),
                   note="B14 users.json 拆分", meta={"entry": body})
-        p.add(kind="move", src=uj, dst=D("backups", "pre-layout", "users.json.bak"),
+        p.add(kind="move", src=uj, dst=B("backups", "pre-layout", "users.json.bak"),
               note="B14 旧 users.json 归备份")
     # B15 heartbeat 提示（不修改 TOML）
-    toml = data / "myclaw.toml"
+    toml = base / "myclaw.toml"
     if toml.exists() and "[scheduler.heartbeat]" in toml.read_text():
         p.add(kind="notify",
               note="B15 检测到 [scheduler.heartbeat] 配置：P3 将删除该机制，请手动移除该配置段")
@@ -386,7 +386,7 @@ def build_plan(ws: Path, data: Path) -> Plan:
 # ── 执行 ────────────────────────────────────────────────────────────────────
 
 
-def make_backup(ws: Path, data: Path, plan: Plan, bak_dir: Path) -> Path:
+def make_backup(ws: Path, base: Path, plan: Plan, bak_dir: Path) -> Path:
     """备份被 in-place 修改/拆分的小文件（rename 类不备份，靠 manifest 逆向）。"""
     bundle = bak_dir / "bundle.tar.gz"
     if bundle.exists():
@@ -396,18 +396,18 @@ def make_backup(ws: Path, data: Path, plan: Plan, bak_dir: Path) -> Path:
     targets: list[tuple[Path, str]] = []
     for a in plan.actions:
         if a.kind == "modified" and a.src:
-            if a.src.is_relative_to(data):
-                targets.append((a.src, f"data/{rel(a.src, data)}"))
+            if a.src.is_relative_to(base):
+                targets.append((a.src, f"base/{rel(a.src, base)}"))
             else:
                 targets.append((a.src, f"ws/{rel(a.src, ws)}"))
-    # round2 时实体已在 data 侧原位
-    extra = [data / "sessions" / "active.json", data / "sessions" / "delegations"]
+    # round2 时实体已在 base 侧原位
+    extra = [base / "sessions" / "active.json", base / "sessions" / "delegations"]
     for e in extra:
         if e.is_file():
-            targets.append((e, f"data/{rel(e, data)}"))
+            targets.append((e, f"base/{rel(e, base)}"))
         elif e.is_dir():
             for f in e.rglob("*.json"):
-                targets.append((f, f"data/{rel(f, data)}"))
+                targets.append((f, f"base/{rel(f, base)}"))
     with tarfile.open(bundle, "x:gz") as tar:
         for p, arc in targets:
             if p.exists():
@@ -415,30 +415,30 @@ def make_backup(ws: Path, data: Path, plan: Plan, bak_dir: Path) -> Path:
     return bundle
 
 
-def apply(ws: Path, data: Path) -> None:
-    check_daemon_stopped(data)
-    bak_dir = data / "backups" / "pre-layout"
+def apply(ws: Path, base: Path) -> None:
+    check_daemon_stopped(base)
+    bak_dir = base / "backups" / "pre-layout"
     manifest: dict[str, Any] = {
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "workspace": str(ws), "data": str(data),
+        "workspace": str(ws), "base": str(base),
         "moves": [], "created": [], "modified": [], "removed_dirs": [], "notifies": [],
         "backup": str(bak_dir / "bundle.tar.gz"),
     }
     total = 0
     try:
-        # 两轮构建：round1 搬 A 组（workspace → data）；round2 时 B 组扫描才能看到
-        # 已落位的实体（B9 扫 data/sessions、B12 扫 data/users、B13 扫 data/memory）。
+        # 两轮构建：round1 搬 A 组（workspace → base）；round2 时 B 组扫描才能看到
+        # 已落位的实体（B9 扫 base/sessions、B12 扫 base/users、B13 扫 base/memory）。
         for rnd in (1, 2):
-            plan = build_plan(ws, data)
+            plan = build_plan(ws, base)
             if not plan.actions:
                 break
             if rnd == 2:
-                # B 组执行前打 tar：modified 源文件此刻均在 data 侧原位
-                bundle = make_backup(ws, data, plan, bak_dir)
+                # B 组执行前打 tar：modified 源文件此刻均在 base 侧原位
+                bundle = make_backup(ws, base, plan, bak_dir)
                 print(f"备份完成：{bundle}")
             for a in plan.actions:
                 try:
-                    n = execute_action(ws, data, a, manifest)
+                    n = execute_action(ws, base, a, manifest)
                 except Exception as e:  # noqa: BLE001 —— fail-fast：报告后中止，带上具体动作方便定位
                     sys.exit(
                         f"迁移中止（已完成 {total} 步）：{a.kind} "
@@ -473,7 +473,7 @@ def rmdir_empty_tree(path: Path) -> bool:
     return True
 
 
-def execute_action(ws: Path, data: Path, a: Action, manifest: dict[str, Any]) -> int:
+def execute_action(ws: Path, base: Path, a: Action, manifest: dict[str, Any]) -> int:
     """执行单个动作；返回 1=执行 / 0=跳过。"""
     if a.kind == "move":
         dst = a.dst
@@ -481,7 +481,7 @@ def execute_action(ws: Path, data: Path, a: Action, manifest: dict[str, Any]) ->
             print(f"跳过（目标已存在）：{a.note} {dst}")
             return 0
         if not a.src.exists():
-            # round1 构建的 B 组动作：A 组搬移后 src 已变（data 侧），round2 重建执行
+            # round1 构建的 B 组动作：A 组搬移后 src 已变（base 侧），round2 重建执行
             print(f"跳过（源已移动，待下轮）：{a.note} {a.src}")
             return 0
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -505,7 +505,7 @@ def execute_action(ws: Path, data: Path, a: Action, manifest: dict[str, Any]) ->
         a.dst.parent.mkdir(parents=True, exist_ok=True)
         a.dst.write_text(json.dumps(a.meta["entry"], ensure_ascii=False, indent=2) + "\n")
         manifest["created"].append(str(a.dst))
-        print(f"create {rel(a.dst, data)}")
+        print(f"create {rel(a.dst, base)}")
         return 1
     if a.kind == "modified":
         if not a.src.exists():
@@ -524,7 +524,7 @@ def execute_action(ws: Path, data: Path, a: Action, manifest: dict[str, Any]) ->
         if a.dst.exists():
             return 0
         a.dst.mkdir(parents=True, exist_ok=True)
-        print(f"mkdir {rel(a.dst, data)}")
+        print(f"mkdir {rel(a.dst, base)}")
         return 1
     if a.kind == "removed_dir":
         if a.src.exists() and rmdir_empty_tree(a.src):
@@ -541,11 +541,11 @@ def execute_action(ws: Path, data: Path, a: Action, manifest: dict[str, Any]) ->
     raise ValueError(f"未知动作类型 {a.kind}")
 
 
-def find_manifest(data: Path) -> Path:
-    base = data / "backups"
-    cands = sorted(base.glob("pre-layout*/manifest.json")) if base.is_dir() else []
+def find_manifest(base: Path) -> Path:
+    backups = base / "backups"
+    cands = sorted(backups.glob("pre-layout*/manifest.json")) if backups.is_dir() else []
     if not cands:
-        sys.exit(f"错误：未找到迁移 manifest（{base}/pre-layout*/manifest.json）")
+        sys.exit(f"错误：未找到迁移 manifest（{backups}/pre-layout*/manifest.json）")
     return cands[-1]
 
 
@@ -565,7 +565,7 @@ def _has_userid(f: Path) -> bool:
     return re.search(r"^user_id:", f.read_text(), re.M) is not None
 
 
-def verify(ws: Path, data: Path) -> int:
+def verify(ws: Path, base: Path) -> int:
     fails: list[str] = []
 
     def check(ok: bool, msg: str) -> None:
@@ -573,8 +573,8 @@ def verify(ws: Path, data: Path) -> int:
         if not ok:
             fails.append(msg)
 
-    sess = data / "sessions"
-    check(sess.is_dir(), "data/sessions 存在")
+    sess = base / "sessions"
+    check(sess.is_dir(), "base/sessions 存在")
     n_uuid = n_old = n_dele = 0
     if sess.is_dir():
         for d in sess.iterdir():
@@ -590,14 +590,14 @@ def verify(ws: Path, data: Path) -> int:
     check(not (sess / "delegations").exists(), "delegations/ 已消除")
     print(f"INFO session 目录 {n_uuid}（含 delegation.json {n_dele}）")
 
-    jobs = data / "jobs"
+    jobs = base / "jobs"
     if jobs.is_dir():
         dirs = [d for d in jobs.iterdir() if d.is_dir()]
         check(all((d / "meta.json").exists() for d in dirs), "每个 job 目录含 meta.json")
         n_hist = sum(1 for d in dirs if (d / "history.jsonl").exists())
         print(f"INFO jobs {len(dirs)}（含 history {n_hist}）")
 
-    mem = data / "memory"
+    mem = base / "memory"
     mds = list(mem.glob("*.md")) if mem.is_dir() else []
     no_scope = [f.name for f in mds if not _has_scope(f)]
     check(not no_scope, f"memory 全部含 scope 键（缺失 {len(no_scope)}：{no_scope[:3]}）")
@@ -608,7 +608,7 @@ def verify(ws: Path, data: Path) -> int:
 
     # .legacy-rk-archive/.legacy-root-memory 是设计上就该保留的归档
     # （B11/B12 归档目标），底下带 memory/ 子树是预期状态，不算残留。
-    users_dir = data / "users"
+    users_dir = base / "users"
     LEGACY_ARCHIVE_DIRS = (".legacy-rk-archive", ".legacy-root-memory")
     stray_memory = [
         f for f in (users_dir.rglob("memory/*.md") if users_dir.is_dir() else [])
@@ -617,7 +617,7 @@ def verify(ws: Path, data: Path) -> int:
     check(not stray_memory, f"users/ 下无 memory 子树残留（{len(stray_memory)}）")
     # 上面那条按 "memory/*.md" 模式找残留，抓不到 .versions/{name}/v1.md 这种
     # （直接父目录不叫 memory）——B12 应该把整个 users/{ns} 子树清空，单独验证。
-    check(not (data / "users" / NAMESPACE).exists(),
+    check(not (base / "users" / NAMESPACE).exists(),
           f"users/{NAMESPACE} 已清壳（含 .versions/.audit/遗留 type 分区）")
     ws_mem = ws / "memory"
     check(not ws_mem.is_dir() or not any(ws_mem.iterdir()),
@@ -631,9 +631,9 @@ def verify(ws: Path, data: Path) -> int:
     return 0 if not fails else 1
 
 
-def rollback(ws: Path, data: Path) -> None:
-    check_daemon_stopped(data)
-    mf = find_manifest(data)
+def rollback(ws: Path, base: Path) -> None:
+    check_daemon_stopped(base)
+    mf = find_manifest(base)
     man = json.loads(mf.read_text())
     print(f"回滚依据：{mf}")
     bak = Path(man["backup"])
@@ -648,13 +648,13 @@ def rollback(ws: Path, data: Path) -> None:
                 p.parent.rmdir()
             print(f"rm {c}")
     # 2) 先恢复 modified（tar 覆盖）——必须在逆 moves 之前：
-    #    A1 的逆向 move 会把 data/backups（含 bundle 本身）搬回 ws，
-    #    之后 bundle 路径即失效；且 modified 的 data 侧路径会随逆 move 消失
+    #    A1 的逆向 move 会把 base/backups（含 bundle 本身）搬回 ws，
+    #    之后 bundle 路径即失效；且 modified 的 base 侧路径会随逆 move 消失
     with tarfile.open(bak) as tar:
         names = set(tar.getnames())
         for mpath in man["modified"]:
             p = Path(mpath)
-            key = f"data/{rel(p, data)}" if p.is_relative_to(data) else f"ws/{rel(p, ws)}"
+            key = f"base/{rel(p, base)}" if p.is_relative_to(base) else f"ws/{rel(p, ws)}"
             if key in names and p.exists():
                 member = tar.extractfile(key)
                 if member:
@@ -675,15 +675,15 @@ def rollback(ws: Path, data: Path) -> None:
         shutil.move(str(src), str(dst))
         print(f"move {src} → {dst}")
     print("\n回滚完成。请换回旧二进制后再启动 daemon。"
-          "\n注意：data/backups 可能已随回滚整体迁回 workspace/backups（内含本次迁移备份）。")
+          "\n注意：base/backups 可能已随回滚整体迁回 workspace/backups（内含本次迁移备份）。")
 
 
-def dry_run(ws: Path, data: Path) -> None:
-    plan = build_plan(ws, data)
+def dry_run(ws: Path, base: Path) -> None:
+    plan = build_plan(ws, base)
     if not plan.actions:
         print("无需迁移（数据已符合目标布局）。")
         return
-    print(f"计划 {len(plan.actions)} 个动作（workspace={ws} data={data}）：\n")
+    print(f"计划 {len(plan.actions)} 个动作（workspace={ws} base={base}）：\n")
     for i, a in enumerate(plan.actions, 1):
         if a.kind == "move":
             print(f"{i:4}. move   {a.src} → {a.dst}   [{a.note}]")
@@ -699,8 +699,8 @@ def dry_run(ws: Path, data: Path) -> None:
             print(f"{i:4}. notify {a.note}")
 
 
-def default_data_dir() -> Path:
-    """必须与 Rust 侧 `default_data_dir()`（src/config/mod.rs，唯一权威来源，
+def default_base_dir() -> Path:
+    """必须与 Rust 侧 `default_base_dir()`（src/config/mod.rs，唯一权威来源，
     `src/migration.rs` 也委托给它）一致：`~/.myclaw`，不分平台。
 
     该函数一度实现成 XDG Base Directory 解析（`~/.local/share/myclaw`），
@@ -719,19 +719,19 @@ def main() -> None:
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--rollback", action="store_true")
     ap.add_argument("--workspace", type=Path, default=Path.home() / ".myclaw" / "workspace")
-    ap.add_argument("--data", type=Path, default=default_data_dir())
+    ap.add_argument("--base", type=Path, default=default_base_dir())
     args = ap.parse_args()
-    ws, data = args.workspace.resolve(), args.data.resolve()
+    ws, base = args.workspace.resolve(), args.base.resolve()
     if sum([args.dry_run, args.apply, args.verify, args.rollback]) != 1:
         ap.error("四选一：--dry-run / --apply / --verify / --rollback")
     if args.dry_run:
-        dry_run(ws, data)
+        dry_run(ws, base)
     elif args.apply:
-        apply(ws, data)
+        apply(ws, base)
     elif args.verify:
-        sys.exit(verify(ws, data))
+        sys.exit(verify(ws, base))
     elif args.rollback:
-        rollback(ws, data)
+        rollback(ws, base)
 
 
 if __name__ == "__main__":

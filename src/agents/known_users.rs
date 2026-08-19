@@ -196,9 +196,9 @@ pub struct KnownUsersRegistry {
 }
 
 impl KnownUsersRegistry {
-    /// Create a persistent registry backed by `{data_dir}/known_users.json`.
-    pub fn new(data_dir: &Path) -> Self {
-        let data_path = data_dir.join("known_users.json");
+    /// Create a persistent registry backed by `{base_dir}/known_users.json`.
+    pub fn new(base_dir: &Path) -> Self {
+        let data_path = base_dir.join("known_users.json");
         let reg = Self {
             users: DashMap::new(),
             rate_buckets: DashMap::new(),
@@ -291,12 +291,12 @@ impl KnownUsersRegistry {
     /// Migrate legacy `qqbot_known_users_{account}.json` files into the
     /// unified `known_users.json`. Called once at startup. No-op if the
     /// unified file already exists (already migrated or created fresh).
-    pub fn migrate_legacy(&self, data_dir: &Path) {
+    pub fn migrate_legacy(&self, base_dir: &Path) {
         if !self.users.is_empty() {
             return; // unified file already has data
         }
         let mut migrated = 0;
-        let read_dir = match std::fs::read_dir(data_dir) {
+        let read_dir = match std::fs::read_dir(base_dir) {
             Ok(rd) => rd,
             Err(_) => return,
         };
