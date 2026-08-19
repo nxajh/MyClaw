@@ -12,10 +12,9 @@
 //! lock-free reads, no `RwLock<Option<_>>` nesting. The remaining mutable
 //! maps use `parking_lot::RwLock`.
 //!
-//! Lock-ordering rule (to avoid deadlocks): acquire `connections` before
-//! `session_owners`; never hold either across an `.await`. The `skill_manager`
-//! inner `RwLock` is a leaf — take it last and release it before touching the
-//! connection maps.
+//! Lock-ordering rule (to avoid deadlocks): never hold a connection-map
+//! guard across an `.await`. The `skill_manager` inner `RwLock` is a leaf —
+//! take it last and release it before touching the connection maps.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -200,8 +199,6 @@ pub struct ClientChannel {
     session_buses: Arc<RwLock<HashMap<String, Arc<SyncMutex<SessionOutputBus>>>>>,
     /// Active connections: connection_id → ClientConnection.
     connections: Arc<RwLock<HashMap<String, ClientConnection>>>,
-    /// Reverse map: session_key → connection_id.
-    session_owners: Arc<RwLock<HashMap<String, String>>>,
     /// Session manager for management API (set once after construction).
     session_manager: Arc<OnceLock<Arc<crate::agents::SessionManager>>>,
     /// Tool specs for management API (set after construction).
@@ -234,7 +231,6 @@ impl ClientChannel {
             pre_bound: SyncMutex::new(None),
             session_buses: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
-            session_owners: Arc::new(RwLock::new(HashMap::new())),
             session_manager: Arc::new(OnceLock::new()),
             tool_specs: Arc::new(RwLock::new(Vec::new())),
             workspace_dir: Arc::new(OnceLock::new()),
@@ -328,7 +324,6 @@ impl ClientChannel {
         let message_tx = self.message_tx.clone();
         let session_buses = self.session_buses.clone();
         let connections = self.connections.clone();
-        let session_owners = self.session_owners.clone();
         let session_manager = self.session_manager.clone();
         let tool_specs = self.tool_specs.clone();
         let workspace_dir = self.workspace_dir.clone();
@@ -414,7 +409,6 @@ impl ClientChannel {
                         let message_tx_clone = message_tx.clone();
                         let session_buses_clone = session_buses.clone();
                         let connections_clone = connections.clone();
-                        let session_owners_clone = session_owners.clone();
                         let session_manager_clone = session_manager.clone();
                         let tool_specs_clone = tool_specs.clone();
                         let workspace_dir_clone = workspace_dir.clone();
@@ -456,7 +450,10 @@ impl ClientChannel {
                                 let mut is_authenticated = auth_token_clone.is_none();
                                 // Permission/session owner identity. For WebUI this is a stable
                                 // logical user; client_id remains only a per-browser device id.
-                                let mut client_user_id = conn_id_clone.clone();
+                                // Default matches the auth branch's fallback ("default") so
+                                // token-less deployments derive the same identity rk
+                                // (client:default:web-user:default) on their first message.
+                                let mut client_user_id = "web-user:default".to_string();
 
                                 while let Some(msg_result) =
                                     futures_util::StreamExt::next(&mut ws_stream).await
@@ -970,7 +967,7 @@ impl ClientChannel {
                             // Clean up on disconnect. Collect the
                             // connection's owned session_keys first, then
                             // drop the connections read-lock before taking
-                            // writes on session_owners + session_buses.
+                            // the write on session_buses.
                             //
                             // KEY CHANGE: detach subscribers but do NOT remove
                             // buses or trigger cancel. The bus survives so
@@ -990,12 +987,6 @@ impl ClientChannel {
                                     if let Some(bus) = buses.get(sk) {
                                         bus.lock().detach(&conn_id_clone);
                                     }
-                                }
-                            }
-                            {
-                                let mut owners = session_owners_clone.write();
-                                for sk in &owned_keys {
-                                    owners.remove(sk);
                                 }
                             }
                             {
