@@ -54,7 +54,9 @@ jobs:
         run: |
           sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list.d/ubuntu.sources || true
           sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list || true
-          sudo apt-get update && sudo apt-get install -y libclang-dev clang
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20 || true
+          sudo apt-get install -y libclang-dev clang
+
 
 
 
