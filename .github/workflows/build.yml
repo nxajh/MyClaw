@@ -53,7 +53,9 @@ jobs:
       - name: Install libclang (for silk-rs bindgen)
         run: |
           sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list.d/ubuntu.sources || true
+          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list || true
           sudo apt-get update && sudo apt-get install -y libclang-dev clang
+
 
 
       - name: Check
