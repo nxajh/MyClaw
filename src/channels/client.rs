@@ -12,10 +12,9 @@
 //! lock-free reads, no `RwLock<Option<_>>` nesting. The remaining mutable
 //! maps use `parking_lot::RwLock`.
 //!
-//! Lock-ordering rule (to avoid deadlocks): acquire `connections` before
-//! `session_owners`; never hold either across an `.await`. The `skill_manager`
-//! inner `RwLock` is a leaf — take it last and release it before touching the
-//! connection maps.
+//! Lock-ordering rule (to avoid deadlocks): never hold a connection-map
+//! guard across an `.await`. The `skill_manager` inner `RwLock` is a leaf —
+//! take it last and release it before touching the connection maps.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -41,6 +40,11 @@ use crate::config::channel::ClientConfig;
 
 // ── Session Output Bus ──────────────────────────────────────────────────────
 
+struct Subscriber {
+    conn_id: String,
+    sender: mpsc::Sender<String>,
+}
+
 /// Per-session output bus. Decouples turn execution from WebSocket connection
 /// lifetime. Survives disconnects; buffers events and messages for replay on
 /// reconnect. This is the single source of truth for output delivery — the WS
@@ -52,8 +56,9 @@ struct SessionOutputBus {
     event_buffer_capacity: usize,
     /// Non-streaming messages (send_message output) queued while no subscriber.
     message_queue: std::collections::VecDeque<String>,
-    /// Active WS subscriber: raw text mpsc → outgoing forwarder → ws_sink.
-    ws_sender: Option<mpsc::Sender<String>>,
+    /// Active WS subscribers: raw text mpsc → outgoing forwarder → ws_sink.
+    /// Multiple connections of the same identity may subscribe simultaneously.
+    subscribers: Vec<Subscriber>,
     /// Active session_id for event JSON injection (frontend filtering).
     session_id: String,
     /// Current turn's cancel token. Recreated each turn by create_stream.
@@ -68,18 +73,33 @@ impl SessionOutputBus {
             event_buffer: std::collections::VecDeque::new(),
             event_buffer_capacity: 256,
             message_queue: std::collections::VecDeque::new(),
-            ws_sender: None,
+            subscribers: Vec::new(),
             session_id: String::new(),
             cancel: CancellationToken::new(),
             turn_active: false,
         }
     }
 
-    /// Install a WS subscriber. Call drain_messages / drain_events afterwards
-    /// to replay buffered content.
-    fn subscribe(&mut self, ws_sender: mpsc::Sender<String>, session_id: String) {
-        self.ws_sender = Some(ws_sender);
+    /// Install a WS subscriber. Idempotent per conn_id (replaces the sender).
+    /// Returns true when the bus transitioned 0 -> 1 subscribers — the caller
+    /// should then replay buffered content (drain_messages / drain_events).
+    fn subscribe(
+        &mut self,
+        conn_id: String,
+        ws_sender: mpsc::Sender<String>,
+        session_id: String,
+    ) -> bool {
+        let was_empty = self.subscribers.is_empty();
+        if let Some(sub) = self.subscribers.iter_mut().find(|s| s.conn_id == conn_id) {
+            sub.sender = ws_sender;
+        } else {
+            self.subscribers.push(Subscriber {
+                conn_id,
+                sender: ws_sender,
+            });
+        }
         self.session_id = session_id;
+        was_empty
     }
 
     /// Drain queued non-streaming messages for replay (clears the queue).
@@ -92,33 +112,33 @@ impl SessionOutputBus {
         self.event_buffer.drain(..).collect()
     }
 
-    /// Detach subscriber (on WS disconnect). Bus survives for replay.
-    fn detach(&mut self) {
-        self.ws_sender = None;
+    /// Detach one subscriber (on WS disconnect). Bus survives for replay.
+    fn detach(&mut self, conn_id: &str) {
+        self.subscribers.retain(|s| s.conn_id != conn_id);
     }
 
-    /// Push a TurnEvent. If subscriber is online, forwards directly via
-    /// try_send (non-blocking). If offline, buffers for replay.
-    /// **Never fails** — this is the core decoupling invariant.
+    /// Push a TurnEvent. If subscribers are online, forwards directly via
+    /// try_send (non-blocking); failed subscribers are dropped. If offline,
+    /// buffers for replay. **Never fails** — this is the core decoupling
+    /// invariant.
     fn push_event(&mut self, event: TurnEvent) {
-        if self.ws_sender.is_some() {
-            if let Some(ref tx) = self.ws_sender {
-                let versioned = event.versioned();
-                let mut json_val = match serde_json::to_value(&versioned) {
-                    Ok(v) => v,
-                    Err(_) => return,
-                };
-                if let serde_json::Value::Object(ref mut map) = json_val {
-                    if !self.session_id.is_empty() {
-                        map.insert(
-                            "session_id".to_string(),
-                            serde_json::Value::String(self.session_id.clone()),
-                        );
-                    }
+        if !self.subscribers.is_empty() {
+            let versioned = event.versioned();
+            let mut json_val = match serde_json::to_value(&versioned) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            if let serde_json::Value::Object(ref mut map) = json_val {
+                if !self.session_id.is_empty() {
+                    map.insert(
+                        "session_id".to_string(),
+                        serde_json::Value::String(self.session_id.clone()),
+                    );
                 }
-                let json = json_val.to_string();
-                let _ = tx.try_send(json);
             }
+            let json = json_val.to_string();
+            self.subscribers
+                .retain(|sub| sub.sender.try_send(json.clone()).is_ok());
         } else {
             if self.event_buffer.len() >= self.event_buffer_capacity {
                 self.event_buffer.pop_front();
@@ -128,13 +148,22 @@ impl SessionOutputBus {
     }
 
     /// Push a non-streaming message (send_message output).
-    /// If subscriber is online, forwards immediately; else queues for replay.
+    /// If subscribers are online, forwards immediately; else queues for replay.
     fn push_message(&mut self, json: String) {
-        if let Some(ref tx) = self.ws_sender {
-            if tx.try_send(json.clone()).is_ok() {
+        if !self.subscribers.is_empty() {
+            let mut delivered = false;
+            self.subscribers.retain(|sub| match sub.sender.try_send(json.clone()) {
+                Ok(()) => {
+                    delivered = true;
+                    true
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => true,
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            });
+            if delivered {
                 return;
             }
-            // Channel full — fall through to queue
+            // All subscribers full or closed — fall through to queue
         }
         self.message_queue.push_back(json);
     }
@@ -170,8 +199,6 @@ pub struct ClientChannel {
     session_buses: Arc<RwLock<HashMap<String, Arc<SyncMutex<SessionOutputBus>>>>>,
     /// Active connections: connection_id → ClientConnection.
     connections: Arc<RwLock<HashMap<String, ClientConnection>>>,
-    /// Reverse map: session_key → connection_id.
-    session_owners: Arc<RwLock<HashMap<String, String>>>,
     /// Session manager for management API (set once after construction).
     session_manager: Arc<OnceLock<Arc<crate::agents::SessionManager>>>,
     /// Tool specs for management API (set after construction).
@@ -204,7 +231,6 @@ impl ClientChannel {
             pre_bound: SyncMutex::new(None),
             session_buses: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
-            session_owners: Arc::new(RwLock::new(HashMap::new())),
             session_manager: Arc::new(OnceLock::new()),
             tool_specs: Arc::new(RwLock::new(Vec::new())),
             workspace_dir: Arc::new(OnceLock::new()),
@@ -298,7 +324,6 @@ impl ClientChannel {
         let message_tx = self.message_tx.clone();
         let session_buses = self.session_buses.clone();
         let connections = self.connections.clone();
-        let session_owners = self.session_owners.clone();
         let session_manager = self.session_manager.clone();
         let tool_specs = self.tool_specs.clone();
         let workspace_dir = self.workspace_dir.clone();
@@ -356,38 +381,34 @@ impl ClientChannel {
 
                         connection_count += 1;
                         let conn_id = format!("ws-{}", connection_count);
-                        let session_key = format!("client:{}", conn_id);
 
                         let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
                         // Create mpsc channel for outgoing messages to this client.
                         let (ws_sender, mut ws_receiver) = mpsc::channel::<String>(64);
 
-                        // Register connection.
+                        // Register connection. conn_id is only for logging and
+                        // connection bookkeeping — bus keys are identity-based
+                        // (client:default:web-user:{user}), assigned on auth.
                         {
                             let mut conns = connections.write();
                             conns.insert(
                                 conn_id.clone(),
                                 ClientConnection {
                                     ws_sender: ws_sender.clone(),
-                                    active_session: session_key.clone(),
-                                    sessions: {
-                                        let mut set = std::collections::HashSet::new();
-                                        set.insert(session_key.clone());
-                                        set
-                                    },
+                                    active_session: String::new(),
+                                    sessions: std::collections::HashSet::new(),
                                 },
                             );
-                            let mut owners = session_owners.write();
-                            owners.insert(session_key.clone(), conn_id.clone());
                         }
 
                         let conn_id_clone = conn_id.clone();
-                        let mut session_key_clone = session_key.clone();
+                        // Identity routing key. Initially unset; assigned on auth
+                        // (or on first message for token-less TUI flows).
+                        let mut session_key_clone = String::new();
                         let message_tx_clone = message_tx.clone();
                         let session_buses_clone = session_buses.clone();
                         let connections_clone = connections.clone();
-                        let session_owners_clone = session_owners.clone();
                         let session_manager_clone = session_manager.clone();
                         let tool_specs_clone = tool_specs.clone();
                         let workspace_dir_clone = workspace_dir.clone();
@@ -401,7 +422,6 @@ impl ClientChannel {
                         tracing::info!(
                             conn_id = %conn_id,
                             peer = %peer_addr,
-                            session = %session_key,
                             "WebSocket client connected"
                         );
 
@@ -430,7 +450,10 @@ impl ClientChannel {
                                 let mut is_authenticated = auth_token_clone.is_none();
                                 // Permission/session owner identity. For WebUI this is a stable
                                 // logical user; client_id remains only a per-browser device id.
-                                let mut client_user_id = conn_id_clone.clone();
+                                // Default matches the auth branch's fallback ("default") so
+                                // token-less deployments derive the same identity rk
+                                // (client:default:web-user:default) on their first message.
+                                let mut client_user_id = "web-user:default".to_string();
 
                                 while let Some(msg_result) =
                                     futures_util::StreamExt::next(&mut ws_stream).await
@@ -515,122 +538,99 @@ impl ClientChannel {
                                                 .filter(|id| !id.is_empty())
                                                 .unwrap_or("default");
                                             client_user_id = format!("web-user:{}", client_user);
+                                            // client_id is a per-browser device id — no longer
+                                            // part of the bus key. Logged for tracing only.
                                             if let Some(cid) = parsed["client_id"].as_str() {
                                                 let cid = cid.trim();
                                                 if !cid.is_empty() {
-                                                    let new_client_id = format!("web:{}", cid);
-
-                                                    // Phase 6: migrate bus to stable session_key
-                                                    // so reconnects route to the same bus.
-                                                    let old_sk = session_key_clone.clone();
-                                                    let new_sk =
-                                                        format!("client:default:{}", new_client_id);
-                                                    if new_sk != old_sk {
-                                                        // Migrate bus
-                                                        {
-                                                            let mut buses =
-                                                                session_buses_clone.write();
-                                                            if let Some(bus) = buses.remove(&old_sk)
-                                                            {
-                                                                buses.insert(new_sk.clone(), bus);
-                                                            } else {
-                                                                buses
-                                                                    .entry(new_sk.clone())
-                                                                    .or_insert_with(|| {
-                                                                        Arc::new(SyncMutex::new(
-                                                                            SessionOutputBus::new(),
-                                                                        ))
-                                                                    });
-                                                            }
-                                                        }
-                                                        // Migrate session_owners
-                                                        {
-                                                            let mut owners =
-                                                                session_owners_clone.write();
-                                                            owners.remove(&old_sk);
-                                                            owners.insert(
-                                                                new_sk.clone(),
-                                                                conn_id_clone.clone(),
-                                                            );
-                                                        }
-                                                        // Update connection sessions set
-                                                        {
-                                                            let mut conns =
-                                                                connections_clone.write();
-                                                            if let Some(conn) =
-                                                                conns.get_mut(&conn_id_clone)
-                                                            {
-                                                                conn.sessions.remove(&old_sk);
-                                                                conn.sessions
-                                                                    .insert(new_sk.clone());
-                                                                conn.active_session =
-                                                                    new_sk.clone();
-                                                            }
-                                                        }
-                                                        session_key_clone = new_sk;
-                                                        // Subscribe + replay buffered content
-                                                        let api_user = format!(
-                                                            "client:default:{}",
-                                                            client_user_id
-                                                        );
-                                                        let session_id = session_manager_clone
-                                                            .get()
-                                                            .and_then(|sm| {
-                                                                sm.active_session_id(&api_user)
-                                                            })
-                                                            .unwrap_or_default();
-                                                        let bus = {
-                                                            let mut buses =
-                                                                session_buses_clone.write();
-                                                            buses
-                                                                .entry(session_key_clone.clone())
-                                                                .or_insert_with(|| {
-                                                                    Arc::new(SyncMutex::new(
-                                                                        SessionOutputBus::new(),
-                                                                    ))
-                                                                })
-                                                                .clone()
-                                                        };
-                                                        let (queued_msgs, replay_events) = {
-                                                            let mut bg = bus.lock();
-                                                            bg.subscribe(
-                                                                ws_sender.clone(),
-                                                                session_id.clone(),
-                                                            );
-                                                            (bg.drain_messages(), bg.drain_events())
-                                                        };
-                                                        for msg_json in queued_msgs {
-                                                            let _ = ws_sender.send(msg_json).await;
-                                                        }
-                                                        for event in replay_events {
-                                                            let versioned = event.versioned();
-                                                            let mut jv =
-                                                                serde_json::to_value(&versioned)
-                                                                    .unwrap_or_default();
-                                                            if let serde_json::Value::Object(
-                                                                ref mut map,
-                                                            ) = jv
-                                                            {
-                                                                map.insert(
-                                                                    "session_id".to_string(),
-                                                                    serde_json::Value::String(
-                                                                        session_id.clone(),
-                                                                    ),
-                                                                );
-                                                            }
-                                                            let _ = ws_sender
-                                                                .send(jv.to_string())
-                                                                .await;
-                                                        }
-                                                        tracing::info!(
-                                                            conn_id = %conn_id_clone,
-                                                            old_session = %old_sk,
-                                                            new_session = %session_key_clone,
-                                                            "session migrated to stable key on auth"
-                                                        );
-                                                    }
+                                                    tracing::debug!(
+                                                        conn_id = %conn_id_clone,
+                                                        client_id = %cid,
+                                                        "auth client_id received (informational)"
+                                                    );
                                                 }
                                             }
+                                            // Identity bus key == the identity routing key
+                                            // used by send_message / notify_peer, so
+                                            // cross-channel pushes always hit this bus.
+                                            session_key_clone =
+                                                format!("client:default:{}", client_user_id);
+                                            // Track identity ownership on the connection.
+                                            {
+                                                let mut conns = connections_clone.write();
+                                                if let Some(conn) =
+                                                    conns.get_mut(&conn_id_clone)
+                                                {
+                                                    conn.sessions
+                                                        .insert(session_key_clone.clone());
+                                                    conn.active_session =
+                                                        session_key_clone.clone();
+                                                }
+                                            }
+                                            // Ensure bus + subscribe + (0->1) replay.
+                                            let api_user =
+                                                format!("client:default:{}", client_user_id);
+                                            let session_id = session_manager_clone
+                                                .get()
+                                                .and_then(|sm| {
+                                                    sm.active_session_id(&api_user)
+                                                })
+                                                .unwrap_or_default();
+                                            let bus = {
+                                                let mut buses = session_buses_clone.write();
+                                                buses
+                                                    .entry(session_key_clone.clone())
+                                                    .or_insert_with(|| {
+                                                        Arc::new(SyncMutex::new(
+                                                            SessionOutputBus::new(),
+                                                        ))
+                                                    })
+                                                    .clone()
+                                            };
+                                            let (queued_msgs, replay_events) = {
+                                                let mut bg = bus.lock();
+                                                let first = bg.subscribe(
+                                                    conn_id_clone.clone(),
+                                                    ws_sender.clone(),
+                                                    session_id.clone(),
+                                                );
+                                                if first {
+                                                    (
+                                                        bg.drain_messages(),
+                                                        bg.drain_events(),
+                                                    )
+                                                } else {
+                                                    (Vec::new(), Vec::new())
+                                                }
+                                            };
+                                            for msg_json in queued_msgs {
+                                                let _ = ws_sender.send(msg_json).await;
+                                            }
+                                            for event in replay_events {
+                                                let versioned = event.versioned();
+                                                let mut jv =
+                                                    serde_json::to_value(&versioned)
+                                                        .unwrap_or_default();
+                                                if let serde_json::Value::Object(
+                                                    ref mut map,
+                                                ) = jv
+                                                {
+                                                    map.insert(
+                                                        "session_id".to_string(),
+                                                        serde_json::Value::String(
+                                                            session_id.clone(),
+                                                        ),
+                                                    );
+                                                }
+                                                let _ = ws_sender
+                                                    .send(jv.to_string())
+                                                    .await;
+                                            }
+                                            tracing::info!(
+                                                conn_id = %conn_id_clone,
+                                                session = %session_key_clone,
+                                                "session bound to identity key on auth"
+                                            );
                                         } else {
                                             let err = serde_json::json!({
                                                 "type": "error",
@@ -782,8 +782,22 @@ impl ClientChannel {
                                             }
 
                                             // Ensure session bus exists + subscribe (in case
-                                            // auth wasn't called, e.g. TUI). For WebUI the
-                                            // bus was already subscribed during auth migration.
+                                            // auth wasn't called, e.g. token-less TUI). For
+                                            // WebUI the bus was already subscribed during auth.
+                                            // session_key_clone is already the identity rk;
+                                            // derive it from client_user_id if still unset.
+                                            if session_key_clone.is_empty() {
+                                                session_key_clone =
+                                                    format!("client:default:{}", client_user_id);
+                                                let mut conns = connections_clone.write();
+                                                if let Some(conn) = conns.get_mut(&conn_id_clone)
+                                                {
+                                                    conn.sessions
+                                                        .insert(session_key_clone.clone());
+                                                    conn.active_session =
+                                                        session_key_clone.clone();
+                                                }
+                                            }
                                             let fwd_api_user =
                                                 format!("client:default:{}", client_user_id);
                                             let fwd_session_id = session_manager_clone
@@ -803,11 +817,11 @@ impl ClientChannel {
                                                         .clone()
                                                 };
                                                 let mut bg = bus.lock();
-                                                if bg.ws_sender.is_none() {
-                                                    bg.subscribe(
-                                                        ws_sender.clone(),
-                                                        fwd_session_id.clone(),
-                                                    );
+                                                if bg.subscribe(
+                                                    conn_id_clone.clone(),
+                                                    ws_sender.clone(),
+                                                    fwd_session_id.clone(),
+                                                ) {
                                                     Some((bg.drain_messages(), bg.drain_events()))
                                                 } else {
                                                     None
@@ -871,10 +885,21 @@ impl ClientChannel {
 
                                         "cancel" => {
                                             // Cancel current turn via the bus's cancel token.
+                                            // session_key_clone is already the
+                                            // identity rk (exact hit), but go
+                                            // through the same resolver path as
+                                            // send_message for uniformity.
+                                            let candidates = bus_key_candidates(
+                                                &user_resolver_clone,
+                                                &session_key_clone,
+                                            );
                                             let buses = session_buses_clone.read();
-                                            if let Some(bus) = buses.get(&session_key_clone) {
-                                                bus.lock().cancel.cancel();
-                                                tracing::debug!(session = %session_key_clone, "turn cancelled by client");
+                                            for key in &candidates {
+                                                if let Some(bus) = buses.get(key) {
+                                                    bus.lock().cancel.cancel();
+                                                    tracing::debug!(session = %key, "turn cancelled by client");
+                                                    break;
+                                                }
                                             }
                                         }
 
@@ -942,7 +967,7 @@ impl ClientChannel {
                             // Clean up on disconnect. Collect the
                             // connection's owned session_keys first, then
                             // drop the connections read-lock before taking
-                            // writes on session_owners + session_buses.
+                            // the write on session_buses.
                             //
                             // KEY CHANGE: detach subscribers but do NOT remove
                             // buses or trigger cancel. The bus survives so
@@ -960,14 +985,8 @@ impl ClientChannel {
                                 let buses = session_buses_clone.read();
                                 for sk in &owned_keys {
                                     if let Some(bus) = buses.get(sk) {
-                                        bus.lock().detach();
+                                        bus.lock().detach(&conn_id_clone);
                                     }
-                                }
-                            }
-                            {
-                                let mut owners = session_owners_clone.write();
-                                for sk in &owned_keys {
-                                    owners.remove(sk);
                                 }
                             }
                             {
@@ -998,6 +1017,60 @@ impl ClientChannel {
 static CLIENT_CAPS: crate::channels::message::ChannelCapabilities =
     crate::channels::message::ChannelCapabilities::client();
 
+/// Candidate session-bus keys for a receiver address, priority-ordered and
+/// deduped. `ClientChannel` buses are keyed by the identity routing key
+/// (`client:default:web-user:{user}`), but `receiver.id` arrives in three
+/// forms depending on the caller:
+///
+/// 1. the full rk itself (orchestrator replies — `session_key_clone`),
+/// 2. a bare channel-local tail such as `web-user:default`
+///    (`friends.rs::notify_peer` splits the peer rk and passes the tail), or
+/// 3. a legacy key like `ws-3` that only the user resolver still knows about
+///    (mapped to the same uid as the live identity key).
+///
+/// Candidate order: exact match → normalized `client:default:{recipient}`
+/// (skipped when already prefixed) → every `client:default:*` key the
+/// resolver folds into the same uid (cross-channel keys like `telegram:*`
+/// belong to other channels and are skipped). First candidate that hits a
+/// live bus wins.
+fn bus_key_candidates(
+    user_resolver: &Arc<OnceLock<Arc<crate::agents::UserResolver>>>,
+    recipient: &str,
+) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    let push = |key: String, out: &mut Vec<String>| {
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    };
+
+    // 1. Exact form as given.
+    push(recipient.to_string(), &mut candidates);
+
+    // 2. Normalized identity rk (only when the id is not already a full
+    //    client rk — `web-user:default` and `ws-3` both need the prefix,
+    //    `client:default:web-user:default` does not).
+    let rk = if recipient.starts_with("client:") {
+        recipient.to_string()
+    } else {
+        format!("client:default:{recipient}")
+    };
+    push(rk.clone(), &mut candidates);
+
+    // 3. Resolver: full rk → uid → all of that uid's routing keys, keeping
+    //    only keys that could name a bus in *this* channel.
+    if let Some(resolver) = user_resolver.get() {
+        let uid = resolver.resolve(&rk);
+        for key in resolver.routing_keys_for(&uid) {
+            if key.starts_with("client:default:") {
+                push(key, &mut candidates);
+            }
+        }
+    }
+
+    candidates
+}
+
 #[async_trait]
 impl Channel for ClientChannel {
     fn name(&self) -> &str {
@@ -1021,37 +1094,46 @@ impl Channel for ClientChannel {
         // reconnect. This replaces the old session_owners → connections →
         // ws_sender chain which silently dropped messages on disconnect.
         //
-        // session_buses is keyed by the full session key (e.g.
-        // "client:default:web-user:default" — see ChannelInboundMessage's
-        // receiver field, set to session_key_clone, and session_buses.entry()
-        // insertion). But the generic cross-channel convention — used by
-        // every other Channel impl, and by friends.rs::notify_peer (the
-        // /link verification-code push) — is that receiver.id is a bare,
-        // channel-local address with no channel:account prefix. Without this
-        // normalization, notify_peer's receiver.id ("web-user:default")
-        // never matches any bus key, send_message silently no-ops (still
-        // returns Ok(..), so /link reports "code sent" while nothing is
-        // ever delivered), and the mismatch is invisible unless you go
-        // looking for the "no session bus found" warning.
+        // session_buses is keyed by the identity routing key (e.g.
+        // "client:default:web-user:default"), but receiver.id may arrive as
+        // the full rk, a bare channel-local tail ("web-user:default" —
+        // friends.rs::notify_peer / the /link code push), or a legacy key
+        // ("ws-3") only the resolver still maps. bus_key_candidates covers
+        // all three forms; the first live bus wins.
+        //
+        // A total miss is an Err, not a silent no-op: callers like
+        // notify_peer must be able to tell the user "channel unreachable"
+        // instead of reporting "code sent" while nothing was delivered.
         let recipient = msg.receiver.id.clone();
-        let recipient = if recipient.starts_with("client:") {
-            recipient
-        } else {
-            format!("client:default:{recipient}")
-        };
+        let candidates = bus_key_candidates(&self.user_resolver, &recipient);
 
         // Clone the Arc to the bus before any .await — parking_lot guards
         // are not Send and must not cross await points.
         let bus = {
             let buses = self.session_buses.read();
-            match buses.get(&recipient) {
-                Some(b) => Arc::clone(b),
+            let mut found = None;
+            for key in &candidates {
+                if let Some(b) = buses.get(key) {
+                    tracing::debug!(
+                        recipient = %recipient,
+                        resolved_key = %key,
+                        "send_message resolved bus key"
+                    );
+                    found = Some((Arc::clone(b), key.clone()));
+                    break;
+                }
+            }
+            match found {
+                Some((b, key)) => (b, key),
                 None => {
-                    tracing::warn!(recipient = %recipient, "no session bus found for send_message");
-                    return Ok(OutboundSendResult::empty());
+                    return Err(anyhow::anyhow!(
+                        "recipient {} has no live client bus; not deliverable via client channel",
+                        recipient
+                    ));
                 }
             }
         };
+        let (bus, recipient) = (bus.0, bus.1);
 
         if msg.content.files.is_empty() {
             let json = serde_json::json!({
@@ -1067,10 +1149,16 @@ impl Channel for ClientChannel {
             // (base64 data may be large / stale) — only text is queued.
             use base64::Engine;
             // Check if subscriber is online before encoding files
-            let subscriber_online = bus.lock().ws_sender.is_some();
+            let subscriber_online = {
+                let bg = bus.lock();
+                !bg.subscribers.is_empty()
+            };
             if !subscriber_online {
                 tracing::debug!(recipient = %recipient, "subscriber offline, skipping file messages");
-                return Ok(OutboundSendResult::empty());
+                return Err(anyhow::anyhow!(
+                    "recipient {} has no live client bus subscriber; files are not queued on disconnect",
+                    recipient
+                ));
             }
             for (idx, file) in msg.content.files.iter().enumerate() {
                 let mut reader = file.body.open().await?;
@@ -1117,14 +1205,21 @@ impl Channel for ClientChannel {
     /// is currently subscribed for this target — caller falls through to
     /// the non-streaming `send` path.
     fn create_stream(&self, reply_target: &str) -> Option<Box<dyn crate::channels::TurnStream>> {
+        // Same address forms as send_message: reply_target is usually the
+        // full identity rk, but cross-channel callers may pass a bare tail
+        // or legacy key. Miss → None (caller falls back to non-streaming).
+        let candidates = bus_key_candidates(&self.user_resolver, reply_target);
         let buses = self.session_buses.read();
-        let bus = buses.get(reply_target)?;
+        let bus = candidates
+            .iter()
+            .find_map(|key| buses.get(key))
+            .map(Arc::clone)?;
         let mut bus_guard = bus.lock();
         // Fresh cancel token per turn
         bus_guard.cancel = CancellationToken::new();
         bus_guard.turn_active = true;
         Some(Box::new(ClientTurnStream {
-            bus: Arc::clone(bus),
+            bus: Arc::clone(&bus),
             status: crate::channels::StreamDelivery::Pending,
             finished: false,
         }))
@@ -2615,31 +2710,143 @@ mod tests {
         );
     }
 
-    /// Regression test for the /link verification code silently vanishing:
-    /// `friends.rs::notify_peer` builds `MessageReceiver` with a bare,
-    /// channel-local id (the convention every `Channel` impl's `send_message`
-    /// expects, matching telegram/qqbot's own addressing), but
-    /// `session_buses` is keyed by the full `client:default:<tail>` session
-    /// key. Before normalizing in `send_message`, that mismatch meant the
-    /// bus lookup always missed, the message was dropped, and — because the
-    /// miss path still returns `Ok(..)` — `/link` reported the code as sent
-    /// with nothing ever delivered to the browser.
+    /// Full-rk receivers (orchestrator replies carry the session key) must
+    /// keep hitting the bus through the exact candidate.
     #[tokio::test]
-    async fn send_message_resolves_bare_receiver_id_to_full_session_key() {
+    async fn send_message_full_rk_receiver_hits_bus_directly() {
         let channel = ClientChannel::new(ClientConfig::default());
-        let full_key = "client:default:web-user:default".to_string();
+        let full_key = USER_KEY.to_string();
         channel
             .session_buses
             .write()
             .insert(full_key.clone(), Arc::new(SyncMutex::new(SessionOutputBus::new())));
 
-        // Bare id, exactly as friends.rs::notify_peer builds it via split_rk.
-        let msg = ChannelOutboundMessage::text("web-user:default", "🔐 code: 123456");
+        let msg = ChannelOutboundMessage::text(USER_KEY, "direct hit");
         channel.send_message(&msg).await.unwrap();
 
         let bus = channel.session_buses.read().get(&full_key).unwrap().clone();
         let queued = bus.lock().drain_messages();
-        assert_eq!(queued.len(), 1, "message should land in the full-key bus");
-        assert!(queued[0].contains("123456"));
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].contains("direct hit"));
+    }
+
+    /// Legacy key form: the resolver still maps `client:default:ws-3` to the
+    /// same uid as the live identity key. A receiver.id of `ws-3` (a bare
+    /// tail that only exists in the resolver) must resolve through
+    /// routing_keys_for onto the identity bus.
+    #[tokio::test]
+    async fn send_message_legacy_key_resolves_via_resolver_to_identity_bus() {
+        let channel = ClientChannel::new(ClientConfig::default());
+        let resolver = Arc::new(UserResolver::new());
+        resolver.set("client:default:ws-3".to_string(), USER_UID.to_string());
+        resolver.set(USER_KEY.to_string(), USER_UID.to_string());
+        channel.set_user_resolver(resolver);
+
+        // Only the identity-key bus exists — the legacy `ws-3` bus does not.
+        channel
+            .session_buses
+            .write()
+            .insert(USER_KEY.to_string(), Arc::new(SyncMutex::new(SessionOutputBus::new())));
+
+        let msg = ChannelOutboundMessage::text("ws-3", "legacy addressed");
+        channel.send_message(&msg).await.unwrap();
+
+        let bus = channel.session_buses.read().get(USER_KEY).unwrap().clone();
+        let queued = bus.lock().drain_messages();
+        assert_eq!(
+            queued.len(),
+            1,
+            "legacy key must resolve onto the identity bus via the resolver"
+        );
+        assert!(queued[0].contains("legacy addressed"));
+    }
+
+    /// Total miss → Err (not Ok-with-empty). notify_peer relies on this to
+    /// tell the user the peer's channel is unreachable instead of lying
+    /// about a delivered /link code.
+    #[tokio::test]
+    async fn send_message_unknown_recipient_returns_err() {
+        let channel = ClientChannel::new(ClientConfig::default());
+        channel
+            .session_buses
+            .write()
+            .insert(USER_KEY.to_string(), Arc::new(SyncMutex::new(SessionOutputBus::new())));
+
+        let msg = ChannelOutboundMessage::text("web-user:nobody", "should not deliver");
+        let err = channel
+            .send_message(&msg)
+            .await
+            .expect_err("total candidate miss must be an Err");
+        assert!(
+            err.to_string().contains("no live client bus"),
+            "unexpected error text: {err}"
+        );
+
+        // Nothing was pushed anywhere.
+        let bus = channel.session_buses.read().get(USER_KEY).unwrap().clone();
+        assert!(bus.lock().drain_messages().is_empty());
+    }
+
+    /// Cross-channel keys folded into the same uid (e.g. `telegram:*` from a
+    /// /link) must never become client bus candidates: the telegram bus does
+    /// not exist in this channel, and prefixing it would be wrong.
+    #[test]
+    fn bus_key_candidates_skips_cross_channel_keys() {
+        let resolver = Arc::new(UserResolver::new());
+        resolver.set(USER_KEY.to_string(), USER_UID.to_string());
+        resolver.set("telegram:default:12345".to_string(), USER_UID.to_string());
+        let holder: Arc<OnceLock<Arc<UserResolver>>> = Arc::new(OnceLock::new());
+        let _ = holder.set(resolver);
+
+        // Bare tail: candidates = [tail, client:default:tail] plus any
+        // client:default:* key of the same uid — never the telegram key.
+        let bare = bus_key_candidates(&holder, "web-user:default");
+        assert_eq!(
+            bare,
+            vec![
+                "web-user:default".to_string(),
+                USER_KEY.to_string(),
+            ],
+            "cross-channel keys must not appear: {bare:?}"
+        );
+
+        // Legacy key with a client:default sibling in the resolver.
+        let resolver2 = Arc::new(UserResolver::new());
+        resolver2.set("client:default:ws-3".to_string(), USER_UID.to_string());
+        resolver2.set(USER_KEY.to_string(), USER_UID.to_string());
+        resolver2.set("telegram:default:12345".to_string(), USER_UID.to_string());
+        let holder2: Arc<OnceLock<Arc<UserResolver>>> = Arc::new(OnceLock::new());
+        let _ = holder2.set(resolver2);
+        let legacy = bus_key_candidates(&holder2, "ws-3");
+        assert_eq!(
+            legacy,
+            vec![
+                "ws-3".to_string(),
+                "client:default:ws-3".to_string(),
+                USER_KEY.to_string(),
+            ],
+            "expected exact → normalized → resolver identity key: {legacy:?}"
+        );
+        assert!(!legacy.iter().any(|k| k.starts_with("telegram:")));
+    }
+
+    /// create_stream resolves through the same candidate list: a bare tail
+    /// must find the identity bus, and a miss must yield None (caller falls
+    /// back to non-streaming send).
+    #[test]
+    fn create_stream_resolves_bare_tail_and_misses_to_none() {
+        let channel = ClientChannel::new(ClientConfig::default());
+        channel
+            .session_buses
+            .write()
+            .insert(USER_KEY.to_string(), Arc::new(SyncMutex::new(SessionOutputBus::new())));
+
+        let stream = channel.create_stream("web-user:default");
+        assert!(stream.is_some(), "bare tail should resolve the identity bus");
+
+        assert!(
+            channel.create_stream("web-user:ghost").is_none(),
+            "miss must return None"
+        );
     }
 }
