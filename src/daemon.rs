@@ -1425,7 +1425,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let prompt_config = build_prompt_config(
         &config.agent,
         &config.prompt,
-        &crate::config::default_data_dir(),
+        &config.base_dir,
         &config.workspace_dir,
         &config.knowledge_dir,
     );
