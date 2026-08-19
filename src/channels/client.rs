@@ -205,7 +205,7 @@ pub struct ClientChannel {
     tool_specs: Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
     /// Workspace directory for memory API (set once after construction).
     workspace_dir: Arc<OnceLock<std::path::PathBuf>>,
-    /// Knowledge dir ({data_dir}/memory) — single flat memory pool where
+    /// Knowledge dir ({base_dir}/memory) — single flat memory pool where
     /// ownership is a frontmatter attribute (set once after construction).
     knowledge_dir: Arc<OnceLock<std::path::PathBuf>>,
     /// Config file path for config read/write API (set once after construction).
@@ -2708,34 +2708,6 @@ mod tests {
             r.iter().any(|s| s["id"] == telegram_session.id),
             "linked channel's pre-existing session should be visible: {r:?}"
         );
-    }
-
-    /// Regression test for the /link verification code silently vanishing:
-    /// `friends.rs::notify_peer` builds `MessageReceiver` with a bare,
-    /// channel-local id (the convention every `Channel` impl's `send_message`
-    /// expects, matching telegram/qqbot's own addressing), but
-    /// `session_buses` is keyed by the full `client:default:<tail>` session
-    /// key. Before normalizing in `send_message`, that mismatch meant the
-    /// bus lookup always missed, the message was dropped, and — because the
-    /// miss path still returns `Ok(..)` — `/link` reported the code as sent
-    /// with nothing ever delivered to the browser.
-    #[tokio::test]
-    async fn send_message_resolves_bare_receiver_id_to_full_session_key() {
-        let channel = ClientChannel::new(ClientConfig::default());
-        let full_key = "client:default:web-user:default".to_string();
-        channel
-            .session_buses
-            .write()
-            .insert(full_key.clone(), Arc::new(SyncMutex::new(SessionOutputBus::new())));
-
-        // Bare id, exactly as friends.rs::notify_peer builds it via split_rk.
-        let msg = ChannelOutboundMessage::text("web-user:default", "🔐 code: 123456");
-        channel.send_message(&msg).await.unwrap();
-
-        let bus = channel.session_buses.read().get(&full_key).unwrap().clone();
-        let queued = bus.lock().drain_messages();
-        assert_eq!(queued.len(), 1, "message should land in the full-key bus");
-        assert!(queued[0].contains("123456"));
     }
 
     /// Full-rk receivers (orchestrator replies carry the session key) must

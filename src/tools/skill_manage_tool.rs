@@ -19,7 +19,7 @@ const ALLOWED_SUBDIRS: &[&str] = &["references", "scripts", "templates", "assets
 
 pub struct SkillManageTool {
     skills: Arc<RwLock<SkillManager>>,
-    /// P1: skills root (`{data_dir}/skills`) — passed directly by the daemon.
+    /// P1: skills root (`{base_dir}/skills`) — passed directly by the daemon.
     skills_root: PathBuf,
 }
 

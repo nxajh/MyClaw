@@ -7,10 +7,10 @@
 //! 渠道侧 routing_key 到用户的映射仍由 [`UserResolver`] 承担（值统一为
 //! user.id，如 `myclaw/u/<uuidv7>`）；本注册表只存"人"的实体属性，不感知渠道。
 //!
-//! 持久化（P1-B1 目录化）：每用户一个 `{data_dir}/users/{uuid}/meta.json`
+//! 持久化（P1-B1 目录化）：每用户一个 `{base_dir}/users/{uuid}/meta.json`
 //! （内容 = [`User`] 完整序列化，`uid` 为完整 FQID `<ns>/u/<uuid>`），
 //! 变更只写该用户的 meta.json，不再全量重写单文件。加载优先扫目录；目录化
-//! 数据不存在时兜底读旧 `{data_dir}/users.json`（version 2；兼容 version 1
+//! 数据不存在时兜底读旧 `{base_dir}/users.json`（version 2；兼容 version 1
 //! 旧文件——无 `username` 字段 → 空串；`uid` 为旧语义句柄），语义错位由迁移
 //! （task: migrate）统一修正。命名空间默认 `myclaw`（RFC: `[system]
 //! namespace` 配置项，后续接入）。
@@ -27,9 +27,9 @@ use crate::ids::{bare_dir_name, Fqid, TYPE_USER};
 
 // ── 常量与规则 ───────────────────────────────────────────────────────────────
 
-/// 目录化存储的用户实体根目录名：`{data_dir}/users/`。
+/// 目录化存储的用户实体根目录名：`{base_dir}/users/`。
 pub const USERS_DIR: &str = "users";
-/// 每用户实体的元数据文件名：`{data_dir}/users/{uuid}/meta.json`。
+/// 每用户实体的元数据文件名：`{base_dir}/users/{uuid}/meta.json`。
 pub const USER_META_FILE: &str = "meta.json";
 /// 旧版单文件存储文件名（兼容兜底读，不再写）。
 pub const LEGACY_USERS_FILE: &str = "users.json";
@@ -115,7 +115,7 @@ pub enum RegisterError {
 // ── 注册表 ───────────────────────────────────────────────────────────────────
 
 /// 用户实体注册表：`uid → User` + `email → uid` + `username → uid` 索引，
-/// 持久化 `{data_dir}/users/{uuid}/meta.json`（P1-B1 目录化；旧
+/// 持久化 `{base_dir}/users/{uuid}/meta.json`（P1-B1 目录化；旧
 /// `users.json` 仅兜底读）。
 #[derive(Debug)]
 pub struct UserRegistry {
@@ -124,8 +124,8 @@ pub struct UserRegistry {
     email_index: RwLock<HashMap<String, String>>,
     /// username（小写）→ uid 唯一索引（派生，不落盘，加载时重建）。
     username_index: RwLock<HashMap<String, String>>,
-    /// 持久化根（`{data_dir}`；空 = 内存态，不落盘）。
-    data_dir: PathBuf,
+    /// 持久化根（`{base_dir}`；空 = 内存态，不落盘）。
+    base_dir: PathBuf,
     /// 命名空间（user.id 前缀，默认 `myclaw`）。
     namespace: String,
 }
@@ -137,36 +137,36 @@ impl UserRegistry {
             users: RwLock::new(HashMap::new()),
             email_index: RwLock::new(HashMap::new()),
             username_index: RwLock::new(HashMap::new()),
-            data_dir: PathBuf::new(),
+            base_dir: PathBuf::new(),
             namespace: DEFAULT_NAMESPACE.to_string(),
         }
     }
 
-    /// 持久化注册表（`{data_dir}/users/`，P1-B1 目录化），默认命名空间
+    /// 持久化注册表（`{base_dir}/users/`，P1-B1 目录化），默认命名空间
     /// `myclaw`。
-    pub fn persistent(data_dir: &Path) -> Self {
-        Self::with_namespace(data_dir, DEFAULT_NAMESPACE)
+    pub fn persistent(base_dir: &Path) -> Self {
+        Self::with_namespace(base_dir, DEFAULT_NAMESPACE)
     }
 
     /// 持久化注册表 + 自定义命名空间（RFC: [system] namespace 配置接入点）。
-    pub fn with_namespace(data_dir: &Path, namespace: &str) -> Self {
+    pub fn with_namespace(base_dir: &Path, namespace: &str) -> Self {
         let reg = Self {
             users: RwLock::new(HashMap::new()),
             email_index: RwLock::new(HashMap::new()),
             username_index: RwLock::new(HashMap::new()),
-            data_dir: data_dir.to_path_buf(),
+            base_dir: base_dir.to_path_buf(),
             namespace: namespace.to_string(),
         };
         reg.load_from_disk();
         reg
     }
 
-    /// 用户实体根目录（`{data_dir}/users/`）。
+    /// 用户实体根目录（`{base_dir}/users/`）。
     fn users_root(&self) -> PathBuf {
-        self.data_dir.join(USERS_DIR)
+        self.base_dir.join(USERS_DIR)
     }
 
-    /// 单个用户的目录：`{data_dir}/users/{uuid}/`。
+    /// 单个用户的目录：`{base_dir}/users/{uuid}/`。
     ///
     /// 目录名取 uid（完整 FQID `<ns>/u/<uuid>`）的裸 uuid 段；uid 不是
     /// 合法 FQID（旧语义句柄等）时退化为 `dir_name` 转义，保证路径安全。
@@ -440,11 +440,11 @@ impl UserRegistry {
 
     // ── 持久化 ──────────────────────────────────────────────────────────────
 
-    /// 加载：优先扫 `{data_dir}/users/{uuid}/meta.json` 逐个加载；目录化数据
+    /// 加载：优先扫 `{base_dir}/users/{uuid}/meta.json` 逐个加载；目录化数据
     /// 不存在（无 `users/` 目录或目录为空）时兜底读旧 `users.json`。
     /// 存量 users.json → 目录的拆分由迁移脚本负责，代码不做自动迁移。
     fn load_from_disk(&self) {
-        if self.data_dir.as_os_str().is_empty() {
+        if self.base_dir.as_os_str().is_empty() {
             return;
         }
         let count = self.load_from_users_dir();
@@ -456,7 +456,7 @@ impl UserRegistry {
         }
     }
 
-    /// 扫 `{data_dir}/users/` 逐个加载 `meta.json`。单个文件损坏只跳过
+    /// 扫 `{base_dir}/users/` 逐个加载 `meta.json`。单个文件损坏只跳过
     /// 该用户（warn），不影响其余。返回成功加载的用户数。
     fn load_from_users_dir(&self) -> usize {
         let root = self.users_root();
@@ -503,10 +503,10 @@ impl UserRegistry {
         count
     }
 
-    /// 读旧 `{data_dir}/users.json`（version 1/2 单文件）。仅在目录化数据
+    /// 读旧 `{base_dir}/users.json`（version 1/2 单文件）。仅在目录化数据
     /// 不存在时调用（兼容兜底）。
     fn load_from_legacy_file(&self) {
-        let path = self.data_dir.join(LEGACY_USERS_FILE);
+        let path = self.base_dir.join(LEGACY_USERS_FILE);
         let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => return, // 首次运行，无文件
@@ -544,7 +544,7 @@ impl UserRegistry {
     /// 写单个用户的 meta.json（`users/{uuid}/meta.json`，先建目录）。
     /// P1-B1：变更只落对应用户文件，不再全量重写 users.json。
     fn save_user(&self, uid: &str) {
-        if self.data_dir.as_os_str().is_empty() {
+        if self.base_dir.as_os_str().is_empty() {
             return;
         }
         let Some(user) = self.users.read().get(uid).cloned() else {

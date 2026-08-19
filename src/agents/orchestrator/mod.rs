@@ -264,9 +264,9 @@ pub struct OrchestratorParts {
     /// Workspace directory for persisting runtime state.
     pub workspace_dir: std::path::PathBuf,
     /// Data directory — inbound_spool/completion_queue live under
-    /// `{data_dir}/state/`, not workspace_dir (P1: workspace holds only
+    /// `{base_dir}/state/`, not workspace_dir (P1: workspace holds only
     /// work artifacts, runtime state belongs on the data side).
-    pub data_dir: std::path::PathBuf,
+    pub base_dir: std::path::PathBuf,
     /// Shared scheduler for run result tracking and auto-delete.
     pub scheduler: Option<crate::agents::SharedScheduler>,
 }
@@ -284,7 +284,7 @@ impl Orchestrator {
         // channel messages. Written at spawn_listener before the message
         // enters the event loop; marked Done after dispatch returns. `None`
         // degrades to in-memory-only delivery (fail-open, same as tests).
-        let inbound_spool_dir = parts.data_dir.join("state").join("inbound_spool");
+        let inbound_spool_dir = parts.base_dir.join("state").join("inbound_spool");
         let inbound_spool = match crate::storage::InboundSpool::open(inbound_spool_dir.clone()) {
             Ok(spool) => {
                 // Startup tombstone maintenance (RFC §4.2). Best-effort: a
@@ -337,7 +337,7 @@ impl Orchestrator {
         // completion-notice delivery queue (at-least-once across restarts).
         // `None` degrades to P1 in-memory-only delivery — a crashed notice is
         // then lost, but the daemon still runs (fail-open, same as tests).
-        let completion_queue_dir = parts.data_dir.join("state").join("completion_queue");
+        let completion_queue_dir = parts.base_dir.join("state").join("completion_queue");
         let completion_queue = match crate::storage::CompletionNoticeStore::open(
             completion_queue_dir.clone(),
         ) {

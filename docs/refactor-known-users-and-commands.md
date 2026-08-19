@@ -40,7 +40,7 @@ pub struct KnownUser {
 
 ```rust
 impl KnownUsersRegistry {
-    pub fn new(data_dir: &Path) -> Self;
+    pub fn new(base_dir: &Path) -> Self;
     
     /// 限流检查 + 用户登记。返回 false = 被限流，调用方应丢弃消息。
     /// 限流维度：per-routing_key (30/min) + global (300/min)。
@@ -56,13 +56,13 @@ impl KnownUsersRegistry {
     pub fn flush(&self);   // 落盘 known_users.json
     
     /// 从旧格式 qqbot_known_users_{account}.json 迁移。
-    pub fn migrate_legacy(&self, data_dir: &Path);
+    pub fn migrate_legacy(&self, base_dir: &Path);
 }
 ```
 
 ### 持久化
 
-- 文件：`{data_dir}/known_users.json`
+- 文件：`{base_dir}/known_users.json`
 - 格式：`{ "version": 1, "users": { routing_key: KnownUser, ... } }`
 - 启动时：先尝试加载 `known_users.json`；不存在则扫描 `qqbot_known_users_*.json` 迁移
 
@@ -123,8 +123,8 @@ if !ctx.known_users.check_and_record(&account.0, &account.1, &msg.sender.id, &sc
 
 ```rust
 // 在创建 ask_router 附近（~L915）
-let known_users = Arc::new(KnownUsersRegistry::new(&data_dir));
-known_users.migrate_legacy(&data_dir);
+let known_users = Arc::new(KnownUsersRegistry::new(&base_dir));
+known_users.migrate_legacy(&base_dir);
 ```
 
 `OrchestratorParts` 构造（~L1205）加 `known_users: Arc::clone(&known_users)`
@@ -239,15 +239,15 @@ let cmd_ctx = commands::CommandContext {
 **删除 field**（QQBotChannel struct ~L348-377）：
 - `rate_limiter: Arc<Mutex<RateLimiter>>`
 - `known_senders: Arc<Mutex<KnownSenders>>`
-- `data_dir: std::path::PathBuf`
+- `base_dir: std::path::PathBuf`
 
 **删除 method**：
 - `known_users_path()`（~L452）
 - `save_known_users()`（~L458）
 
 **删除 `new()` 中的逻辑**：
-- data_dir 获取 + known_users JSON 加载（~L387-417）
-- `rate_limiter` / `known_senders` / `data_dir` 字段初始化
+- base_dir 获取 + known_users JSON 加载（~L387-417）
+- `rate_limiter` / `known_senders` / `base_dir` 字段初始化
 
 **删除 `listen()` 中的 flush task**（~L2334-2343）
 
@@ -273,7 +273,7 @@ if self.try_bot_command(...).await {
 - `rate_limiter_blocks_after_limit`（L3418-3431）
 
 **修改 `test_channel`**（L3257-3280）：
-- 删除 `known_senders` / `rate_limiter` / `data_dir` 字段
+- 删除 `known_senders` / `rate_limiter` / `base_dir` 字段
 
 **实现 `group_stats()`**：
 ```rust
@@ -302,7 +302,7 @@ fn group_stats(&self) -> Vec<crate::channels::GroupStat> {
 
 `migrate_legacy()` 实现：
 
-1. 扫描 `{data_dir}/qqbot_known_users_*.json`
+1. 扫描 `{base_dir}/qqbot_known_users_*.json`
 2. 每个文件解析为 `HashMap<String, UserEntry>`（旧格式）
 3. account_id 从文件名提取（`qqbot_known_users_{account}.json`）
 4. 转换为 `KnownUser`（channel="qqbot", account=提取值, user_id=旧 key）
