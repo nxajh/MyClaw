@@ -1020,7 +1020,25 @@ impl Channel for ClientChannel {
         // immediately. If offline (WS disconnected), queues for replay on
         // reconnect. This replaces the old session_owners → connections →
         // ws_sender chain which silently dropped messages on disconnect.
+        //
+        // session_buses is keyed by the full session key (e.g.
+        // "client:default:web-user:default" — see ChannelInboundMessage's
+        // receiver field, set to session_key_clone, and session_buses.entry()
+        // insertion). But the generic cross-channel convention — used by
+        // every other Channel impl, and by friends.rs::notify_peer (the
+        // /link verification-code push) — is that receiver.id is a bare,
+        // channel-local address with no channel:account prefix. Without this
+        // normalization, notify_peer's receiver.id ("web-user:default")
+        // never matches any bus key, send_message silently no-ops (still
+        // returns Ok(..), so /link reports "code sent" while nothing is
+        // ever delivered), and the mismatch is invisible unless you go
+        // looking for the "no session bus found" warning.
         let recipient = msg.receiver.id.clone();
+        let recipient = if recipient.starts_with("client:") {
+            recipient
+        } else {
+            format!("client:default:{recipient}")
+        };
 
         // Clone the Arc to the bus before any .await — parking_lot guards
         // are not Send and must not cross await points.
@@ -2595,5 +2613,33 @@ mod tests {
             r.iter().any(|s| s["id"] == telegram_session.id),
             "linked channel's pre-existing session should be visible: {r:?}"
         );
+    }
+
+    /// Regression test for the /link verification code silently vanishing:
+    /// `friends.rs::notify_peer` builds `MessageReceiver` with a bare,
+    /// channel-local id (the convention every `Channel` impl's `send_message`
+    /// expects, matching telegram/qqbot's own addressing), but
+    /// `session_buses` is keyed by the full `client:default:<tail>` session
+    /// key. Before normalizing in `send_message`, that mismatch meant the
+    /// bus lookup always missed, the message was dropped, and — because the
+    /// miss path still returns `Ok(..)` — `/link` reported the code as sent
+    /// with nothing ever delivered to the browser.
+    #[tokio::test]
+    async fn send_message_resolves_bare_receiver_id_to_full_session_key() {
+        let channel = ClientChannel::new(ClientConfig::default());
+        let full_key = "client:default:web-user:default".to_string();
+        channel
+            .session_buses
+            .write()
+            .insert(full_key.clone(), Arc::new(SyncMutex::new(SessionOutputBus::new())));
+
+        // Bare id, exactly as friends.rs::notify_peer builds it via split_rk.
+        let msg = ChannelOutboundMessage::text("web-user:default", "🔐 code: 123456");
+        channel.send_message(&msg).await.unwrap();
+
+        let bus = channel.session_buses.read().get(&full_key).unwrap().clone();
+        let queued = bus.lock().drain_messages();
+        assert_eq!(queued.len(), 1, "message should land in the full-key bus");
+        assert!(queued[0].contains("123456"));
     }
 }

@@ -1510,6 +1510,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         delegation_rx,
         scheduler_rx: Some(scheduler_rx),
         workspace_dir: config.workspace_dir.clone(),
+        data_dir: data_dir.clone(),
         scheduler: Some(shared_scheduler.clone()),
         ask_router: Arc::clone(&ask_router),
         known_users: Arc::clone(&known_users),
