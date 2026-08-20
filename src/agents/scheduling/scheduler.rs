@@ -466,7 +466,7 @@ impl Scheduler {
                     for j in &due_jobs {
                         tracing::info!(
                             job_id = %j.id,
-                            schedule = %j.schedule,
+                            schedule = ?j.schedule,
                             target = %j.target,
                             "cron job triggered"
                         );
@@ -642,7 +642,7 @@ impl Scheduler {
                 job.delivery = Some(delivery);
             }
             if update.webhook_changed {
-                job.webhook = update.webhook.clone();
+                job.webhook = update.webhook.clone().flatten();
             }
             if let Some(enabled_tools) = update.enabled_tools {
                 job.enabled_tools = Some(enabled_tools);
@@ -1295,7 +1295,7 @@ pub fn resolve_tz(name: &str) -> chrono_tz::Tz {
 /// Compute the next run time for a job.
 /// Supports both legacy cron expressions and new ScheduleKind.
 pub fn compute_next_run(schedule: &str, last_run: Option<&str>, tz_name: &str) -> Option<String> {
-    compute_next_run_inner(None, schedule, last_run, tz_name)
+    compute_next_run_inner(None, Some(schedule), last_run, tz_name)
 }
 
 /// Full compute with ScheduleKind support.
@@ -2127,21 +2127,17 @@ fn filter_matches(
             None => return f.not, // missing field: only a `not` filter passes
         };
     }
-    let actual = match cur.as_str() {
-        Some(s) => s,
-        None => {
-            // Numbers/bools compare against their string form.
-            match cur {
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                _ => return f.not,
-            }
-        }
+    // Strings compare directly; numbers/bools against their string form.
+    let actual = match cur {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        _ => return f.not,
     };
     let matched = if let Some(eq) = f.equals.as_deref() {
         actual == eq
     } else if let Some(re) = f.matches.as_deref() {
-        regex::Regex::new(re).map(|r| r.is_match(actual)).unwrap_or(false)
+        regex::Regex::new(re).map(|r| r.is_match(&actual)).unwrap_or(false)
     } else {
         true
     };
@@ -2208,15 +2204,17 @@ where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     let fut = async {
+        use http_body_util::BodyExt;
+        let mut body = std::pin::pin!(body);
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut stream = body.into_data_stream();
-        use futures_util::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            if buf.len() + chunk.len() > WEBHOOK_BODY_LIMIT {
-                anyhow::bail!("too large");
+        while let Some(frame) = body.as_mut().frame().await {
+            let frame = frame?;
+            if let Ok(data) = frame.into_data() {
+                if buf.len() + data.len() > WEBHOOK_BODY_LIMIT {
+                    anyhow::bail!("too large");
+                }
+                buf.extend_from_slice(&data);
             }
-            buf.extend_from_slice(&chunk);
         }
         Ok(Bytes::from(buf))
     };
