@@ -1444,6 +1444,10 @@ pub struct WebhookContext {
     pub ctx: Arc<crate::agents::OrchestratorCtx>,
     /// Timezone string used for cron evaluation in the webhook server.
     pub timezone: String,
+    /// Live scheduler handle — routes are projected per request from the
+    /// unified jobs store, so webhook jobs created/updated/removed after
+    /// startup are picked up without a daemon restart.
+    pub scheduler: SharedScheduler,
 }
 
 // ── Webhook channel view + template rendering (migrated from the removed
@@ -1806,7 +1810,6 @@ use hyper_util::rt::TokioIo;
 pub async fn run_webhook_server(
     ctx: Arc<WebhookContext>,
     config: WebhookConfig,
-    jobs: Vec<WebhookJobDef>,
     pre_bound: Option<std::net::TcpListener>,
 ) {
     let listener = if let Some(std_listener) = pre_bound {
@@ -1829,13 +1832,12 @@ pub async fn run_webhook_server(
     };
 
     let global_secret = config.secret.clone();
-    let jobs = Arc::new(jobs);
     let guard = Arc::new(WebhookGuard::default());
 
     tracing::info!(
         port = config.port,
-        routes = jobs.len(),
-        "webhook server started"
+        routes = ctx.scheduler.webhook_jobs().len(),
+        "webhook server started (routes projected live from the jobs store)"
     );
 
     loop {
@@ -1850,18 +1852,16 @@ pub async fn run_webhook_server(
 
         let io = TokioIo::new(stream);
         let ctx = ctx.clone();
-        let jobs = jobs.clone();
         let global_secret = global_secret.clone();
         let guard = guard.clone();
 
         tokio::spawn(async move {
             let service = service_fn(move |req| {
                 let ctx = ctx.clone();
-                let jobs = jobs.clone();
                 let global_secret = global_secret.clone();
                 let guard = guard.clone();
                 let ip = remote_ip.clone();
-                async move { handle_request(req, ctx, &jobs, &global_secret, &guard, ip).await }
+                async move { handle_request(req, ctx, &global_secret, &guard, ip).await }
             });
 
             if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
@@ -1875,7 +1875,6 @@ pub async fn run_webhook_server(
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     ctx: Arc<WebhookContext>,
-    jobs: &[WebhookJobDef],
     global_secret: &Option<String>,
     guard: &Arc<WebhookGuard>,
     remote_ip: String,
@@ -1900,6 +1899,10 @@ async fn handle_request(
     if route_name.contains('/') {
         return ok_response(StatusCode::NOT_FOUND, "no webhook at this path");
     }
+    // Live route table: projected from the unified jobs store on every
+    // request, so webhook jobs created/updated/removed after startup take
+    // effect immediately (no restart, no stale snapshot).
+    let jobs = ctx.scheduler.webhook_jobs();
     let job = match jobs.iter().find(|j| j.route == route_name) {
         Some(j) => j,
         None => return ok_response(StatusCode::NOT_FOUND, "no webhook at this path"),
@@ -2796,6 +2799,24 @@ mod tests {
         let sched = test_scheduler(tmp.path());
         let err = sched.add_job(wh_entry(None, "s", None));
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn webhook_routes_reflect_live_store_changes() {
+        // The HTTP server projects routes per request from this same store
+        // (no startup snapshot) — adding/removing a webhook job must be
+        // visible in the projection immediately.
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
+        assert!(sched.webhook_jobs().is_empty());
+        let id = sched
+            .add_job(wh_entry(Some("live-route"), "s", None))
+            .unwrap();
+        let jobs = sched.webhook_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].route, "live-route");
+        sched.remove_job(&id).unwrap();
+        assert!(sched.webhook_jobs().is_empty());
     }
 
     #[test]

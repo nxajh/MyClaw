@@ -1571,10 +1571,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // in `{jobs_root}/{uuid}/meta.json`, §3.4 orthogonal model). A job
         // without a webhook channel simply isn't in the route table — only
         // the built-in /hooks/* endpoints remain besides it.
-        let wh_jobs = shared_scheduler.webhook_jobs();
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
             ctx: Arc::clone(orchestrator.ctx()),
             timezone: tz_name.clone(),
+            scheduler: Arc::clone(&shared_scheduler),
         });
         let wh_config = scheduler_config.webhook.clone();
 
@@ -1614,7 +1614,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         };
 
         tokio::spawn(async move {
-            crate::agents::run_webhook_server(wh_ctx, wh_config, wh_jobs, wh_listener).await;
+            crate::agents::run_webhook_server(wh_ctx, wh_config, wh_listener).await;
         });
     }
 
