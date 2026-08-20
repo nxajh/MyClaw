@@ -286,7 +286,7 @@ impl CronJobTool {
         }
 
         // Parse the optional webhook channel (orthogonal to schedule).
-        let webhook = match parse_webhook_channel(args, name.as_deref()) {
+        let webhook = match parse_webhook_channel(args, Some(name.as_str())) {
             Ok(w) => w,
             Err(e) => return Ok(err_result(&e)),
         };
@@ -312,7 +312,7 @@ impl CronJobTool {
             schedule: schedule.clone(),
             prompt,
             target,
-            name: name.clone(),
+            name: Some(name.clone()),
             tz,
             active_hours,
             delivery,
@@ -343,7 +343,7 @@ impl CronJobTool {
                 let mut details = vec![
                     format!(
                         "Created job '{}' (id: {})",
-                        name.as_deref().unwrap_or("unnamed"),
+                        name,
                         id
                     ),
                 ];
@@ -353,7 +353,7 @@ impl CronJobTool {
                 if let Some(ref wh) = webhook {
                     details.push(format!(
                         "  webhook: POST /hooks/{} (auth: {}{})",
-                        name.as_deref().unwrap_or("?"),
+                        name,
                         wh.auth,
                         if wh.payload_off { ", payload off" } else { "" }
                     ));
