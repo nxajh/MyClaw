@@ -228,46 +228,39 @@ impl ChatProvider for OpenAiChatCompletionsClient {
             // the connection was closed mid-response — emit an error rather
             // than a silent, truncated success.
             if sse_stop_reason.is_some() || saw_done_sentinel {
-                let final_reason = match sse_stop_reason {
-                    Some(StopReason::ToolUse) => StopReason::ToolUse,
-                    Some(r) if saw_tool_call => {
-                        tracing::debug!(
-                            ?r,
-                            "overriding SSE stop reason with ToolUse (saw tool call events)"
+                let outcome = resolve_stream_outcome(sse_stop_reason, saw_tool_call);
+                match &outcome {
+                    StreamEvent::Error(_) => {
+                        // finish_reason=tool_calls (or equivalent) but no
+                        // ToolCallStart/Delta was ever parsed — the stream is
+                        // self-contradictory (issue #75: a chunk that
+                        // embedded a raw tool_call SSE frame in `content`
+                        // broke JSON parsing for that chunk and every
+                        // subsequent tool_call delta). Fail the turn instead
+                        // of silently returning Done — the caller has
+                        // already forwarded any narrative text to the
+                        // session/UI, so retrying the request here would
+                        // duplicate that output; failing loudly at least
+                        // surfaces the loss instead of pretending the tool
+                        // call ran.
+                        tracing::warn!(
+                            url = %url,
+                            stream_saw_tool_call = false,
+                            recent_sse_count = recent_sse_data.len(),
+                            recent_sse = %format_recent_sse(&recent_sse_data),
+                            "finish_reason=tool_calls but no tool call events parsed; failing turn instead of silently succeeding"
                         );
-                        StopReason::ToolUse
                     }
-                    Some(r) => r,
-                    None => {
-                        if saw_tool_call {
-                            StopReason::ToolUse
-                        } else {
-                            StopReason::EndTurn
-                        }
+                    StreamEvent::Done { reason } => {
+                        tracing::debug!(
+                            stream_saw_tool_call = saw_tool_call,
+                            ?reason,
+                            "SSE stream completed"
+                        );
                     }
-                };
-                // finish_reason=tool_calls (or equivalent) but no ToolCallStart/Delta
-                // was ever parsed — agent may treat bridge text as a final reply.
-                if matches!(final_reason, StopReason::ToolUse) && !saw_tool_call {
-                    tracing::warn!(
-                        url = %url,
-                        stream_saw_tool_call = false,
-                        recent_sse_count = recent_sse_data.len(),
-                        recent_sse = %format_recent_sse(&recent_sse_data),
-                        "finish_reason=tool_calls but no tool call events parsed; dumping recent SSE data"
-                    );
-                } else {
-                    tracing::debug!(
-                        stream_saw_tool_call = saw_tool_call,
-                        ?final_reason,
-                        "SSE stream completed"
-                    );
+                    _ => {}
                 }
-                let _ = tx
-                    .send(StreamEvent::Done {
-                        reason: final_reason,
-                    })
-                    .await;
+                let _ = tx.send(outcome).await;
             } else {
                 let _ = tx
                     .send(StreamEvent::Error(
@@ -336,6 +329,47 @@ fn format_recent_sse(buf: &std::collections::VecDeque<String>) -> String {
         .map(|(i, s)| format!("[{i}] {s}"))
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+/// Resolve the terminal stream event once an authoritative end marker
+/// (`finish_reason` chunk or `[DONE]`) has been seen. Pulled out of the
+/// read loop so the self-contradictory case — provider reports
+/// `finish_reason=tool_calls` but zero tool-call events were ever parsed
+/// (#75) — is unit-testable without a live HTTP stream: it must produce an
+/// `Error`, never a `Done`, so the caller doesn't mistake a lost tool call
+/// for a completed turn.
+fn resolve_stream_outcome(sse_stop_reason: Option<StopReason>, saw_tool_call: bool) -> StreamEvent {
+    let final_reason = match sse_stop_reason {
+        Some(StopReason::ToolUse) => StopReason::ToolUse,
+        Some(r) if saw_tool_call => {
+            tracing::debug!(
+                ?r,
+                "overriding SSE stop reason with ToolUse (saw tool call events)"
+            );
+            StopReason::ToolUse
+        }
+        Some(r) => r,
+        None => {
+            if saw_tool_call {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            }
+        }
+    };
+
+    if matches!(final_reason, StopReason::ToolUse) && !saw_tool_call {
+        StreamEvent::Error(
+            "provider reported finish_reason=tool_calls but no tool call \
+             could be parsed from the stream (SSE chunk parse failure — \
+             see the preceding WARN for the raw chunk dump)"
+                .to_string(),
+        )
+    } else {
+        StreamEvent::Done {
+            reason: final_reason,
+        }
+    }
 }
 
 /// Parse one OpenAI Chat Completions SSE `data:` line into stream events.
@@ -605,6 +639,55 @@ mod tests {
             [StreamEvent::Done {
                 reason: StopReason::ToolUse
             }]
+        ));
+    }
+
+    #[test]
+    fn resolve_stream_outcome_errors_when_tool_calls_claimed_but_none_parsed() {
+        // #75: provider says finish_reason=tool_calls but every tool_call
+        // delta was lost to a chunk parse failure — must be a stream
+        // Error, never a silent Done, or the caller treats the turn as a
+        // completed (tool-less) reply and the tool call vanishes with no
+        // trace.
+        let outcome = resolve_stream_outcome(Some(StopReason::ToolUse), false);
+        assert!(
+            matches!(outcome, StreamEvent::Error(_)),
+            "got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_stream_outcome_succeeds_when_tool_calls_were_parsed() {
+        let outcome = resolve_stream_outcome(Some(StopReason::ToolUse), true);
+        assert!(matches!(
+            outcome,
+            StreamEvent::Done {
+                reason: StopReason::ToolUse
+            }
+        ));
+    }
+
+    #[test]
+    fn resolve_stream_outcome_promotes_stop_to_tool_use_when_calls_were_seen() {
+        // Provider reported plain "stop" but tool_call deltas did parse
+        // (some providers under-report finish_reason) — still a success.
+        let outcome = resolve_stream_outcome(Some(StopReason::EndTurn), true);
+        assert!(matches!(
+            outcome,
+            StreamEvent::Done {
+                reason: StopReason::ToolUse
+            }
+        ));
+    }
+
+    #[test]
+    fn resolve_stream_outcome_plain_text_reply() {
+        let outcome = resolve_stream_outcome(Some(StopReason::EndTurn), false);
+        assert!(matches!(
+            outcome,
+            StreamEvent::Done {
+                reason: StopReason::EndTurn
+            }
         ));
     }
 

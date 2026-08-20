@@ -73,6 +73,8 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
         target_channel,
         target_account,
         target_recipient,
+        target_thread,
+        delivery_suppressed,
         job_id,
         model,
         context_policy,
@@ -139,23 +141,31 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
     // Inject-mode crons doubly (turn had no channel AND send was skipped
     // because the user's session was active), leaving output only in the
     // session history (2026-08-14 weekly digest never delivered).
-    if let Ok(ref response) = result {
-        if !response.trim().is_empty() {
-            send_to_target_internal(
-                &orch,
-                target_channel.clone(),
-                target_account.clone(),
-                target_recipient.clone(),
-                response,
-            )
-            .await;
+    // #78: `delivery_suppressed` (mode=None) skips this — the turn still
+    // ran, but nothing was configured to receive its output.
+    if !delivery_suppressed {
+        if let Ok(ref response) = result {
+            if !response.trim().is_empty() {
+                send_to_target_internal(
+                    &orch,
+                    target_channel.clone(),
+                    target_account.clone(),
+                    target_recipient.clone(),
+                    target_thread.clone(),
+                    response,
+                )
+                .await;
+            }
         }
     }
 
-    // Send failure alert to channel if generated.
+    // Send failure alert to channel if generated. Unconditional even under
+    // mode=None: a silently-configured job's failures should still surface
+    // somewhere via the last-known channel fallback — matches pre-#78
+    // behavior (the cron path never actually enforced "none" here).
     if let Some(alert_msg) = failure_alert {
         tracing::warn!(job_id = %job_id, alert = %alert_msg, "sending failure alert");
-        send_to_target_internal(&orch, target_channel, target_account, target_recipient, &alert_msg).await;
+        send_to_target_internal(&orch, target_channel, target_account, target_recipient, target_thread, &alert_msg).await;
     }
 }
 
@@ -196,6 +206,7 @@ async fn send_to_target_internal(
     target_channel: Option<String>,
     target_account: Option<String>,
     target_recipient: Option<String>,
+    target_thread: Option<String>,
     content: &str,
 ) {
     let (ch_type, acc_id) = match (target_channel, target_account) {
@@ -241,8 +252,12 @@ async fn send_to_target_internal(
         }
     };
 
+    let mut receiver = crate::channels::MessageReceiver::new(recipient);
+    if let Some(thread) = target_thread {
+        receiver = receiver.with_thread(thread);
+    }
     let message = crate::channels::ChannelOutboundMessage {
-        receiver: crate::channels::MessageReceiver::new(recipient),
+        receiver,
         content: crate::channels::ChannelMessageContent::text(content.to_string()),
         options: Default::default(),
     };
