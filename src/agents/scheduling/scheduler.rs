@@ -1316,7 +1316,7 @@ fn compute_next_run_inner(
 ) -> Option<String> {
     // Orthogonal trigger model: no schedule = never timer-due (webhook-only
     // or archived jobs); the HTTP server handles their other channel.
-    let Some(schedule) = schedule else { return None };
+    let schedule = schedule?;
     match kind {
         Some(ScheduleKind::Every { interval_ms }) => {
             let base_ms = last_run
