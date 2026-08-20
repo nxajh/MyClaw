@@ -264,7 +264,7 @@ impl CronJobTool {
         };
 
         // Validate one-shot timestamps are in the future.
-        if let Some(ScheduleSpec::Kind(ScheduleKind::At { ref at })) = &schedule {
+        if let Some(ScheduleSpec::Kind(ScheduleKind::At { at })) = &schedule {
             if let Err(e) = validate_at_timestamp(at) {
                 return Ok(err_result(&e));
             }
@@ -471,7 +471,7 @@ impl CronJobTool {
                     Ok(v) => v,
                     Err(e) => return Ok(err_result(&e)),
                 };
-                if let Some(ScheduleKind::At { ref at }) = spec.at_time() {
+                if let Some(at) = spec.at_time() {
                     if let Err(e) = validate_at_timestamp(at) {
                         return Ok(err_result(&e));
                     }

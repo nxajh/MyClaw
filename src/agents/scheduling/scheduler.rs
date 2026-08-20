@@ -598,7 +598,7 @@ impl Scheduler {
                 job.name = Some(name);
             }
             if update.schedule_changed {
-                job.schedule = update.schedule;
+                job.schedule = update.schedule.flatten();
                 job.next_run_at = compute_next_run(
                     job.schedule.as_ref(),
                     job.last_run_at.as_deref(),
@@ -1371,29 +1371,6 @@ pub fn compute_next_run(
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(schedule = %expr, err = %e, "invalid cron expression");
-                    return None;
-                }
-            };
-            let tz = resolve_tz(tz_name);
-            let base_utc = match last_run {
-                Some(ts) => chrono::DateTime::parse_from_rfc3339(ts)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|_| chrono::Utc::now()),
-                None => chrono::Utc::now(),
-            };
-            let base_local = base_utc.with_timezone(&tz);
-            cron_schedule
-                .after(&base_local)
-                .next()
-                .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
-        }
-        None => {
-            // Legacy cron expression from schedule string.
-            let normalized = normalize_weekday_unix(schedule);
-            let cron_schedule: cron::Schedule = match normalized.parse() {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(schedule = %schedule, err = %e, "invalid cron expression");
                     return None;
                 }
             };
