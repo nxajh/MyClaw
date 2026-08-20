@@ -2130,41 +2130,92 @@ async fn handle_request(
         "_job_{}",
         crate::ids::bare_dir_name(&job.id)
     );
-    let started = std::time::Instant::now();
-    let result = run_scheduled_task(&ctx, &session_key, &prompt).await;
-    let duration_ms = started.elapsed().as_millis() as u64;
 
-    // History record (§3.4: trigger field + webhook audit fields).
-    if let Some(sched) = ctx.ctx.scheduler.as_ref() {
-        let mut record = RunRecord::now(match &result {
-            Ok(_) => RunStatus::Ok,
-            Err(_) => RunStatus::Error,
-        });
-        record.trigger = Some("webhook".to_string());
-        record.duration_ms = duration_ms;
-        record.payload = Some(pretty_payload(&payload, 8192));
-        record.prompt_head = Some(prompt.chars().take(512).collect());
-        if let Ok(response) = &result {
-            record = record.with_output_preview(response);
-        }
-        if let Err(e) = &result {
-            record = record.with_error(e.to_string());
-        }
-        sched.record_webhook_run(&job.id, record);
-    }
+    // Fire-and-forget dispatch: the turn runs in a background task so the
+    // HTTP response does not depend on LLM latency. Awaiting the turn inside
+    // the hyper service future couples its lifetime to the client connection
+    // — when the peer disconnects (GitHub webhooks time out at 10s), hyper
+    // drops the connection task and the turn is cancelled mid-flight with
+    // no run record. 202 acknowledges acceptance; the turn's outcome lands
+    // in the job's run log (`record_webhook_run`) and `send_to_target`.
+    dispatch_webhook_turn(
+        Arc::clone(&ctx),
+        job.clone(),
+        session_key,
+        prompt,
+        payload,
+        _inflight,
+        |ctx, session_key, prompt| async move {
+            run_scheduled_task(&ctx, &session_key, &prompt).await
+        },
+    )
+    .await
+}
 
-    match result {
-        Ok(response) => {
-            if !response.trim().is_empty() && job.target != "none" {
-                send_to_target(&ctx, &job.target, &response).await;
+/// Fire-and-forget dispatch of a webhook turn: spawn the turn in a
+/// background task and return 202 immediately, so the turn's lifetime is
+/// decoupled from the client connection.
+///
+/// `run` executes the turn (production: [`run_scheduled_task`]); it is a
+/// parameter so tests can inject a controllable future and assert that the
+/// 202 returns without awaiting the turn — a regression back to a
+/// synchronous `.await` would re-couple the turn to the connection (the
+/// bug PR #74 fixes) and fail
+/// `webhook_dispatch_returns_202_without_awaiting_turn`. The turn's
+/// outcome lands in the job's run log (`record_webhook_run`) and, when
+/// non-empty, `send_to_target`. The inflight slot is held for the whole
+/// turn and released only after the record is written.
+async fn dispatch_webhook_turn<F, Fut>(
+    ctx: Arc<WebhookContext>,
+    job: WebhookJobDef,
+    session_key: String,
+    prompt: String,
+    payload: serde_json::Value,
+    inflight: InflightGuard,
+    run: F,
+) -> anyhow::Result<Response<Full<Bytes>>>
+where
+    F: FnOnce(Arc<WebhookContext>, String, String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<String>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let result = run(Arc::clone(&ctx), session_key, prompt.clone()).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+
+        // History record (§3.4: trigger field + webhook audit fields).
+        if let Some(sched) = ctx.ctx.scheduler.as_ref() {
+            let mut record = RunRecord::now(match &result {
+                Ok(_) => RunStatus::Ok,
+                Err(_) => RunStatus::Error,
+            });
+            record.trigger = Some("webhook".to_string());
+            record.duration_ms = duration_ms;
+            record.payload = Some(pretty_payload(&payload, 8192));
+            record.prompt_head = Some(prompt.chars().take(512).collect());
+            if let Ok(response) = &result {
+                record = record.with_output_preview(response);
             }
-            ok_response(StatusCode::OK, "ok")
+            if let Err(e) = &result {
+                record = record.with_error(e.to_string());
+            }
+            sched.record_webhook_run(&job.id, record);
         }
-        Err(e) => {
-            tracing::warn!(err = %e, "webhook: agent run failed");
-            ok_response(StatusCode::INTERNAL_SERVER_ERROR, "agent error")
+
+        match result {
+            Ok(response) => {
+                if !response.trim().is_empty() && job.target != "none" {
+                    send_to_target(&ctx, &job.target, &response).await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(route = %job.route, err = %e, "webhook: agent run failed");
+            }
         }
-    }
+        drop(inflight);
+    });
+
+    ok_response(StatusCode::ACCEPTED, "accepted")
 }
 
 /// `POST /hooks/agent` — Run an isolated agent turn.
@@ -2224,20 +2275,26 @@ async fn handle_hooks_agent(
 
     tracing::info!(target = target, "/hooks/agent triggered");
 
-    let result = run_scheduled_task(&ctx, "_hooks_agent", &message).await;
-
-    match result {
-        Ok(response) => {
-            if !response.trim().is_empty() && target != "none" {
-                send_to_target(&ctx, target, &response).await;
+    // Fire-and-forget dispatch (same rationale as custom webhook routes):
+    // awaiting the turn inside the hyper service future ties it to the
+    // client connection — a peer disconnect cancels the turn mid-flight.
+    // 202 acknowledges acceptance; the response (if any) goes to `target`.
+    let bg_ctx = Arc::clone(&ctx);
+    let bg_target = target.to_string();
+    tokio::spawn(async move {
+        match run_scheduled_task(&bg_ctx, "_hooks_agent", &message).await {
+            Ok(response) => {
+                if !response.trim().is_empty() && bg_target != "none" {
+                    send_to_target(&bg_ctx, &bg_target, &response).await;
+                }
             }
-            ok_response(StatusCode::OK, "ok")
+            Err(e) => {
+                tracing::warn!(err = %e, "/hooks/agent: agent run failed");
+            }
         }
-        Err(e) => {
-            tracing::warn!(err = %e, "/hooks/agent: agent run failed");
-            ok_response(StatusCode::INTERNAL_SERVER_ERROR, "agent error")
-        }
-    }
+    });
+
+    ok_response(StatusCode::ACCEPTED, "accepted")
 }
 
 /// `POST /hooks/wake` — Wake endpoint (kept for URL contract; the old
@@ -3091,6 +3148,91 @@ mod tests {
         assert!(g.check_delivery("d-1"));
         assert!(!g.check_delivery("d-1")); // duplicate
         assert!(g.check_delivery("d-2"));
+    }
+
+    #[tokio::test]
+    async fn webhook_dispatch_returns_202_without_awaiting_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
+        let mut octx = crate::agents::orchestrator::test_support::test_ctx(vec![]);
+        octx.scheduler = Some(sched.clone());
+        let ctx = Arc::new(WebhookContext {
+            ctx: Arc::new(octx),
+            timezone: "UTC".to_string(),
+            scheduler: sched.clone(),
+        });
+
+        let job = WebhookJobDef {
+            id: "myclaw/job/019fffff-0000-7000-8000-000000000001".to_string(),
+            route: "slow-job".to_string(),
+            secret: "s".to_string(),
+            auth: WebhookAuth::Hmac,
+            target: "none".to_string(),
+            prompt_template: "p".to_string(),
+            events: None,
+            filters: None,
+            payload_off: false,
+        };
+        let guard = Arc::new(WebhookGuard::default());
+        let inflight = guard.acquire(&job.route, Arc::clone(&guard)).unwrap();
+
+        // Mock turn: it cannot complete until the test releases it — and the
+        // release happens only AFTER the 202 assert below. If dispatch ever
+        // awaits the turn inline (the connection-coupling regression), the
+        // timeout trips and the test fails instead of hanging.
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            dispatch_webhook_turn(
+                ctx,
+                job.clone(),
+                "_job_slow-job".to_string(),
+                "prompt".to_string(),
+                serde_json::json!({"verify": "mock"}),
+                inflight,
+                move |_ctx, _session_key, _prompt| async move {
+                    let _ = release_rx.await;
+                    let out: anyhow::Result<String> = Ok("MOCK_OUTPUT".to_string());
+                    out
+                },
+            ),
+        )
+        .await
+        .expect("202 must return without awaiting the turn")
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        release_tx.send(()).unwrap();
+
+        // Background task completes: the run record lands with the webhook
+        // trigger and the mock output — proving the turn outlived the
+        // response instead of being cancelled with it.
+        let dir = crate::ids::dir_name(&job.id);
+        let log_path = tmp
+            .path()
+            .join("jobs")
+            .join(&dir)
+            .join("run_logs")
+            .join(format!("{}.jsonl", dir));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut record = None;
+        while std::time::Instant::now() < deadline {
+            if let Ok(line) = std::fs::read_to_string(&log_path) {
+                if let Some(last) = line.lines().last() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(last) {
+                        record = Some(v);
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let record = record.expect("run record must be written after the turn completes");
+        assert_eq!(record["trigger"], "webhook");
+        assert!(record["output_preview"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("MOCK_OUTPUT"));
     }
 
     // ── Template rendering tests (migrated from webhook_loader.rs) ────

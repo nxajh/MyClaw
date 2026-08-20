@@ -60,7 +60,7 @@ impl Tool for CronJobTool {
                 },
                 "webhook": {
                     "type": "object",
-                    "description": "HTTP trigger channel (orthogonal to schedule; both may coexist). Registers POST /hooks/{name} — the job 'name' must be a URL-safe slug ([a-z0-9-]) and is the route. In 'update', pass null to remove the channel.",
+                    "description": "HTTP trigger channel (orthogonal to schedule; both may coexist). Registers POST /hooks/{name} — the job 'name' must be a URL-safe slug ([a-z0-9-]) and is the route. Delivery is asynchronous: the endpoint responds 202 immediately and the agent turn runs in the background (outcome in run logs; output delivered to target). In 'update', pass null to remove the channel.",
                     "properties": {
                         "auth": { "type": "string", "enum": ["hmac", "bearer"], "description": "Auth method. Default 'hmac' (X-Hub-Signature-256)." },
                         "secret": { "type": "string", "description": "Required. HMAC secret or Bearer token." },
