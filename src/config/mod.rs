@@ -568,11 +568,6 @@ impl AppConfig {
     pub fn worktrees_root(&self) -> PathBuf {
         self.workspace_dir.join("worktrees")
     }
-
-    /// Inbound webhook payload dir: `{workspace_dir}/webhooks`.
-    pub fn webhooks_dir(&self) -> PathBuf {
-        self.workspace_dir.join("webhooks")
-    }
 }
 
 /// Initialize the global safety config. Called once at daemon startup.

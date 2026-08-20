@@ -1563,8 +1563,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Scheduler tasks ────────────────────────────────────────────────────
 
     if scheduler_config.webhook.enabled {
-        let wh_dir = config.webhooks_dir();
-        let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
+        // Webhook jobs live in the unified jobs directory (kind == "webhook"
+        // in `{jobs_root}/{uuid}/meta.json`). A missing directory simply
+        // yields an empty route table — only the built-in /hooks/* endpoints
+        // remain.
+        let wh_jobs = shared_scheduler.webhook_jobs();
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
             ctx: Arc::clone(orchestrator.ctx()),
             timezone: tz_name.clone(),

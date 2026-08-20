@@ -113,6 +113,50 @@ pub struct JobEntry {
     /// Defaults to Inject for cron jobs.
     #[serde(default = "default_context_policy")]
     pub context_policy: crate::config::scheduler::ContextPolicy,
+    /// Trigger kind: "cron" (schedule-driven) or "webhook" (HTTP-driven).
+    /// Legacy meta.json without this field deserializes as "cron".
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Webhook trigger definition. Present only when kind == "webhook";
+    /// carries the external URL contract (path, auth, prompt template).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<WebhookDef>,
+}
+
+fn default_kind() -> String {
+    "cron".to_string()
+}
+
+/// Webhook trigger fields for a JobEntry with kind == "webhook".
+/// `path` is the external URL contract (`POST /hooks/{path}` must stay stable
+/// across job identity changes); loaded jobs are indexed path → job id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookDef {
+    /// URL path, e.g. "/github/issues".
+    pub path: String,
+    /// HMAC secret or Bearer token.
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// Auth method: "hmac" (default) or "bearer".
+    #[serde(default = "default_webhook_auth")]
+    pub auth: String,
+    /// Prompt template (the cron `prompt` field is reused at render time;
+    /// this field is only kept for migrating legacy `webhooks/*.md` files).
+    #[serde(default)]
+    pub prompt_template: Option<String>,
+}
+
+fn default_webhook_auth() -> String {
+    "hmac".to_string()
+}
+
+impl WebhookDef {
+    pub fn auth_kind(&self) -> crate::agents::scheduling::webhook_loader::WebhookAuth {
+        match self.auth.as_str() {
+            "bearer" => crate::agents::scheduling::webhook_loader::WebhookAuth::Bearer,
+            _ => crate::agents::scheduling::webhook_loader::WebhookAuth::Hmac,
+        }
+    }
 }
 
 fn default_context_policy() -> crate::config::scheduler::ContextPolicy {
@@ -377,6 +421,7 @@ impl Scheduler {
                         let now = chrono::Utc::now();
                         data.jobs.iter()
                             .filter(|j| j.enabled)
+                            .filter(|j| j.kind != "webhook")
                             .filter(|j| {
                                 j.next_run_at.as_ref()
                                     .and_then(|n| chrono::DateTime::parse_from_rfc3339(n).ok())
@@ -397,7 +442,7 @@ impl Scheduler {
                             "cron job triggered"
                         );
                         let _ = self.event_tx.send(SchedulerEvent::Cron(crate::agents::orchestrator::CronTrigger {
-                            session_key: format!("_cron_{}", j.id),
+                            session_key: format!("_job_{}", crate::ids::bare_dir_name(&j.id)),
                             prompt: j.prompt.clone(),
                             target_channel: parse_target_channel(&j.target),
                             target_account: parse_target_account(&j.target),
@@ -438,6 +483,32 @@ impl Scheduler {
     /// Get all jobs (cloned).
     pub fn jobs(&self) -> Vec<JobEntry> {
         self.jobs.read().jobs.clone()
+    }
+
+    /// Webhook-route jobs (kind == "webhook"), converted to the server's
+    /// `WebhookJobDef` view. The cron scheduler loop must skip these (they
+    /// have no schedule); the webhook server indexes them by `path`.
+    pub fn webhook_jobs(&self) -> Vec<crate::agents::scheduling::webhook_loader::WebhookJobDef> {
+        self.jobs
+            .read()
+            .jobs
+            .iter()
+            .filter(|j| j.kind == "webhook")
+            .filter_map(|j| {
+                let wh = j.webhook.as_ref()?;
+                Some(crate::agents::scheduling::webhook_loader::WebhookJobDef {
+                    id: j.id.clone(),
+                    path: wh.path.clone(),
+                    secret: wh.secret.clone(),
+                    auth: wh.auth_kind(),
+                    target: j.target.clone(),
+                    prompt_template: wh
+                        .prompt_template
+                        .clone()
+                        .unwrap_or_else(|| j.prompt.clone()),
+                })
+            })
+            .collect()
     }
 
     /// Number of jobs.
@@ -1560,8 +1631,8 @@ async fn handle_request(
     let prompt = render_template(&job.prompt_template, &payload);
 
     let session_key = format!(
-        "_webhook_{}",
-        path.trim_start_matches('/').replace('/', "_")
+        "_job_{}",
+        crate::ids::bare_dir_name(&job.id)
     );
     let result = run_scheduled_task(&ctx, &session_key, &prompt).await;
 

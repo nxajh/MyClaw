@@ -79,7 +79,7 @@ pub use scheduling::scheduler::{
     JobEntry, JobUpdate, Scheduler, SharedScheduler, WebhookContext, is_active_hours, resolve_tz,
     run_webhook_server, scan_prompt_injection, send_to_target,
 };
-pub use scheduling::webhook_loader::{WebhookJobDef, load_webhook_jobs};
+pub use scheduling::webhook_loader::WebhookJobDef;
 pub use session::SessionManager;
 pub use session::{BackendPersistHook, BreakpointItem, InMemoryBackend, PersistHook, Session};
 pub use session::{detect_incomplete_turn, identify_breakpoint};

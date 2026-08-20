@@ -1,30 +1,18 @@
-//! Webhook Loader — 从 workspace/webhooks/ 目录加载 webhook 路由文件。
+//! Webhook loader — webhook trigger view types + payload template rendering.
 //!
-//! 每个 `.md` 文件定义一个 webhook job，格式：
-//! ```markdown
-//! ---
-//! path: /github/issues
-//! secret: "gh-wh-secret"
-//! auth: hmac
-//! target: last
-//! ---
-//!
-//! 分析并处理新的 GitHub issue。
-//!
-//! 仓库: {{repository.full_name}}
-//! 标题: {{issue.title}}
-//! ```
+//! Webhook jobs live in the unified jobs store (`{jobs_root}/{uuid}/meta.json`
+//! with `kind = "webhook"`); `Scheduler::webhook_jobs()` projects them into
+//! [`WebhookJobDef`] for the HTTP server. The legacy `webhooks/*.md`
+//! file-loading path was removed with the unification.
 
-use std::path::Path;
-
-use tracing::{info, warn};
-
-use crate::str_utils::{extract_yaml_string, parse_front_matter};
-
-/// 从 `webhooks/*.md` 加载的 webhook job 定义。
+/// Webhook job definition (server-facing view projected from a
+/// `kind = "webhook"` JobEntry).
 #[derive(Debug, Clone)]
 pub struct WebhookJobDef {
-    /// URL path，e.g. "/github/issues".
+    /// Owning job id — FQID `<ns>/job/<uuid>`; used for the `_job_{uuid}`
+    /// session key.
+    pub id: String,
+    /// URL path, e.g. "/github/issues".
     pub path: String,
     /// HMAC secret 或 Bearer token.
     pub secret: Option<String>,
@@ -34,8 +22,6 @@ pub struct WebhookJobDef {
     pub target: String,
     /// Prompt 模板（body），可含 {{path.to.field}} 占位符.
     pub prompt_template: String,
-    /// 源文件路径.
-    pub source_path: std::path::PathBuf,
 }
 
 /// Webhook 认证方式。
@@ -45,94 +31,6 @@ pub enum WebhookAuth {
     Hmac,
     /// Bearer token，验证 Authorization header.
     Bearer,
-}
-
-/// 解析单个 webhook 文件。
-pub fn parse_webhook_file(path: &Path) -> anyhow::Result<WebhookJobDef> {
-    let content = std::fs::read_to_string(path)?;
-    let (front_matter, body) = parse_front_matter(&content);
-
-    let raw_path = extract_yaml_string(&front_matter, "path")
-        .ok_or_else(|| anyhow::anyhow!("missing 'path' in front matter of {}", path.display()))?;
-
-    let path_normalized = if raw_path.starts_with('/') {
-        raw_path
-    } else {
-        format!("/{}", raw_path)
-    };
-
-    let secret = extract_yaml_string(&front_matter, "secret");
-
-    let auth = match extract_yaml_string(&front_matter, "auth")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
-        "bearer" => WebhookAuth::Bearer,
-        _ => WebhookAuth::Hmac,
-    };
-
-    let target = extract_yaml_string(&front_matter, "target").unwrap_or_else(|| "last".to_string());
-
-    let prompt_template = body.trim().to_string();
-
-    if prompt_template.is_empty() {
-        anyhow::bail!("empty prompt body in {}", path.display());
-    }
-
-    Ok(WebhookJobDef {
-        path: path_normalized,
-        secret,
-        auth,
-        target,
-        prompt_template,
-        source_path: path.to_path_buf(),
-    })
-}
-
-/// 扫描 webhooks 目录，加载所有 `.md` 文件。
-pub fn load_webhook_jobs(webhooks_dir: &Path) -> Vec<WebhookJobDef> {
-    let mut jobs = Vec::new();
-
-    if !webhooks_dir.exists() {
-        return jobs;
-    }
-
-    let entries = match std::fs::read_dir(webhooks_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!(dir = %webhooks_dir.display(), err = %e, "failed to read webhooks directory");
-            return jobs;
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path.extension().is_none_or(|ext| ext != "md") {
-            continue;
-        }
-
-        match parse_webhook_file(&path) {
-            Ok(job) => {
-                info!(
-                    path = %job.path,
-                    auth = ?job.auth,
-                    target = %job.target,
-                    file = %path.file_name().unwrap_or_default().to_string_lossy(),
-                    "webhook loaded"
-                );
-                jobs.push(job);
-            }
-            Err(e) => {
-                warn!(path = %path.display(), err = %e, "failed to parse webhook file");
-            }
-        }
-    }
-
-    jobs
 }
 
 // ── Template rendering ────────────────────────────────────────────────────
@@ -199,104 +97,6 @@ fn navigate_json_value<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_webhook_file_valid() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("github-issues.md");
-        std::fs::write(
-            &path,
-            "---\npath: /github/issues\nsecret: \"gh-secret\"\nauth: hmac\ntarget: last\n---\n\n分析 issue: {{issue.title}}\n",
-        )
-        .unwrap();
-
-        let job = parse_webhook_file(&path).unwrap();
-        assert_eq!(job.path, "/github/issues");
-        assert_eq!(job.secret, Some("gh-secret".to_string()));
-        assert_eq!(job.auth, WebhookAuth::Hmac);
-        assert_eq!(job.target, "last");
-        assert!(job.prompt_template.contains("{{issue.title}}"));
-    }
-
-    #[test]
-    fn parse_webhook_file_bearer_auth() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("internal.md");
-        std::fs::write(
-            &path,
-            "---\npath: /internal\nsecret: \"my-token\"\nauth: bearer\n---\n\n执行任务。\n",
-        )
-        .unwrap();
-
-        let job = parse_webhook_file(&path).unwrap();
-        assert_eq!(job.auth, WebhookAuth::Bearer);
-    }
-
-    #[test]
-    fn parse_webhook_file_no_secret() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("public.md");
-        std::fs::write(&path, "---\npath: /public\n---\n\n公开端点。\n").unwrap();
-
-        let job = parse_webhook_file(&path).unwrap();
-        assert_eq!(job.secret, None);
-    }
-
-    #[test]
-    fn parse_webhook_file_path_normalization() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.md");
-        std::fs::write(&path, "---\npath: github/issues\n---\n\nPrompt.\n").unwrap();
-
-        let job = parse_webhook_file(&path).unwrap();
-        assert_eq!(job.path, "/github/issues");
-    }
-
-    #[test]
-    fn parse_webhook_file_missing_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.md");
-        std::fs::write(&path, "---\ntarget: last\n---\nDo something.").unwrap();
-
-        assert!(parse_webhook_file(&path).is_err());
-    }
-
-    #[test]
-    fn parse_webhook_file_empty_body() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.md");
-        std::fs::write(&path, "---\npath: /test\n---\n").unwrap();
-
-        assert!(parse_webhook_file(&path).is_err());
-    }
-
-    #[test]
-    fn load_webhook_jobs_from_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let wh_dir = dir.path().join("webhooks");
-        std::fs::create_dir_all(&wh_dir).unwrap();
-
-        std::fs::write(
-            wh_dir.join("github.md"),
-            "---\npath: /github\nsecret: \"s1\"\n---\nHandle GitHub event.",
-        )
-        .unwrap();
-        std::fs::write(
-            wh_dir.join("stripe.md"),
-            "---\npath: /stripe\nsecret: \"s2\"\nauth: bearer\n---\nHandle Stripe event.",
-        )
-        .unwrap();
-        std::fs::write(wh_dir.join("notes.txt"), "not a webhook").unwrap();
-
-        let jobs = load_webhook_jobs(&wh_dir);
-        assert_eq!(jobs.len(), 2);
-    }
-
-    #[test]
-    fn load_webhook_jobs_missing_dir() {
-        let jobs = load_webhook_jobs(Path::new("/nonexistent"));
-        assert!(jobs.is_empty());
-    }
 
     // ── Template rendering tests ───────────────────────────────────────
 
