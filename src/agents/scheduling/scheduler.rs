@@ -2209,11 +2209,17 @@ where
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
         while let Some(frame) = body.as_mut().frame().await {
             let frame = frame?;
-            if let Ok(data) = frame.into_data() {
-                if buf.len() + data.len() > WEBHOOK_BODY_LIMIT {
-                    anyhow::bail!("too large");
+            if let Ok(mut data) = frame.into_data() {
+                use bytes::Buf;
+                while data.has_remaining() {
+                    let chunk = data.chunk();
+                    if buf.len() + chunk.len() > WEBHOOK_BODY_LIMIT {
+                        anyhow::bail!("too large");
+                    }
+                    let n = chunk.len();
+                    buf.extend_from_slice(chunk);
+                    data.advance(n);
                 }
-                buf.extend_from_slice(&data);
             }
         }
         Ok(Bytes::from(buf))
