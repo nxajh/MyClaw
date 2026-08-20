@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use super::{OrchestratorCtx, is_silent_ok};
+use super::OrchestratorCtx;
 use crate::channels::ChannelInboundMessage;
 
 /// Run a scheduled turn for `session_key` with `prompt`, forcing Background

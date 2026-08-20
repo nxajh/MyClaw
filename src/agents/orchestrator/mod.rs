@@ -685,7 +685,11 @@ impl Orchestrator {
     }
 }
 
-/// Check if a response is a silent "nothing to do" signal (used by scheduled turns).
+/// Check if a response is a silent "nothing to do" signal. Its only caller
+/// (`run_heartbeat_task`) was removed along with the heartbeat system (U1);
+/// left `#[cfg(test)]` rather than deleted outright because
+/// `scheduler.rs`'s `silent_marker_ok` test still exercises it directly.
+#[cfg(test)]
 pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
     let trimmed = response.trim().to_lowercase();
     let marker = format!("{}_ok", prefix);

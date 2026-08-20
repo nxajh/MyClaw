@@ -1067,7 +1067,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             &config.system.namespace,
             tz_name.clone(),
             None,
-            None,
             dummy_tx,
             config.last_channel_path(),
             config.last_recipient_path(),

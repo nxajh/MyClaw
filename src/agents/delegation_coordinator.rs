@@ -1443,7 +1443,7 @@ impl DelegationCoordinator {
             );
         }
         let requested = extra_secs.unwrap_or(cp.timeout_secs);
-        let budget = requested.min(SUB_AGENT_TIMEOUT_MAX_SECS).max(1);
+        let budget = requested.clamp(1, SUB_AGENT_TIMEOUT_MAX_SECS);
 
         // Re-arm the parent side. Registered (active) context first; the
         // fallback load covers a parent that switched away or whose turn
