@@ -18,7 +18,7 @@ pub mod key;
 mod recovery;
 mod scheduled;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 pub mod turn;
 
 pub use ctx::{ChannelRegistry, OrchestratorCtx};
