@@ -3,7 +3,7 @@
 //! The Scheduler is the single owner of all cron job data. It:
 //!   - Loads and persists jobs from `{jobs_root}/{id}/meta.json` (P1-B2)
 //!   - Hot-reloads when the file changes on disk
-//!   - Sends timing events (heartbeat, cron) via mpsc channel
+//!   - Sends timing events (cron, distill) via mpsc channel
 //!   - Provides CRUD methods for cronjob_tool
 //!   - Records run results
 //!
@@ -22,7 +22,7 @@ use crate::agents::orchestrator::SchedulerEvent;
 use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
 use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
-use crate::config::scheduler::{HeartbeatConfig, WebhookConfig};
+use crate::config::scheduler::WebhookConfig;
 
 /// Shared handle to the Scheduler for concurrent access.
 pub type SharedScheduler = Arc<Scheduler>;
@@ -184,8 +184,6 @@ pub struct Scheduler {
     last_mtime: ParkMutex<Option<SystemTime>>,
     /// Global IANA timezone.
     timezone: String,
-    /// Heartbeat config.
-    heartbeat_config: Option<HeartbeatConfig>,
     /// Idle-time distillation config (None = disabled).
     distill_config: Option<DistillConfig>,
     /// Unix seconds of the last inbound user message. 0 = never.
@@ -193,7 +191,7 @@ pub struct Scheduler {
     /// Event channel to orchestrator.
     event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
     /// Last channel that received a user message (format
-    /// `channel_type:account_id`). Read by heartbeat / cron output
+    /// `channel_type:account_id`). Read by cron output
     /// dispatch when the job's target is "last".
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Path to persist `last_channel` across restarts.
@@ -212,7 +210,6 @@ impl Scheduler {
         path: PathBuf,
         namespace: &str,
         timezone: String,
-        heartbeat_config: Option<HeartbeatConfig>,
         distill_config: Option<DistillConfig>,
         event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
         last_channel_file: PathBuf,
@@ -273,7 +270,6 @@ impl Scheduler {
             namespace: namespace.to_string(),
             last_mtime: ParkMutex::new(last_mtime),
             timezone,
-            heartbeat_config,
             distill_config,
             last_inbound: AtomicU64::new(0),
             event_tx,
@@ -286,7 +282,7 @@ impl Scheduler {
 
     /// Record the most recent (channel_type, account_id, reply_target)
     /// the orchestrator routed to. Called once per inbound UserMessage
-    /// so heartbeat / cron jobs configured with `target = "last"` know
+    /// so cron jobs configured with `target = "last"` know
     /// where to send their output. Also stamps `last_inbound` — the idle
     /// clock for memory distillation.
     pub async fn record_user_message(&self, channel_key: &str, reply_target: &str) {
@@ -309,11 +305,9 @@ impl Scheduler {
         self.last_inbound.store(now, Ordering::Relaxed);
     }
 
-    /// Whether the scheduler should run (has heartbeat, distill, or cron jobs).
+    /// Whether the scheduler should run (has distill or cron jobs).
     pub fn should_run(&self) -> bool {
-        self.heartbeat_config.is_some()
-            || self.distill_config.is_some()
-            || !self.jobs.read().jobs.is_empty()
+        self.distill_config.is_some() || !self.jobs.read().jobs.is_empty()
     }
 
     /// Distill tick: fire a `Distill` event when the system has been idle
@@ -346,14 +340,6 @@ impl Scheduler {
 
     /// Run the scheduler loop — sends events via mpsc.
     pub async fn run(&self) {
-        let mut heartbeat_ticker = self.heartbeat_config.as_ref().and_then(|cfg| {
-            parse_interval(&cfg.every).map(|interval| {
-                let mut t = tokio::time::interval(interval);
-                t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                t
-            })
-        });
-
         let mut cron_ticker = {
             let mut t = tokio::time::interval(Duration::from_secs(60));
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -367,7 +353,6 @@ impl Scheduler {
         });
 
         tracing::info!(
-            heartbeat = heartbeat_ticker.is_some(),
             distill = distill_ticker.is_some(),
             cron_jobs = self.jobs.read().jobs.len(),
             "scheduler started (JSON store mode)"
@@ -380,24 +365,6 @@ impl Scheduler {
                     else { std::future::pending::<()>().await; }
                 }, if distill_ticker.is_some() => {
                     self.maybe_fire_distill().await;
-                }
-                _ = async {
-                    if let Some(t) = heartbeat_ticker.as_mut() { t.tick().await; }
-                    else { std::future::pending::<()>().await; }
-                }, if heartbeat_ticker.is_some() => {
-                    tracing::debug!("heartbeat tick fired");
-                    let config = self.heartbeat_config.as_ref().unwrap();
-                    if !is_active_hours(&config.active_hours, &self.timezone) {
-                        tracing::debug!("heartbeat skipped: outside active hours");
-                        continue;
-                    }
-                    match self.event_tx.send(SchedulerEvent::Heartbeat {
-                        target_channel: parse_target_channel(&config.target),
-                        target_account: parse_target_account(&config.target),
-                    }).await {
-                        Ok(()) => tracing::debug!("heartbeat event sent to orchestrator"),
-                        Err(e) => tracing::warn!(err = %e, "failed to send heartbeat event"),
-                    }
                 }
                 _ = cron_ticker.tick() => {
                     // Clean up one-shot jobs that reached max_runs + delete_after_run.
@@ -1674,7 +1641,8 @@ async fn handle_hooks_agent(
     }
 }
 
-/// `POST /hooks/wake` — Trigger an immediate heartbeat.
+/// `POST /hooks/wake` — Wake endpoint (kept for URL contract; the old
+/// heartbeat wakeup mechanism was removed with the heartbeat system).
 /// Body: `{"text": "..."}`
 async fn handle_hooks_wake(
     req: Request<hyper::body::Incoming>,
@@ -1710,7 +1678,7 @@ async fn handle_hooks_wake(
 
     tracing::info!(text = %text, "/hooks/wake triggered");
 
-    // TODO: integrate with heartbeat wakeup mechanism (enqueue system event)
+    // TODO: enqueue a system event to wake the agent loop
     // For now, just acknowledge.
     ok_response(StatusCode::OK, "wake acknowledged")
 }
@@ -1897,11 +1865,11 @@ mod tests {
     }
 
     #[test]
-    fn silent_heartbeat_ok() {
-        assert!(is_silent_ok("heartbeat_ok", "heartbeat"));
-        assert!(is_silent_ok("Heartbeat_OK", "heartbeat"));
-        assert!(is_silent_ok(" heartbeat_ok ", "heartbeat"));
-        assert!(!is_silent_ok("I found something", "heartbeat"));
+    fn silent_marker_ok() {
+        assert!(is_silent_ok("cron_ok", "cron"));
+        assert!(is_silent_ok("Cron_OK", "cron"));
+        assert!(is_silent_ok(" cron_ok ", "cron"));
+        assert!(!is_silent_ok("I found something", "cron"));
     }
 
     #[test]
