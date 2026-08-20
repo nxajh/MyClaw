@@ -92,7 +92,7 @@ impl Tool for CronJobTool {
                 },
                 "name": {
                     "type": "string",
-                    "description": "Optional friendly name for the job."
+                    "description": "Required. Job name (user-facing identity). For webhook jobs it is also the route: POST /hooks/{name} must be a URL-safe slug [a-z0-9-]."
                 },
                 "active_hours": {
                     "type": "string",
@@ -220,10 +220,15 @@ impl CronJobTool {
             .and_then(|v| v.as_str())
             .unwrap_or("last")
             .to_string();
-        let name = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        // §3.4: name is required (user identity; webhook route segment).
+        let name = match args.get("name").and_then(|v| v.as_str()) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => {
+                return Ok(err_result(
+                    "Missing required field: name (job name; for webhook jobs it is also the route POST /hooks/{name})",
+                ))
+            }
+        };
         let active_hours = args
             .get("active_hours")
             .and_then(|v| v.as_str())
@@ -285,11 +290,9 @@ impl CronJobTool {
             Ok(w) => w,
             Err(e) => return Ok(err_result(&e)),
         };
-        if schedule.is_none() && webhook.is_none() {
-            return Ok(err_result(
-                "Job needs at least one trigger channel: a 'schedule' (timer) and/or 'webhook' (HTTP POST /hooks/{name}).",
-            ));
-        }
+        // §3.4: neither channel is legal (archived job) — create proceeds
+        // with a note; it never fires until a schedule or webhook is added.
+        let archived = schedule.is_none() && webhook.is_none();
 
         // Parse delivery config.
         let delivery = parse_delivery(args.get("delivery"));
@@ -360,6 +363,11 @@ impl CronJobTool {
                 }
                 if let Some(ref p) = provider {
                     details.push(format!("  provider: {}", p));
+                }
+                if archived {
+                    details.push(
+                        "  note: no trigger channel (no schedule, no webhook) — this job never fires until one is added; equivalent to an archived/disabled job".to_string(),
+                    );
                 }
                 if let Some(mr) = max_runs {
                     details.push(format!(
@@ -870,7 +878,7 @@ fn parse_webhook_channel(
     }
 
     let route = name.unwrap_or("");
-    if !crate::agents::scheduling::webhook_loader::is_route_slug(route) {
+    if !scheduler::is_route_slug(route) {
         return Err(format!(
             "a URL-safe slug 'name' ([a-z0-9-], 1-64 chars) is required for webhook jobs: got '{:?}' — the name IS the route (POST /hooks/{{name}})",
             route

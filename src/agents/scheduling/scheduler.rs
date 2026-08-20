@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::agents::orchestrator::SchedulerEvent;
 use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
-use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
 use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::config::scheduler::WebhookConfig;
 
@@ -173,10 +172,10 @@ fn default_webhook_auth() -> String {
 }
 
 impl WebhookDef {
-    pub fn auth_kind(&self) -> crate::agents::scheduling::webhook_loader::WebhookAuth {
+    pub fn auth_kind(&self) -> WebhookAuth {
         match self.auth.as_str() {
-            "bearer" => crate::agents::scheduling::webhook_loader::WebhookAuth::Bearer,
-            _ => crate::agents::scheduling::webhook_loader::WebhookAuth::Hmac,
+            "bearer" => WebhookAuth::Bearer,
+            _ => WebhookAuth::Hmac,
         }
     }
 }
@@ -519,8 +518,8 @@ impl Scheduler {
     /// both). Projected into the server's `WebhookJobDef` view; route derives
     /// from the job name. Jobs whose name is not a URL-safe slug, or whose
     /// name collides with another webhook job, are skipped with a warning.
-    pub fn webhook_jobs(&self) -> Vec<crate::agents::scheduling::webhook_loader::WebhookJobDef> {
-        let mut out: Vec<crate::agents::scheduling::webhook_loader::WebhookJobDef> = Vec::new();
+    pub fn webhook_jobs(&self) -> Vec<WebhookJobDef> {
+        let mut out: Vec<WebhookJobDef> = Vec::new();
         let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
         for j in self.jobs.read().jobs.iter() {
             let Some(wh) = j.webhook.as_ref() else { continue };
@@ -535,7 +534,7 @@ impl Scheduler {
                 tracing::warn!(job_id = %j.id, route = %route, "webhook route collides with a built-in /hooks endpoint: skipped");
                 continue;
             }
-            if !crate::agents::scheduling::webhook_loader::is_route_slug(&route) {
+            if !is_route_slug(&route) {
                 tracing::warn!(job_id = %j.id, route = %route, "webhook route name is not a URL-safe slug [a-z0-9-]: skipped");
                 continue;
             }
@@ -547,7 +546,7 @@ impl Scheduler {
                 tracing::warn!(job_id = %j.id, route = %route, "webhook job without a secret: rejected at load (design §3.4.1)");
                 continue;
             }
-            out.push(crate::agents::scheduling::webhook_loader::WebhookJobDef {
+            out.push(WebhookJobDef {
                 id: j.id.clone(),
                 route,
                 secret: wh.secret.clone(),
@@ -569,6 +568,11 @@ impl Scheduler {
 
     /// Add a new job. Returns the generated ID.
     pub fn add_job(&self, mut entry: JobEntry) -> anyhow::Result<String> {
+        // §3.4: name is required — user-facing identity and (for webhook
+        // channels) the route segment.
+        if entry.name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            anyhow::bail!("job name is required (design §3.4)");
+        }
         if entry.id.is_empty() {
             entry.id = self.generate_id();
         }
@@ -933,7 +937,18 @@ fn load_jobs_from_dirs(jobs_root: &Path) -> Vec<JobEntry> {
             Err(_) => continue,
         };
         match serde_json::from_str::<JobEntry>(&content) {
-            Ok(job) => jobs.push(job),
+            Ok(mut job) => {
+                // §3.4: name is required. Legacy meta.json without a name
+                // backfills with the bare uuid (which is a valid slug) and
+                // warns; persisted back on the next save.
+                if job.name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    let fallback = crate::ids::bare_dir_name(&job.id);
+                    tracing::warn!(job_id = %job.id, fallback = %fallback,
+                        "jobs store: meta.json without name, backfilling with bare uuid");
+                    job.name = Some(fallback);
+                }
+                jobs.push(job)
+            }
             Err(e) => tracing::warn!(
                 path = %meta.display(),
                 err = %e,
@@ -1396,6 +1411,113 @@ pub struct WebhookContext {
     pub timezone: String,
 }
 
+// ── Webhook channel view + template rendering (migrated from the removed
+// webhook_loader.rs per §4 checklist) ───────────────────────────────────────
+
+/// Webhook job definition (server-facing view projected from a JobEntry's
+/// `webhook` channel). Route derives from the job name: `POST /hooks/{route}`.
+#[derive(Debug, Clone)]
+pub struct WebhookJobDef {
+    /// Owning job id — FQID `<ns>/job/<uuid>`; used for the `_job_{uuid}`
+    /// session key.
+    pub id: String,
+    /// Route segment (the job's name, URL-safe slug): full route is
+    /// `POST /hooks/{route}`.
+    pub route: String,
+    /// HMAC secret or Bearer token (required — validated at projection).
+    pub secret: String,
+    /// Auth method: hmac (default) or bearer.
+    pub auth: WebhookAuth,
+    /// Output delivery target: last | none | channel name (from the job).
+    pub target: String,
+    /// Prompt template (the job's prompt field), with `{{a.b.c}}`
+    /// placeholders rendered from the payload.
+    pub prompt_template: String,
+    /// Event-type whitelist (optional; non-matching events are ignored).
+    pub events: Option<Vec<String>>,
+    /// Condition filters (AND semantics, optional).
+    pub filters: Option<Vec<WebhookFilter>>,
+    /// Disable the automatic full-payload appendix.
+    pub payload_off: bool,
+}
+
+/// Webhook auth method.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WebhookAuth {
+    /// HMAC-SHA256 via the X-Hub-Signature-256 header.
+    Hmac,
+    /// Bearer token via the Authorization header.
+    Bearer,
+}
+
+/// Route-segment validity: lowercase URL-safe slug `[a-z0-9-]`, 1-64 chars.
+/// Names are user-facing, so validation is strict (no `_`, no unicode).
+pub fn is_route_slug(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Render a prompt template, replacing `{{path.to.field}}` placeholders with
+/// values from the JSON payload.
+///
+/// - `{{issue.title}}` → reads `issue.title` from the payload
+/// - `{{commits[0].message}}` → array indexing supported
+/// - missing fields render as an empty string
+pub fn render_template(template: &str, payload: &serde_json::Value) -> String {
+    let mut result = template.to_string();
+    let mut start = 0;
+
+    while let Some(open) = result[start..].find("{{") {
+        let abs_open = start + open;
+        let Some(close) = result[abs_open..].find("}}") else {
+            break;
+        };
+        let abs_close = abs_open + close;
+
+        let key = result[abs_open + 2..abs_close].trim();
+        let replacement = match navigate_json_value(payload, key) {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            Some(serde_json::Value::Bool(b)) => b.to_string(),
+            Some(serde_json::Value::Null) => String::new(),
+            Some(other) => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+            None => String::new(),
+        };
+
+        let placeholder_len = abs_close + 2 - abs_open; // includes {{ and }}
+        result.replace_range(abs_open..abs_open + placeholder_len, &replacement);
+        // Move past the replacement to avoid infinite loops
+        start = abs_open + replacement.len();
+    }
+
+    result
+}
+
+/// Navigate a JSON value by dot-separated path with array index support.
+fn navigate_json_value<'a>(
+    val: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = val;
+    for segment in path.split('.') {
+        if let Some(bracket) = segment.find('[') {
+            let field = &segment[..bracket];
+            if !field.is_empty() {
+                current = current.get(field)?;
+            }
+            let rest = &segment[bracket..];
+            for idx_str in rest.split(']').filter(|s| !s.is_empty()) {
+                let idx: usize = idx_str.trim_start_matches('[').parse().ok()?;
+                current = current.get(idx)?;
+            }
+        } else {
+            current = current.get(segment)?;
+        }
+    }
+    Some(current)
+}
+
 // ── Webhook safety stack (§3.4.1) ──────────────────────────────────────────
 
 /// Per-route + per-IP request guard: rate limit, in-flight cap, delivery-id
@@ -1748,8 +1870,18 @@ async fn handle_request(
         None => return ok_response(StatusCode::NOT_FOUND, "no webhook at this path"),
     };
 
-    // ── Safety stack (§3.4.1): rate limit → concurrency → (auth →
-    // idempotency → body below). Cheap rejections come first. ─────────
+    // ── Safety stack (§3.4.1): method/Content-Type → rate limit →
+    // concurrency → (auth → idempotency → body below). Cheap rejections
+    // come first. ─────────
+    // Content-Type: JSON parses as payload; text/form bodies pass through
+    // verbatim as string payloads (§3.4.1); multipart is rejected (we do
+    // not decode it and should not read large uploads).
+    if !acceptable_content_type(req.headers().get("Content-Type").and_then(|v| v.to_str().ok())) {
+        return ok_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Content-Type must be application/json, text/* or application/x-www-form-urlencoded",
+        );
+    }
     if !guard.check_rate(&job.route, &remote_ip) {
         return ok_response(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
     }
@@ -2001,6 +2133,17 @@ async fn handle_hooks_agent(
     ctx: Arc<WebhookContext>,
     global_secret: &Option<String>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
+    // JSON API: cheap Content-Type rejection before auth/body work.
+    let ct_json = req
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json"))
+        .unwrap_or(false);
+    if !ct_json {
+        return ok_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Content-Type must be application/json");
+    }
+
     // Verify global Bearer token.
     if let Some(secret) = global_secret {
         let expected = format!("Bearer {}", secret);
@@ -2155,6 +2298,16 @@ fn pretty_payload(payload: &serde_json::Value, max_chars: usize) -> String {
     }
 }
 
+/// Content-Type gate (§3.4.1 first stack step): application/json parses as
+/// the payload; text/* and form-urlencoded bodies pass through verbatim as
+/// string payloads; anything else (missing, multipart, …) is rejected cheap
+/// before any body read.
+fn acceptable_content_type(ct: Option<&str>) -> bool {
+    let Some(ct) = ct else { return false };
+    let mime = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    mime == "application/json" || mime.starts_with("text/") || mime == "application/x-www-form-urlencoded"
+}
+
 /// Verify HMAC-SHA256 signature against the `X-Hub-Signature-256` header value.
 fn verify_hmac_signature(body: &[u8], secret: &str, header_value: &str) -> bool {
     use hmac::{Hmac, Mac};
@@ -2269,7 +2422,7 @@ mod tests {
             webhook: None,
             prompt: "p".to_string(),
             target: "last".to_string(),
-            name: None,
+            name: Some("test-job".to_string()),
             tz: None,
             active_hours: None,
             enabled: true,
@@ -2599,11 +2752,19 @@ mod tests {
     }
 
     #[test]
-    fn webhook_projection_rejects_missing_name_secret_and_bad_slug() {
+    fn add_job_rejects_nameless_entry() {
+        // §3.4: name is required at the write boundary; the load path
+        // backfills legacy files, so the store invariant always holds.
         let tmp = tempfile::tempdir().unwrap();
         let sched = test_scheduler(tmp.path());
-        // No name → no route.
-        sched.add_job(wh_entry(None, "s", None)).unwrap();
+        let err = sched.add_job(wh_entry(None, "s", None));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn webhook_projection_rejects_bad_slug_secret_and_builtin_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
         // Empty secret → rejected at load.
         sched
             .add_job(wh_entry(Some("no-secret"), "", None))
@@ -2733,5 +2894,96 @@ mod tests {
         assert!(g.check_delivery("d-1"));
         assert!(!g.check_delivery("d-1")); // duplicate
         assert!(g.check_delivery("d-2"));
+    }
+
+    // ── Template rendering tests (migrated from webhook_loader.rs) ────
+
+    #[test]
+    fn render_template_simple() {
+        let template = "Hello {{name}}!";
+        let payload = serde_json::json!({"name": "world"});
+        assert_eq!(render_template(template, &payload), "Hello world!");
+    }
+
+    #[test]
+    fn render_template_nested() {
+        let template = "Issue: {{issue.title}} by {{issue.user.login}}";
+        let payload = serde_json::json!({
+            "issue": {
+                "title": "Fix bug",
+                "user": {"login": "alice"}
+            }
+        });
+        assert_eq!(
+            render_template(template, &payload),
+            "Issue: Fix bug by alice"
+        );
+    }
+
+    #[test]
+    fn render_template_array_index() {
+        let template = "First commit: {{commits[0].message}}";
+        let payload = serde_json::json!({
+            "commits": [{"message": "fix"}, {"message": "feat"}]
+        });
+        assert_eq!(render_template(template, &payload), "First commit: fix");
+    }
+
+    #[test]
+    fn render_template_missing_field() {
+        let template = "Hello {{name}}!";
+        let payload = serde_json::json!({});
+        assert_eq!(render_template(template, &payload), "Hello !");
+    }
+
+    #[test]
+    fn render_template_multiple_same_field() {
+        let template = "{{x}} and {{x}}";
+        let payload = serde_json::json!({"x": "foo"});
+        assert_eq!(render_template(template, &payload), "foo and foo");
+    }
+
+    #[test]
+    fn render_template_no_placeholders() {
+        let template = "No placeholders here.";
+        let payload = serde_json::json!({});
+        assert_eq!(render_template(template, &payload), "No placeholders here.");
+    }
+
+    #[test]
+    fn render_template_number_and_bool() {
+        let template = "Count: {{count}}, Active: {{active}}";
+        let payload = serde_json::json!({"count": 42, "active": true});
+        assert_eq!(
+            render_template(template, &payload),
+            "Count: 42, Active: true"
+        );
+    }
+
+    #[test]
+    fn render_template_unclosed_braces_ignored() {
+        let template = "Hello {{name} not closed";
+        let payload = serde_json::json!({"name": "world"});
+        assert_eq!(
+            render_template(template, &payload),
+            "Hello {{name} not closed"
+        );
+    }
+
+    #[test]
+    fn route_slug_accepts_lowercase_slugs() {
+        assert!(is_route_slug("github-issues"));
+        assert!(is_route_slug("r2d2"));
+        assert!(is_route_slug("a"));
+    }
+
+    #[test]
+    fn route_slug_rejects_bad_names() {
+        assert!(!is_route_slug("")); // empty
+        assert!(!is_route_slug("GitHub")); // uppercase
+        assert!(!is_route_slug("under_score")); // underscore
+        assert!(!is_route_slug("中文")); // unicode
+        assert!(!is_route_slug("has/slash"));
+        assert!(!is_route_slug(&"x".repeat(65))); // too long
     }
 }
