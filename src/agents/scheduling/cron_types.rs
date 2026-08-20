@@ -7,16 +7,46 @@ use serde::{Deserialize, Serialize};
 
 // ── Delivery ────────────────────────────────────────────────────────────────
 
-/// Per-job delivery configuration.
-/// When set, overrides the `target` field with more granular control.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// How a job's output is routed. Replaces the old `target: String` +
+/// `delivery: Option<DeliveryConfig>` dual-field model (#78): the split let
+/// `delivery.channel`/`account_id`/`thread_id` sit unread while `target`
+/// alone decided routing, and the webhook dispatch path didn't consult
+/// `delivery` at all. `DeliveryConfig` is now the single source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    /// Reply on whichever channel/recipient last messaged in (the old
+    /// `target: "last"`).
+    #[default]
+    Last,
+    /// Suppress delivery entirely (the old `target: "none"`).
+    None,
+    /// Explicit `channel` (+ optional `account_id`).
+    Fixed,
+}
+
+/// Per-job delivery configuration — the single source of truth for where a
+/// job's output goes. `channel`/`account_id` are only meaningful under
+/// `DeliveryMode::Fixed`; `to`/`thread_id` pin a recipient/thread and apply
+/// under any mode (e.g. `Last` + `to` = "whichever channel last messaged
+/// in, but always this recipient" — a real, intentional pattern, not just
+/// `Fixed`'s).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DeliveryConfig {
-    /// Target channel name (e.g. "telegram", "discord").
-    pub channel: String,
-    /// Target account ID (for multi-instance channels).
+    /// Routing mode. Defaults to `Last` when omitted, matching the old
+    /// implicit `target: "last"` default.
+    #[serde(default)]
+    pub mode: DeliveryMode,
+    /// Target channel name (e.g. "telegram", "discord"). Required for
+    /// `Fixed`; ignored otherwise.
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// Target account ID (for multi-instance channels). Defaults to
+    /// "default" when `Fixed` and unset.
     #[serde(default)]
     pub account_id: Option<String>,
-    /// Target user/group ID (channel-specific format).
+    /// Target user/group ID (channel-specific format). Falls back to the
+    /// last-known recipient when unset.
     #[serde(default)]
     pub to: Option<String>,
     /// Thread/topic ID for threaded channels (Discord, Telegram topics).

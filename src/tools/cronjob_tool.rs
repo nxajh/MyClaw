@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use crate::agents::SharedScheduler;
 use crate::agents::scheduling::cron_types::{
-    DeliveryConfig, FailureAlertConfig, RetryConfig, ScheduleKind, ScheduleSpec,
+    DeliveryConfig, DeliveryMode, FailureAlertConfig, RetryConfig, ScheduleKind, ScheduleSpec,
 };
 use crate::agents::scheduling::scheduler::{
     self, JobEntry, validate_active_hours, validate_at_timestamp, validate_schedule, validate_tz,
@@ -88,7 +88,7 @@ impl Tool for CronJobTool {
                 },
                 "target": {
                     "type": "string",
-                    "description": "Where to deliver output: 'last', 'none', or channel name. Default: 'last'."
+                    "description": "DEPRECATED alias for 'delivery' — prefer 'delivery' with an explicit 'mode'. 'last', 'none', or 'channel[:account]'. Ignored when 'delivery' is also given."
                 },
                 "name": {
                     "type": "string",
@@ -104,12 +104,13 @@ impl Tool for CronJobTool {
                 },
                 "delivery": {
                     "type": "object",
-                    "description": "Delivery config: { channel, account_id?, to?, thread_id? }",
+                    "description": "Where and how to deliver the job's output — the single source of truth (supersedes 'target'). { mode: 'last' | 'none' | 'fixed', channel?, account_id?, to?, thread_id? }. mode='last' (default): reply on whichever channel/recipient last messaged in. mode='none': suppress delivery (the turn still runs). mode='fixed': deliver to an explicit 'channel' (required) [+ 'account_id', default 'default']. 'to' pins a recipient (falls back to the last-known recipient when unset) and 'thread_id' pins a thread/topic — both apply under any mode, e.g. mode='last' + 'to' means 'whichever channel last messaged in, but always this recipient'.",
                     "properties": {
-                        "channel": { "type": "string" },
-                        "account_id": { "type": "string", "description": "Account ID for multi-instance channels." },
-                        "to": { "type": "string" },
-                        "thread_id": { "type": "string" }
+                        "mode": { "type": "string", "enum": ["last", "none", "fixed"], "description": "Default 'last'." },
+                        "channel": { "type": "string", "description": "Required when mode='fixed'." },
+                        "account_id": { "type": "string", "description": "Account ID for multi-instance channels. Only meaningful with mode='fixed'." },
+                        "to": { "type": "string", "description": "Recipient override, applies under any mode." },
+                        "thread_id": { "type": "string", "description": "Thread/topic override, applies under any mode." }
                     }
                 },
                 "enabled_tools": {
@@ -215,11 +216,6 @@ impl CronJobTool {
             return Ok(err_result(&format!("Prompt rejected: {}", e)));
         }
 
-        let target = args
-            .get("target")
-            .and_then(|v| v.as_str())
-            .unwrap_or("last")
-            .to_string();
         // §3.4: name is required (user identity; webhook route segment).
         let name = match args.get("name").and_then(|v| v.as_str()) {
             Some(n) if !n.trim().is_empty() => n.trim().to_string(),
@@ -293,8 +289,12 @@ impl CronJobTool {
         // with a note; it never fires until a schedule or webhook is added.
         let archived = schedule.is_none() && webhook.is_none();
 
-        // Parse delivery config.
-        let delivery = parse_delivery(args.get("delivery"));
+        // Parse delivery config: new `delivery` schema (with `mode`) wins;
+        // legacy `target` string is a one-version alias (#78).
+        let delivery = match resolve_delivery_for_create(args) {
+            Ok(d) => d,
+            Err(e) => return Ok(err_result(&e)),
+        };
 
         // Parse tool filters.
         let enabled_tools = parse_string_array(args.get("enabled_tools"));
@@ -310,7 +310,6 @@ impl CronJobTool {
             id: String::new(),
             schedule: schedule.clone(),
             prompt,
-            target,
             name: Some(name.clone()),
             tz,
             active_hours,
@@ -410,9 +409,6 @@ impl CronJobTool {
             }
             update.prompt = Some(v.to_string());
         }
-        if let Some(v) = args.get("target").and_then(|v| v.as_str()) {
-            update.target = Some(v.to_string());
-        }
         if let Some(v) = args.get("active_hours").and_then(|v| v.as_str()) {
             if let Err(e) = validate_active_hours(v) {
                 return Ok(err_result(&e));
@@ -428,9 +424,12 @@ impl CronJobTool {
         if let Some(v) = args.get("enabled").and_then(|v| v.as_bool()) {
             update.enabled = Some(v);
         }
-        if let Some(v) = args.get("delivery") {
-            update.delivery = parse_delivery(Some(v));
-        }
+        // New `delivery` schema (with `mode`) wins over the legacy `target`
+        // string alias; neither present leaves delivery unchanged (#78).
+        update.delivery = match resolve_delivery_for_update(args) {
+            Ok(d) => d,
+            Err(e) => return Ok(err_result(&e)),
+        };
         if let Some(v) = args.get("enabled_tools") {
             update.enabled_tools = parse_string_array(Some(v));
         }
@@ -519,7 +518,6 @@ impl CronJobTool {
             || update.schedule_changed
             || update.webhook_changed
             || update.prompt.is_some()
-            || update.target.is_some()
             || update.tz.is_some()
             || update.active_hours.is_some()
             || update.enabled.is_some()
@@ -557,9 +555,6 @@ impl CronJobTool {
         }
         if update.prompt.is_some() {
             changed_fields.push("prompt");
-        }
-        if update.target.is_some() {
-            changed_fields.push("target");
         }
         if update.tz.is_some() {
             changed_fields.push("tz");
@@ -649,14 +644,7 @@ impl CronJobTool {
             let name = job.name.as_deref().unwrap_or(&job.id);
             let next = job.next_run_at.as_deref().unwrap_or("none");
             let last = job.last_run_at.as_deref().unwrap_or("never");
-            let delivery_info = match &job.delivery {
-                Some(d) => format!(
-                    ", delivery: {}→{}",
-                    d.channel,
-                    d.to.as_deref().unwrap_or("*")
-                ),
-                None => String::new(),
-            };
+            let delivery_info = format!(", delivery: {}", describe_delivery(&job.delivery));
             let tool_info = match (&job.enabled_tools, &job.disabled_tools) {
                 (Some(whitelist), _) => format!(", tools: whitelist({})", whitelist.len()),
                 (None, Some(blacklist)) => format!(", tools: blacklist({})", blacklist.len()),
@@ -688,12 +676,11 @@ impl CronJobTool {
                 String::new()
             };
             lines.push(format!(
-                "{status} [{id}] {name} — schedule: {schedule:?}, target: {target}, next: {next}, last: {last}{delivery}{tools}{runs}{model}{retry}{max_runs}{fail}",
+                "{status} [{id}] {name} — schedule: {schedule:?}, next: {next}, last: {last}{delivery}{tools}{runs}{model}{retry}{max_runs}{fail}",
                 status = status,
                 id = job.id,
                 name = name,
                 schedule = job.schedule.as_ref().map(ScheduleSpec::describe).as_deref().unwrap_or("(webhook-only)"),
-                target = job.target,
                 next = next,
                 last = last,
                 delivery = delivery_info,
@@ -778,8 +765,8 @@ impl CronJobTool {
                 Ok(ToolResult {
                     success: true,
                     output: format!(
-                        "Job '{}' ({}) scheduled for immediate execution: fires on the next scheduler tick (within ~30s).\nSchedule: {}\nTarget: {}{}",
-                        name, job.id, job.schedule.as_ref().map(ScheduleSpec::describe).as_deref().unwrap_or("(webhook-only)"), job.target, note
+                        "Job '{}' ({}) scheduled for immediate execution: fires on the next scheduler tick (within ~30s).\nSchedule: {}\nDelivery: {}{}",
+                        name, job.id, job.schedule.as_ref().map(ScheduleSpec::describe).as_deref().unwrap_or("(webhook-only)"), describe_delivery(&job.delivery), note
                     ),
                     error: None,
                 })
@@ -1054,22 +1041,86 @@ fn parse_duration_to_ms(s: &str) -> Result<u64, String> {
 }
 
 /// Parse delivery config from JSON value.
-fn parse_delivery(value: Option<&serde_json::Value>) -> Option<DeliveryConfig> {
-    value.and_then(|v| {
-        let channel = v.get("channel")?.as_str()?;
-        Some(DeliveryConfig {
-            channel: channel.to_string(),
-            account_id: v
-                .get("account_id")
-                .and_then(|a| a.as_str())
-                .map(|s| s.to_string()),
-            to: v.get("to").and_then(|t| t.as_str()).map(|s| s.to_string()),
-            thread_id: v
-                .get("thread_id")
-                .and_then(|t| t.as_str())
-                .map(|s| s.to_string()),
-        })
+/// Human-readable one-line summary of a job's delivery config, e.g.
+/// "last→+8613800001111", "none", "wechat:default→+8613800001111".
+fn describe_delivery(d: &DeliveryConfig) -> String {
+    let mode_desc = match d.mode {
+        DeliveryMode::None => "none".to_string(),
+        DeliveryMode::Last => "last".to_string(),
+        DeliveryMode::Fixed => {
+            let ch = d.channel.as_deref().unwrap_or("?");
+            match &d.account_id {
+                Some(acc) => format!("{}:{}", ch, acc),
+                None => ch.to_string(),
+            }
+        }
+    };
+    match &d.to {
+        Some(to) => format!("{}→{}", mode_desc, to),
+        None => mode_desc,
+    }
+}
+
+/// Parse the `delivery` object (new schema — #78) into a `DeliveryConfig`.
+/// `mode` defaults to `Last` when absent; `Fixed` requires `channel`.
+fn parse_delivery_object(v: &serde_json::Value) -> Result<DeliveryConfig, String> {
+    let mode = match v.get("mode").and_then(|m| m.as_str()) {
+        Some("last") | None => DeliveryMode::Last,
+        Some("none") => DeliveryMode::None,
+        Some("fixed") => DeliveryMode::Fixed,
+        Some(other) => {
+            return Err(format!(
+                "delivery.mode must be 'last', 'none', or 'fixed' (got '{}')",
+                other
+            ));
+        }
+    };
+    let channel = v
+        .get("channel")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+    if mode == DeliveryMode::Fixed && channel.is_none() {
+        return Err("delivery.mode 'fixed' requires 'channel'".to_string());
+    }
+    Ok(DeliveryConfig {
+        mode,
+        channel,
+        account_id: v
+            .get("account_id")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string()),
+        to: v.get("to").and_then(|t| t.as_str()).map(|s| s.to_string()),
+        thread_id: v
+            .get("thread_id")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string()),
     })
+}
+
+/// Resolve create-time delivery args into a `DeliveryConfig`: the new
+/// `delivery` object (with `mode`) wins when present; the legacy `target`
+/// string ("last" | "none" | "channel[:account]") is a one-version alias;
+/// neither given defaults to `Last` (the old implicit `target: "last"`).
+fn resolve_delivery_for_create(args: &serde_json::Value) -> Result<DeliveryConfig, String> {
+    if let Some(v) = args.get("delivery") {
+        return parse_delivery_object(v);
+    }
+    if let Some(target) = args.get("target").and_then(|v| v.as_str()) {
+        return Ok(scheduler::parse_target_string(target));
+    }
+    Ok(DeliveryConfig::default())
+}
+
+/// Same resolution as [`resolve_delivery_for_create`], but for `update`:
+/// `Ok(None)` means neither field was provided — "don't change delivery".
+fn resolve_delivery_for_update(args: &serde_json::Value) -> Result<Option<DeliveryConfig>, String> {
+    if let Some(v) = args.get("delivery") {
+        return parse_delivery_object(v).map(Some);
+    }
+    if let Some(target) = args.get("target").and_then(|v| v.as_str()) {
+        return Ok(Some(scheduler::parse_target_string(target)));
+    }
+    Ok(None)
 }
 
 /// Parse retry config from JSON value.
@@ -1170,7 +1221,6 @@ mod update_echo_tests {
             schedule: Some(ScheduleSpec::cron("0 9 * * *")),
             webhook: None,
             prompt: "p".to_string(),
-            target: "last".to_string(),
             name: Some("probe".to_string()),
             tz: None,
             active_hours: None,
@@ -1178,7 +1228,7 @@ mod update_echo_tests {
             last_run_at: None,
             next_run_at: None,
             created_at: None,
-            delivery: None,
+            delivery: DeliveryConfig::default(),
             last_runs: Vec::new(),
             enabled_tools: None,
             disabled_tools: None,
@@ -1213,7 +1263,8 @@ mod update_echo_tests {
         let id = job_id(&tool);
 
         let cases: Vec<(serde_json::Value, &str)> = vec![
-            (serde_json::json!({"id": &id, "target": "wechat"}), "target"),
+            // Legacy `target` alias folds into the unified `delivery` field (#78).
+            (serde_json::json!({"id": &id, "target": "wechat"}), "delivery"),
             (serde_json::json!({"id": &id, "schedule": "every 2m"}), "schedule"),
             (
                 serde_json::json!({"id": &id, "active_hours": "09:00-18:00"}),
@@ -1249,5 +1300,70 @@ mod update_echo_tests {
         let id = job_id(&tool);
         let result = tool.handle_update(&serde_json::json!({"id": &id})).unwrap();
         assert!(!result.success);
+    }
+
+    // ── #78: target/delivery unification at the tool boundary ────────
+
+    #[test]
+    fn legacy_target_alias_resolves_to_fixed_delivery() {
+        let cfg = resolve_delivery_for_create(&serde_json::json!({"target": "wechat:work"}))
+            .unwrap();
+        assert_eq!(cfg.mode, DeliveryMode::Fixed);
+        assert_eq!(cfg.channel.as_deref(), Some("wechat"));
+        assert_eq!(cfg.account_id.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn create_defaults_to_last_when_neither_target_nor_delivery_given() {
+        let cfg = resolve_delivery_for_create(&serde_json::json!({})).unwrap();
+        assert_eq!(cfg.mode, DeliveryMode::Last);
+    }
+
+    #[test]
+    fn delivery_object_wins_over_legacy_target_when_both_given() {
+        let cfg = resolve_delivery_for_create(&serde_json::json!({
+            "target": "wechat",
+            "delivery": {"mode": "none"}
+        }))
+        .unwrap();
+        assert_eq!(cfg.mode, DeliveryMode::None);
+    }
+
+    #[test]
+    fn fixed_mode_without_channel_is_rejected() {
+        let err = resolve_delivery_for_create(&serde_json::json!({
+            "delivery": {"mode": "fixed"}
+        }))
+        .unwrap_err();
+        assert!(err.contains("requires 'channel'"), "got: {err}");
+    }
+
+    #[test]
+    fn update_with_neither_target_nor_delivery_leaves_delivery_unchanged() {
+        assert_eq!(
+            resolve_delivery_for_update(&serde_json::json!({"id": "x"})).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn update_via_cronjob_tool_honors_delivery_object() {
+        // End-to-end: the tool boundary accepts the new `delivery` schema
+        // and it lands on the job unchanged.
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = test_tool(tmp.path());
+        let id = job_id(&tool);
+        let result = tool
+            .handle_update(&serde_json::json!({
+                "id": &id,
+                "delivery": {"mode": "fixed", "channel": "discord", "to": "chan-9", "thread_id": "t-1"}
+            }))
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
+        let job = tool.scheduler.jobs().into_iter().find(|j| j.id == id).unwrap();
+        assert_eq!(job.delivery.mode, DeliveryMode::Fixed);
+        assert_eq!(job.delivery.channel.as_deref(), Some("discord"));
+        assert_eq!(job.delivery.to.as_deref(), Some("chan-9"));
+        assert_eq!(job.delivery.thread_id.as_deref(), Some("t-1"));
     }
 }

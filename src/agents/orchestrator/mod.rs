@@ -54,6 +54,11 @@ pub struct CronTrigger {
     pub target_channel: Option<String>,
     pub target_account: Option<String>,
     pub target_recipient: Option<String>,
+    /// Thread/topic ID (#78 — `DeliveryConfig.thread_id`, previously dead).
+    pub target_thread: Option<String>,
+    /// True when the job's delivery mode is `None` (#78) — the turn still
+    /// runs, but its output must not be sent to any channel.
+    pub delivery_suppressed: bool,
     pub job_id: String,
     pub model: Option<String>,
     /// Context policy: inject into user session or run isolated.

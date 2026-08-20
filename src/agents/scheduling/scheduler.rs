@@ -19,7 +19,9 @@ use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::agents::orchestrator::SchedulerEvent;
-use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind, ScheduleSpec};
+use crate::agents::scheduling::cron_types::{
+    DeliveryConfig, DeliveryMode, RunRecord, RunStatus, ScheduleKind, ScheduleSpec,
+};
 use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::config::scheduler::WebhookConfig;
 
@@ -42,9 +44,6 @@ pub struct JobEntry {
     pub schedule: Option<ScheduleSpec>,
     /// Prompt to send to the agent when triggered.
     pub prompt: String,
-    /// Where to send output: "last" | "none" | channel name.
-    #[serde(default = "default_target")]
-    pub target: String,
     /// Optional friendly name.
     #[serde(default)]
     pub name: Option<String>,
@@ -66,9 +65,13 @@ pub struct JobEntry {
     /// ISO 8601 timestamp of job creation.
     #[serde(default)]
     pub created_at: Option<String>,
-    /// Per-job delivery configuration (overrides target when set).
+    /// Delivery configuration — the single source of truth for where this
+    /// job's output goes (#78). Defaults to `DeliveryMode::Last` when
+    /// absent, matching the old implicit `target: "last"` default. Legacy
+    /// `target` (+ pre-mode `delivery`) meta.json files are folded into
+    /// this shape at load — see `fold_one_target_delivery`.
     #[serde(default)]
-    pub delivery: Option<DeliveryConfig>,
+    pub delivery: DeliveryConfig,
     /// Run history (in-memory cache of recent entries; the durable source is
     /// the per-job run log JSONL — `read_run_log`). Not serialized: meta.json
     /// no longer duplicates what the run log already stores.
@@ -182,9 +185,6 @@ fn default_context_policy() -> crate::config::scheduler::ContextPolicy {
     crate::config::scheduler::ContextPolicy::Inject
 }
 
-fn default_target() -> String {
-    "last".to_string()
-}
 fn default_true() -> bool {
     true
 }
@@ -201,7 +201,6 @@ pub struct JobUpdate {
     pub webhook: Option<Option<WebhookDef>>,
     pub webhook_changed: bool,
     pub prompt: Option<String>,
-    pub target: Option<String>,
     pub tz: Option<String>,
     pub active_hours: Option<String>,
     pub enabled: Option<bool>,
@@ -311,6 +310,7 @@ impl Scheduler {
                 let folded: Option<JobsFile> = serde_json::from_str::<serde_json::Value>(&content)
                     .ok()
                     .map(fold_schedule_kind)
+                    .map(fold_target_delivery)
                     .and_then(|v| serde_json::from_value(v).ok());
                 if let Some(mut parsed) = folded {
                     normalize_schedule_specs(&mut parsed.jobs);
@@ -472,15 +472,19 @@ impl Scheduler {
                         tracing::info!(
                             job_id = %j.id,
                             schedule = ?j.schedule,
-                            target = %j.target,
+                            delivery_mode = ?j.delivery.mode,
                             "cron job triggered"
                         );
+                        let (target_channel, target_account, target_recipient, target_thread, delivery_suppressed) =
+                            cron_delivery_fields(&j.delivery);
                         let _ = self.event_tx.send(SchedulerEvent::Cron(crate::agents::orchestrator::CronTrigger {
                             session_key: format!("_job_{}", crate::ids::bare_dir_name(&j.id)),
                             prompt: j.prompt.clone(),
-                            target_channel: parse_target_channel(&j.target),
-                            target_account: parse_target_account(&j.target),
-                            target_recipient: j.delivery.as_ref().and_then(|d| d.to.clone()),
+                            target_channel,
+                            target_account,
+                            target_recipient,
+                            target_thread,
+                            delivery_suppressed,
                             job_id: j.id.clone(),
                             model: j.model.clone(),
                             context_policy: j.context_policy,
@@ -596,7 +600,7 @@ impl Scheduler {
                 route,
                 secret: wh.secret.clone(),
                 auth: wh.auth_kind(),
-                target: j.target.clone(),
+                delivery: j.delivery.clone(),
                 prompt_template: j.prompt.clone(),
                 events: wh.events.clone(),
                 filters: wh.filters.clone(),
@@ -656,9 +660,6 @@ impl Scheduler {
             if let Some(prompt) = update.prompt {
                 job.prompt = prompt;
             }
-            if let Some(target) = update.target {
-                job.target = target;
-            }
             if let Some(tz) = update.tz {
                 job.tz = Some(tz);
                 job.next_run_at = compute_next_run(
@@ -683,7 +684,7 @@ impl Scheduler {
                 }
             }
             if let Some(delivery) = update.delivery {
-                job.delivery = Some(delivery);
+                job.delivery = delivery;
             }
             if update.webhook_changed {
                 job.webhook = update.webhook.clone().flatten();
@@ -979,6 +980,48 @@ impl Scheduler {
         self.append_run_log_inner(job_id, &record);
     }
 
+    /// Resolve a delivery config to (channel_type, account_id, recipient),
+    /// or `None` to skip delivery. Single resolution path shared by the
+    /// cron and webhook dispatch routes (#78) — previously duplicated with
+    /// diverging behavior (the webhook route ignored `delivery` entirely).
+    pub async fn resolve_delivery(
+        &self,
+        delivery: &DeliveryConfig,
+    ) -> Option<(String, String, Option<String>)> {
+        let (ch_type, acc_id) = match delivery.mode {
+            DeliveryMode::None => return None,
+            DeliveryMode::Fixed => {
+                let channel = delivery.channel.clone()?;
+                let account = delivery
+                    .account_id
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
+                (channel, account)
+            }
+            DeliveryMode::Last => {
+                let last = self.last_channel.lock().await.clone();
+                match last {
+                    Some(key) => match key.split_once(':') {
+                        Some((ch, acc)) => (ch.to_string(), acc.to_string()),
+                        None => {
+                            tracing::warn!(key = %key, "invalid last_channel format");
+                            return None;
+                        }
+                    },
+                    None => {
+                        tracing::warn!("no target channel for scheduled response");
+                        return None;
+                    }
+                }
+            }
+        };
+        let recipient = match &delivery.to {
+            Some(to) => Some(to.clone()),
+            None => self.last_recipient.lock().await.clone(),
+        };
+        Some((ch_type, acc_id, recipient))
+    }
+
     /// Generate a new job FQID (`<ns>/job/<uuidv7>`).
     fn generate_id(&self) -> String {
         crate::ids::Fqid::new(&self.namespace, crate::ids::TYPE_JOB).to_string()
@@ -1054,6 +1097,63 @@ fn fold_schedule_kind(value: serde_json::Value) -> serde_json::Value {
     value
 }
 
+/// Fold the legacy `target: String` field (+ pre-#78 `delivery` object,
+/// which had no `mode` and required `channel`) into the canonical
+/// `DeliveryConfig` shape on ONE job object (Value level, before struct
+/// parsing) — #78. A `delivery` object that already carries `mode` is left
+/// untouched (already migrated). `target` itself is simply ignored by
+/// `serde_json::from_value::<JobEntry>` afterwards — the struct no longer
+/// has that field.
+fn fold_one_target_delivery(value: serde_json::Value) -> serde_json::Value {
+    let mut value = value;
+    let Some(obj) = value.as_object_mut() else { return value };
+    if obj.get("delivery").and_then(|d| d.get("mode")).is_some() {
+        return value; // already migrated
+    }
+    let Some(target) = obj.get("target").and_then(|v| v.as_str()).map(str::to_string) else {
+        return value; // no legacy field — leave delivery as-is (serde default = Last)
+    };
+    let mut merged = parse_target_string(&target);
+    // The pre-#78 `delivery` object's channel/account_id were dead reads
+    // (see #78) — `target` alone decided routing, so it wins here. Only
+    // `to`/`thread_id` actually took effect before, so those carry over.
+    if let Some(existing) = obj.get("delivery").and_then(|d| d.as_object()) {
+        if let Some(to) = existing.get("to").and_then(|v| v.as_str()) {
+            merged.to = Some(to.to_string());
+        }
+        if let Some(th) = existing.get("thread_id").and_then(|v| v.as_str()) {
+            merged.thread_id = Some(th.to_string());
+        }
+    }
+    obj.insert(
+        "delivery".to_string(),
+        serde_json::to_value(&merged).unwrap_or_default(),
+    );
+    value
+}
+
+/// Apply [`fold_one_target_delivery`] to a jobs document — either a bare
+/// `JobsFile` object `{"jobs": [...]}` or a bare jobs array.
+fn fold_target_delivery(value: serde_json::Value) -> serde_json::Value {
+    let mut value = value;
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(jobs) = obj.get_mut("jobs") {
+            if let Some(arr) = jobs.as_array_mut() {
+                for job in arr.iter_mut() {
+                    *job = fold_one_target_delivery(job.take());
+                }
+            }
+        }
+        return value;
+    }
+    if let Some(arr) = value.as_array_mut() {
+        for job in arr.iter_mut() {
+            *job = fold_one_target_delivery(job.take());
+        }
+    }
+    value
+}
+
 /// Load every `{jobs_root}/{dir}/meta.json` (P1-B2 directory-based store).
 /// Malformed entries are skipped. Sorted by id for stable ordering.
 fn load_jobs_from_dirs(jobs_root: &Path) -> Vec<JobEntry> {
@@ -1084,6 +1184,7 @@ fn load_jobs_from_dirs(jobs_root: &Path) -> Vec<JobEntry> {
             }
         };
         let value = fold_one_schedule_kind(value);
+        let value = fold_one_target_delivery(value);
         match serde_json::from_value::<JobEntry>(value) {
             Ok(mut job) => {
                 // §3.4: name is required. Legacy meta.json without a name
@@ -1175,6 +1276,7 @@ impl Scheduler {
                 let folded: Option<JobsFile> = serde_json::from_str::<serde_json::Value>(&content)
                     .ok()
                     .map(fold_schedule_kind)
+                    .map(fold_target_delivery)
                     .and_then(|v| serde_json::from_value(v).ok());
                 if let Some(mut parsed) = folded {
                     normalize_schedule_specs(&mut parsed.jobs);
@@ -1242,7 +1344,6 @@ impl Scheduler {
                 schedule: Some(ScheduleSpec::cron(schedule)),
                 webhook: None,
                 prompt,
-                target,
                 name: path.file_stem().map(|s| s.to_string_lossy().to_string()),
                 tz: None,
                 active_hours,
@@ -1250,7 +1351,7 @@ impl Scheduler {
                 last_run_at: None,
                 next_run_at: None,
                 created_at: None,
-                delivery: None,
+                delivery: parse_target_string(&target),
                 last_runs: Vec::new(),
                 enabled_tools: None,
                 disabled_tools: None,
@@ -1548,8 +1649,8 @@ pub struct WebhookJobDef {
     pub secret: String,
     /// Auth method: hmac (default) or bearer.
     pub auth: WebhookAuth,
-    /// Output delivery target: last | none | channel name (from the job).
-    pub target: String,
+    /// Output delivery configuration (from the job).
+    pub delivery: DeliveryConfig,
     /// Prompt template (the job's prompt field), with `{{a.b.c}}`
     /// placeholders rendered from the payload.
     pub prompt_template: String,
@@ -1752,24 +1853,63 @@ pub fn parse_interval(s: &str) -> Option<Duration> {
 
 // ── Active hours ───────────────────────────────────────────────────────────
 
-/// Parse target string "channel:account" into channel part.
-/// Returns None for "last", "none", or empty strings.
-fn parse_target_channel(target: &str) -> Option<String> {
+/// Parse the legacy `target` string grammar ("last" | "none" |
+/// "channel[:account]") into a [`DeliveryConfig`]. Used to migrate old
+/// meta.json files (`fold_one_target_delivery`), and as the grammar for
+/// the ad-hoc `/hooks/agent` `target` request field, which is a one-off
+/// per-request string and was never part of a job's persisted schema.
+pub fn parse_target_string(target: &str) -> DeliveryConfig {
     match target {
-        "last" | "none" | "" => None,
-        _ => target
-            .split_once(':')
-            .map(|(ch, _)| ch.to_string())
-            .or_else(|| Some(target.to_string())),
+        "none" => DeliveryConfig {
+            mode: DeliveryMode::None,
+            ..Default::default()
+        },
+        "last" | "" => DeliveryConfig::default(), // mode: Last
+        name => {
+            let (channel, account_id) = match name.split_once(':') {
+                Some((ch, acc)) => (ch.to_string(), Some(acc.to_string())),
+                None => (name.to_string(), None),
+            };
+            DeliveryConfig {
+                mode: DeliveryMode::Fixed,
+                channel: Some(channel),
+                account_id,
+                ..Default::default()
+            }
+        }
     }
 }
 
-/// Parse target string "channel:account" into account part.
-/// Returns None for "last", "none", or empty strings.
-fn parse_target_account(target: &str) -> Option<String> {
-    match target {
-        "last" | "none" | "" => None,
-        _ => target.split_once(':').map(|(_, acc)| acc.to_string()),
+/// Statically decompose a job's delivery config into the fields
+/// `CronTrigger` needs. `Last` mode deliberately leaves channel/account as
+/// `None` so `send_to_target_internal` resolves them lazily at delivery
+/// time (the response goes to whoever most recently messaged in, which may
+/// differ from trigger time for a long-running turn) - existing behavior,
+/// unchanged by #78.
+fn cron_delivery_fields(
+    delivery: &DeliveryConfig,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    bool,
+) {
+    match delivery.mode {
+        DeliveryMode::None => (None, None, None, None, true),
+        DeliveryMode::Fixed => (
+            delivery.channel.clone(),
+            Some(
+                delivery
+                    .account_id
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+            ),
+            delivery.to.clone(),
+            delivery.thread_id.clone(),
+            false,
+        ),
+        DeliveryMode::Last => (None, None, delivery.to.clone(), delivery.thread_id.clone(), false),
     }
 }
 
@@ -1823,36 +1963,15 @@ pub async fn run_scheduled_task(
     crate::agents::orchestrator::run_scheduled_turn(&ctx.ctx, session_key, prompt, None).await
 }
 
-/// Send a response to the configured target channel.
-pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
-    let (ch_type, acc_id) = match target {
-        "none" => return,
-        "last" => {
-            let last: Option<String> = match ctx.ctx.scheduler.as_ref() {
-                Some(s) => s.last_channel.lock().await.clone(),
-                None => None,
-            };
-            match last {
-                Some(ref key) => match key.split_once(':') {
-                    Some((ch, acc)) => (ch.to_string(), acc.to_string()),
-                    None => {
-                        tracing::warn!(key = %key, "invalid last_channel format");
-                        return;
-                    }
-                },
-                None => {
-                    tracing::warn!("no target channel for scheduled response");
-                    return;
-                }
-            }
-        }
-        name => {
-            // Parse "channel:account" or just "channel" (default account)
-            match name.split_once(':') {
-                Some((ch, acc)) => (ch.to_string(), acc.to_string()),
-                None => (name.to_string(), "default".to_string()),
-            }
-        }
+/// Send a response per a resolved delivery config. Single dispatch path
+/// for both custom webhook routes (`job.delivery`) and the ad-hoc
+/// `/hooks/agent` endpoint (its raw `target` string, converted via
+/// `parse_target_string`) — previously the webhook route ignored
+/// `delivery` entirely, so `to`/`thread_id` never reached delivery here
+/// even though the cron dispatch path already honored `to` (#78).
+pub async fn send_to_target(ctx: &WebhookContext, delivery: &DeliveryConfig, content: &str) {
+    let Some((ch_type, acc_id, recipient)) = ctx.scheduler.resolve_delivery(delivery).await else {
+        return; // mode=None, or Last with no prior channel to reply to yet.
     };
 
     let channel = match ctx.ctx.channels.get(&(ch_type.clone(), acc_id.clone())) {
@@ -1863,8 +1982,12 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
         }
     };
 
+    let mut receiver = MessageReceiver::new(recipient.unwrap_or_default());
+    if let Some(thread) = &delivery.thread_id {
+        receiver = receiver.with_thread(thread.clone());
+    }
     let msg = ChannelOutboundMessage {
-        receiver: MessageReceiver::new(String::new()),
+        receiver,
         content: ChannelMessageContent::text(content),
         options: Default::default(),
     };
@@ -2285,8 +2408,8 @@ where
 
         match result {
             Ok(response) => {
-                if !response.trim().is_empty() && job.target != "none" {
-                    send_to_target(&ctx, &job.target, &response).await;
+                if !response.trim().is_empty() {
+                    send_to_target(&ctx, &job.delivery, &response).await;
                 }
             }
             Err(e) => {
@@ -2361,12 +2484,12 @@ async fn handle_hooks_agent(
     // client connection — a peer disconnect cancels the turn mid-flight.
     // 202 acknowledges acceptance; the response (if any) goes to `target`.
     let bg_ctx = Arc::clone(&ctx);
-    let bg_target = target.to_string();
+    let bg_delivery = parse_target_string(target);
     tokio::spawn(async move {
         match run_scheduled_task(&bg_ctx, "_hooks_agent", &message).await {
             Ok(response) => {
-                if !response.trim().is_empty() && bg_target != "none" {
-                    send_to_target(&bg_ctx, &bg_target, &response).await;
+                if !response.trim().is_empty() {
+                    send_to_target(&bg_ctx, &bg_delivery, &response).await;
                 }
             }
             Err(e) => {
@@ -2600,7 +2723,6 @@ mod tests {
             schedule: Some(ScheduleSpec::cron(schedule)),
             webhook: None,
             prompt: "p".to_string(),
-            target: "last".to_string(),
             name: Some("test-job".to_string()),
             tz: None,
             active_hours: None,
@@ -2608,7 +2730,7 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             created_at: None,
-            delivery: None,
+            delivery: DeliveryConfig::default(),
             last_runs: Vec::new(),
             enabled_tools: None,
             disabled_tools: None,
@@ -3114,6 +3236,182 @@ mod tests {
         assert!(saved.get("schedule_kind").is_none());
     }
 
+    // ── #78 target/delivery convergence ───────────────────────────────
+
+    #[test]
+    fn parse_target_string_covers_last_none_and_fixed() {
+        assert_eq!(parse_target_string("last").mode, DeliveryMode::Last);
+        assert_eq!(parse_target_string("").mode, DeliveryMode::Last);
+        assert_eq!(parse_target_string("none").mode, DeliveryMode::None);
+
+        let fixed = parse_target_string("wechat");
+        assert_eq!(fixed.mode, DeliveryMode::Fixed);
+        assert_eq!(fixed.channel.as_deref(), Some("wechat"));
+        assert_eq!(fixed.account_id, None);
+
+        let fixed_acct = parse_target_string("telegram:work");
+        assert_eq!(fixed_acct.mode, DeliveryMode::Fixed);
+        assert_eq!(fixed_acct.channel.as_deref(), Some("telegram"));
+        assert_eq!(fixed_acct.account_id.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn legacy_target_and_delivery_fold_into_unified_delivery() {
+        // #78: a pre-migration meta.json with `target: "wechat"` and the
+        // old dead-field `delivery: {channel, to}` (channel was never
+        // actually read — target alone decided routing) must fold into a
+        // single `delivery` with `to` preserved (the one old field that
+        // *was* live) and `channel` sourced from `target` (the one that
+        // actually took effect), matching the issue's "6 active jobs, all
+        // losslessly mappable" claim.
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let id = "test/job/019fe4cecccc";
+        let meta_dir = jobs_root.join(crate::ids::dir_name(id));
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        std::fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"id": "test/job/019fe4cecccc", "name": "wechat-probe",
+                "schedule": {"kind": "cron", "expr": "0 9 * * *"}, "prompt": "p",
+                "target": "wechat", "delivery": {"channel": "ignored-was-dead", "to": "user-42"}}"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+            dir.path().join("lc"), dir.path().join("lr"),
+        );
+        let jobs = sched.jobs();
+        assert_eq!(jobs[0].delivery.mode, DeliveryMode::Fixed);
+        assert_eq!(jobs[0].delivery.channel.as_deref(), Some("wechat"));
+        assert_eq!(jobs[0].delivery.to.as_deref(), Some("user-42"));
+    }
+
+    #[test]
+    fn already_migrated_delivery_is_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let id = "test/job/019fe4cedddd";
+        let meta_dir = jobs_root.join(crate::ids::dir_name(id));
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        // Has both a (stale) `target` and an already-migrated `delivery`
+        // with `mode` — `delivery` must win, `target` must be ignored.
+        std::fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"id": "test/job/019fe4cedddd", "name": "already-new",
+                "schedule": {"kind": "cron", "expr": "0 9 * * *"}, "prompt": "p",
+                "target": "none",
+                "delivery": {"mode": "fixed", "channel": "discord", "to": "chan-1"}}"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+            dir.path().join("lc"), dir.path().join("lr"),
+        );
+        let jobs = sched.jobs();
+        assert_eq!(jobs[0].delivery.mode, DeliveryMode::Fixed);
+        assert_eq!(jobs[0].delivery.channel.as_deref(), Some("discord"));
+    }
+
+    #[test]
+    fn missing_target_and_delivery_defaults_to_last() {
+        // No legacy `target`, no `delivery` at all — serde default kicks
+        // in (DeliveryMode::Last), matching the old implicit default.
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let id = "test/job/019fe4ceeeee";
+        let meta_dir = jobs_root.join(crate::ids::dir_name(id));
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        std::fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"id": "test/job/019fe4ceeeee", "name": "bare",
+                "schedule": {"kind": "cron", "expr": "0 9 * * *"}, "prompt": "p"}"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+            dir.path().join("lc"), dir.path().join("lr"),
+        );
+        assert_eq!(sched.jobs()[0].delivery.mode, DeliveryMode::Last);
+    }
+
+    #[tokio::test]
+    async fn resolve_delivery_none_mode_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(dir.path());
+        let cfg = DeliveryConfig {
+            mode: DeliveryMode::None,
+            ..Default::default()
+        };
+        assert!(sched.resolve_delivery(&cfg).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_delivery_fixed_mode_uses_explicit_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(dir.path());
+        let cfg = DeliveryConfig {
+            mode: DeliveryMode::Fixed,
+            channel: Some("wechat".to_string()),
+            to: Some("user-1".to_string()),
+            ..Default::default()
+        };
+        let (ch, acc, recipient) = sched.resolve_delivery(&cfg).await.unwrap();
+        assert_eq!(ch, "wechat");
+        assert_eq!(acc, "default");
+        assert_eq!(recipient.as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
+    async fn resolve_delivery_fixed_mode_without_channel_is_misconfigured() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(dir.path());
+        let cfg = DeliveryConfig {
+            mode: DeliveryMode::Fixed,
+            ..Default::default()
+        };
+        assert!(sched.resolve_delivery(&cfg).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_delivery_last_mode_reads_last_channel_and_pins_recipient() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(dir.path());
+        *sched.last_channel.lock().await = Some("telegram:default".to_string());
+        *sched.last_recipient.lock().await = Some("whoever-last-messaged".to_string());
+
+        // No `to` override — falls back to last_recipient.
+        let cfg = DeliveryConfig::default(); // mode: Last
+        let (ch, acc, recipient) = sched.resolve_delivery(&cfg).await.unwrap();
+        assert_eq!(ch, "telegram");
+        assert_eq!(acc, "default");
+        assert_eq!(recipient.as_deref(), Some("whoever-last-messaged"));
+
+        // `to` override pins the recipient while the channel still
+        // resolves from last_channel — the "channel drifts, recipient
+        // pinned" pattern from the 2026-08-20 incident, now explicit.
+        let pinned = DeliveryConfig {
+            to: Some("pinned-user".to_string()),
+            ..Default::default()
+        };
+        let (_, _, recipient) = sched.resolve_delivery(&pinned).await.unwrap();
+        assert_eq!(recipient.as_deref(), Some("pinned-user"));
+    }
+
+    #[tokio::test]
+    async fn resolve_delivery_last_mode_without_prior_channel_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(dir.path());
+        // last_channel was never set.
+        let cfg = DeliveryConfig::default();
+        assert!(sched.resolve_delivery(&cfg).await.is_none());
+    }
+
     #[test]
     fn legacy_schedule_kind_discriminator_is_authoritative() {
         let dir = tempfile::tempdir().unwrap();
@@ -3310,6 +3608,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_to_target_webhook_path_now_honors_delivery_to_and_thread() {
+        // #78: `send_to_target` (the webhook dispatch path) used to take a
+        // raw `target: &str` and never looked at `delivery` at all — `to`
+        // and `thread_id` were silently dropped even though the cron
+        // dispatch path already honored `to`. Prove the unified path
+        // actually delivers to the configured recipient/thread now.
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
+        let mock = crate::agents::orchestrator::test_support::MockChannel::new();
+        let mut octx = crate::agents::orchestrator::test_support::test_ctx(vec![(
+            ("wechat".to_string(), "default".to_string()),
+            mock.clone() as Arc<dyn crate::channels::Channel>,
+        )]);
+        octx.scheduler = Some(sched.clone());
+        let ctx = WebhookContext {
+            ctx: Arc::new(octx),
+            timezone: "UTC".to_string(),
+            scheduler: sched.clone(),
+        };
+
+        let delivery = DeliveryConfig {
+            mode: DeliveryMode::Fixed,
+            channel: Some("wechat".to_string()),
+            to: Some("user-42".to_string()),
+            thread_id: Some("thread-7".to_string()),
+            ..Default::default()
+        };
+        send_to_target(&ctx, &delivery, "hello from webhook").await;
+
+        let sent = mock.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].receiver.id, "user-42");
+        assert_eq!(sent[0].receiver.thread_id.as_deref(), Some("thread-7"));
+        assert_eq!(sent[0].content.text, "hello from webhook");
+    }
+
+    #[tokio::test]
+    async fn send_to_target_none_mode_delivers_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
+        let mock = crate::agents::orchestrator::test_support::MockChannel::new();
+        let mut octx = crate::agents::orchestrator::test_support::test_ctx(vec![(
+            ("wechat".to_string(), "default".to_string()),
+            mock.clone() as Arc<dyn crate::channels::Channel>,
+        )]);
+        octx.scheduler = Some(sched.clone());
+        let ctx = WebhookContext {
+            ctx: Arc::new(octx),
+            timezone: "UTC".to_string(),
+            scheduler: sched.clone(),
+        };
+        let delivery = DeliveryConfig {
+            mode: DeliveryMode::None,
+            channel: Some("wechat".to_string()),
+            ..Default::default()
+        };
+        send_to_target(&ctx, &delivery, "should not be sent").await;
+        assert!(mock.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn webhook_dispatch_returns_202_without_awaiting_turn() {
         let tmp = tempfile::tempdir().unwrap();
         let sched = test_scheduler(tmp.path());
@@ -3326,7 +3685,10 @@ mod tests {
             route: "slow-job".to_string(),
             secret: "s".to_string(),
             auth: WebhookAuth::Hmac,
-            target: "none".to_string(),
+            delivery: DeliveryConfig {
+                mode: DeliveryMode::None,
+                ..Default::default()
+            },
             prompt_template: "p".to_string(),
             events: None,
             filters: None,
