@@ -87,7 +87,7 @@ impl Tool for AskUserTool {
             });
         }
 
-        // RFC channel-role-split §1.1: headless turns (cron/heartbeat) have
+        // RFC channel-role-split §1.1: headless turns (cron/webhook) have
         // no human on the other end — asking would hang the turn forever.
         // Report as a tool error instead (mirrors the silenced-turn guard).
         if session.turn_headless {

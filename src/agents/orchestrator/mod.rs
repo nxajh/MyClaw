@@ -23,7 +23,7 @@ pub mod turn;
 
 pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;
-pub(crate) use scheduled::{run_cron_task, run_distill_task, run_heartbeat_task, run_scheduled_turn};
+pub(crate) use scheduled::{run_cron_task, run_distill_task, run_scheduled_turn};
 
 use crate::agents::DelegationCoordinator;
 use crate::agents::delegation::DelegationEvent;
@@ -60,15 +60,10 @@ pub struct CronTrigger {
     pub context_policy: crate::config::scheduler::ContextPolicy,
 }
 
-/// Events from the Scheduler (heartbeat ticks, cron triggers).
+/// Events from the Scheduler (cron triggers, distill checks).
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum SchedulerEvent {
-    /// Heartbeat tick — run agent with heartbeat prompt.
-    Heartbeat {
-        target_channel: Option<String>,
-        target_account: Option<String>,
-    },
     /// Cron job matched — run agent with specific prompt.
     Cron(CronTrigger),
     /// Idle-time memory distillation check (system idle + maybe new
@@ -248,7 +243,7 @@ pub struct OrchestratorParts {
     pub delegator: Option<Arc<DelegationCoordinator>>,
     /// Delegation event receiver (conditional).
     pub delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
-    /// Scheduler event receiver (heartbeat ticks, cron triggers from Scheduler task).
+    /// Scheduler event receiver (cron triggers / distill checks from Scheduler task).
     pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
     /// AskRouter shared with the daemon-built `AskUserTool` (same
     /// `Arc<AskRouter>`). The orchestrator's inbound dispatch calls
@@ -482,7 +477,7 @@ impl Orchestrator {
     /// Call from the Composition Root; blocks until shutdown.
     ///
     /// Takes `self: Arc<Self>` so scheduler-event spawned tasks
-    /// (heartbeat / cron) can hold an Arc reference to the orchestrator
+    /// (cron / webhook) can hold an Arc reference to the orchestrator
     /// for the duration of the LLM round-trip.
     pub async fn run(
         mut self,
@@ -668,62 +663,6 @@ impl Orchestrator {
     /// unnecessary task creation; the actual LLM execution is spawned.
     async fn handle_scheduler_event(&self, event: SchedulerEvent) {
         match event {
-            SchedulerEvent::Heartbeat {
-                target_channel,
-                target_account,
-            } => {
-                tracing::debug!("heartbeat triggered (from scheduler)");
-                // Pre-flight: cheap checks before spawning.
-                let heartbeat_path = std::path::Path::new("HEARTBEAT.md");
-                if !heartbeat_path.exists() {
-                    tracing::debug!("heartbeat skipped: no HEARTBEAT.md");
-                    return;
-                }
-                let content = match std::fs::read_to_string(heartbeat_path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(err = %e, "heartbeat skipped: cannot read HEARTBEAT.md");
-                        return;
-                    }
-                };
-                let (context, tasks) = super::heartbeat_tasks::parse_heartbeat(&content);
-                if tasks.is_empty() {
-                    tracing::debug!("heartbeat skipped: no tasks in HEARTBEAT.md");
-                    return;
-                }
-                let state_path = std::path::Path::new("HEARTBEAT_STATE.json");
-                let state = super::heartbeat_tasks::HeartbeatState::load(state_path);
-                let due = super::heartbeat_tasks::due_tasks(&tasks, &state);
-                if due.is_empty() {
-                    tracing::debug!(total_tasks = tasks.len(), "heartbeat skipped: no tasks due");
-                    return;
-                }
-
-                let prompt = super::heartbeat_tasks::build_heartbeat_prompt(&context, &due);
-                tracing::info!(
-                    due_tasks = due.len(),
-                    total_tasks = tasks.len(),
-                    "heartbeat: running due tasks"
-                );
-
-                // Spawn: LLM execution runs independently of the main loop.
-                let due_owned: Vec<_> = due.into_iter().cloned().collect();
-                let self_ctx = self.ctx.clone();
-                let turn_tracker = self.ctx.turn_tracker.clone();
-                tokio::spawn(async move {
-                    let _guard = turn_tracker.track();
-                    run_heartbeat_task(
-                        self_ctx,
-                        target_channel,
-                        target_account,
-                        prompt,
-                        due_owned,
-                        state,
-                        state_path.to_path_buf(),
-                    )
-                    .await;
-                });
-            }
             SchedulerEvent::Cron(trigger) => {
                 tracing::debug!(session_key = %trigger.session_key, "cron job triggered (from scheduler)");
                 let self_ctx = self.ctx.clone();
@@ -746,7 +685,7 @@ impl Orchestrator {
     }
 }
 
-/// Check if a response is a silent "nothing to do" signal (used by heartbeat).
+/// Check if a response is a silent "nothing to do" signal (used by scheduled turns).
 pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
     let trimmed = response.trim().to_lowercase();
     let marker = format!("{}_ok", prefix);
