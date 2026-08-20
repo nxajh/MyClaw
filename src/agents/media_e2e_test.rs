@@ -104,15 +104,18 @@ fn runtime_with(providers: Arc<dyn ProviderRegistry>) -> AgentRuntime {
     for tool in builtin {
         tools.register(tool);
     }
-    tools.register(Arc::new(crate::tools::ViewImageTool::new(Arc::clone(
-        &providers,
-    ))));
-    tools.register(Arc::new(crate::tools::HearAudioTool::new(Arc::clone(
-        &providers,
-    ))));
-    tools.register(Arc::new(crate::tools::ViewVideoTool::new(Arc::clone(
-        &providers,
-    ))));
+    tools.register(Arc::new(crate::tools::ViewImageTool::new(
+        Arc::clone(&providers),
+        std::path::PathBuf::new(),
+    )));
+    tools.register(Arc::new(crate::tools::HearAudioTool::new(
+        Arc::clone(&providers),
+        std::path::PathBuf::new(),
+    )));
+    tools.register(Arc::new(crate::tools::ViewVideoTool::new(
+        Arc::clone(&providers),
+        std::path::PathBuf::new(),
+    )));
     let tools = Arc::new(tools);
     let skills = Arc::new(RwLock::new(crate::agents::SkillManager::new()));
     let agents = Arc::new(crate::agents::AgentRegistry::default());

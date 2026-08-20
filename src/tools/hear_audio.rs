@@ -16,11 +16,15 @@ use serde_json::json;
 
 pub struct HearAudioTool {
     providers: Arc<dyn ProviderRegistry>,
+    data_dir: std::path::PathBuf,
 }
 
 impl HearAudioTool {
-    pub fn new(providers: Arc<dyn ProviderRegistry>) -> Self {
-        Self { providers }
+    pub fn new(providers: Arc<dyn ProviderRegistry>, data_dir: std::path::PathBuf) -> Self {
+        Self {
+            providers,
+            data_dir,
+        }
     }
 }
 
@@ -181,14 +185,14 @@ impl Tool for HearAudioTool {
     }
 
     fn description(&self) -> &str {
-        "Listen to voice/audio file content. When the conversation contains a `[语音: sessions/.../files/xxx]`, `[音频: sessions/.../files/xxx]`, or `[voice: sessions/.../files/xxx]` marker, call this tool with the path. Only use it for audio files; do not use it for image or video. Path can be workspace-relative, absolute, or a URL (http/https)."
+        "Listen to voice/audio file content. When the conversation contains a `[语音: sessions/.../files/xxx]`, `[音频: sessions/.../files/xxx]`, or `[voice: sessions/.../files/xxx]` marker, call this tool with the path exactly as it appears in the marker. Only use it for audio files; do not use it for image or video. Path can be a `sessions/...` marker path, workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Audio file path or URL. Relative paths are interpreted as workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
+                "path": { "type": "string", "description": "Audio file path or URL. A `sessions/<id>/files/...` marker path (copy it verbatim from the `[语音: ...]` marker) resolves against the data directory; other relative paths are workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
                 "question": { "type": "string", "description": "The question you want answered about this audio, e.g. 'what did the user say?', 'translate to English'. Leave empty for full transcription." }
             },
             "required": ["path"]
@@ -218,7 +222,7 @@ impl Tool for HearAudioTool {
             .unwrap_or("Transcribe this audio verbatim.")
             .to_string();
 
-        let abs = crate::tools::media_download::resolve_path_or_url(path)
+        let abs = crate::tools::media_download::resolve_path_or_url(path, &self.data_dir)
             .await
             .map_err(|e| anyhow::anyhow!("cannot resolve path/URL '{path}': {e}"))?;
         let meta = match std::fs::metadata(&abs) {
@@ -234,7 +238,10 @@ impl Tool for HearAudioTool {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("cannot access audio file {path}: {e}")),
+                    error: Some(format!(
+                        "cannot access audio file {path} (resolved to {}): {e}",
+                        abs.display()
+                    )),
                 });
             }
         };
@@ -314,13 +321,25 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn resolves_relative_path_against_current_dir() {
+    async fn resolves_session_media_marker_against_data_dir() {
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        let result = crate::tools::media_download::resolve_path_or_url(
+            "sessions/s/files/voice.ogg",
+            &data_dir,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, data_dir.join("sessions/s/files/voice.ogg"));
+    }
+
+    #[tokio::test]
+    async fn resolves_non_session_relative_path_against_current_dir() {
         let cwd = std::env::current_dir().unwrap();
-        let result =
-            crate::tools::media_download::resolve_path_or_url("sessions/s/files/voice.ogg")
-                .await
-                .unwrap();
-        assert_eq!(result, cwd.join("sessions/s/files/voice.ogg"));
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        let result = crate::tools::media_download::resolve_path_or_url("voice.ogg", &data_dir)
+            .await
+            .unwrap();
+        assert_eq!(result, cwd.join("voice.ogg"));
     }
 
     #[test]

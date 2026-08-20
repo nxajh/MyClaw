@@ -15,11 +15,15 @@ use serde_json::json;
 
 pub struct ViewImageTool {
     providers: Arc<dyn ProviderRegistry>,
+    data_dir: std::path::PathBuf,
 }
 
 impl ViewImageTool {
-    pub fn new(providers: Arc<dyn ProviderRegistry>) -> Self {
-        Self { providers }
+    pub fn new(providers: Arc<dyn ProviderRegistry>, data_dir: std::path::PathBuf) -> Self {
+        Self {
+            providers,
+            data_dir,
+        }
     }
 }
 
@@ -184,14 +188,14 @@ impl Tool for ViewImageTool {
     }
 
     fn description(&self) -> &str {
-        "View image file content. When the conversation contains a `[图片: sessions/.../files/xxx]` or `[image: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Only use it for image files; do not use it for video or audio. Path can be workspace-relative, absolute, or a URL (http/https)."
+        "View image file content. When the conversation contains a `[图片: sessions/.../files/xxx]` or `[image: sessions/.../files/xxx]` marker, call this tool with the path exactly as it appears in the marker and a specific question. Only use it for image files; do not use it for video or audio. Path can be a `sessions/...` marker path, workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Image file path or URL. Relative paths are interpreted as workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
+                "path": { "type": "string", "description": "Image file path or URL. A `sessions/<id>/files/...` marker path (copy it verbatim from the `[图片: ...]` marker) resolves against the data directory; other relative paths are workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
                 "question": { "type": "string", "description": "The specific question you want answered about this image, e.g. 'how many people are in the image?', 'identify text in the image'." }
             },
             "required": ["path", "question"]
@@ -221,7 +225,7 @@ impl Tool for ViewImageTool {
             .unwrap_or("Describe this image in detail, including text, objects, and scenes.")
             .to_string();
 
-        let abs = crate::tools::media_download::resolve_path_or_url(path)
+        let abs = crate::tools::media_download::resolve_path_or_url(path, &self.data_dir)
             .await
             .map_err(|e| anyhow::anyhow!("cannot resolve path/URL '{path}': {e}"))?;
         let meta = match std::fs::metadata(&abs) {
@@ -237,7 +241,10 @@ impl Tool for ViewImageTool {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("cannot access image file {path}: {e}")),
+                    error: Some(format!(
+                        "cannot access image file {path} (resolved to {}): {e}",
+                        abs.display()
+                    )),
                 });
             }
         };
@@ -317,13 +324,25 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn resolves_relative_path_against_current_dir() {
+    async fn resolves_session_media_marker_against_data_dir() {
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        let result = crate::tools::media_download::resolve_path_or_url(
+            "sessions/s/files/photo.png",
+            &data_dir,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, data_dir.join("sessions/s/files/photo.png"));
+    }
+
+    #[tokio::test]
+    async fn resolves_non_session_relative_path_against_current_dir() {
         let cwd = std::env::current_dir().unwrap();
-        let result =
-            crate::tools::media_download::resolve_path_or_url("sessions/s/files/photo.png")
-                .await
-                .unwrap();
-        assert_eq!(result, cwd.join("sessions/s/files/photo.png"));
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        let result = crate::tools::media_download::resolve_path_or_url("photo.png", &data_dir)
+            .await
+            .unwrap();
+        assert_eq!(result, cwd.join("photo.png"));
     }
 
     #[test]
