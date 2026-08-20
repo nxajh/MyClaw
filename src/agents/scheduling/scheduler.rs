@@ -2141,6 +2141,9 @@ async fn handle_request(
         record.duration_ms = duration_ms;
         record.payload = Some(pretty_payload(&payload, 8192));
         record.prompt_head = Some(prompt.chars().take(512).collect());
+        if let Ok(response) = &result {
+            record = record.with_output_preview(response);
+        }
         if let Err(e) = &result {
             record = record.with_error(e.to_string());
         }
