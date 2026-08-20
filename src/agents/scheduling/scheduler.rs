@@ -66,8 +66,10 @@ pub struct JobEntry {
     /// Per-job delivery configuration (overrides target when set).
     #[serde(default)]
     pub delivery: Option<DeliveryConfig>,
-    /// Run history (most recent entries, also persisted to run log file).
-    #[serde(default)]
+    /// Run history (in-memory cache of recent entries; the durable source is
+    /// the per-job run log JSONL — `read_run_log`). Not serialized: meta.json
+    /// no longer duplicates what the run log already stores.
+    #[serde(default, skip_serializing)]
     pub last_runs: Vec<RunRecord>,
     /// Tool whitelist. If set, only these tools are available for this job.
     #[serde(default)]

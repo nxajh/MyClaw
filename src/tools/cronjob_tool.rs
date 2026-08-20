@@ -497,15 +497,13 @@ impl CronJobTool {
                 (None, Some(blacklist)) => format!(", tools: blacklist({})", blacklist.len()),
                 _ => String::new(),
             };
-            let runs_info = if job.last_runs.is_empty() {
-                String::new()
-            } else {
-                let last_status = job
-                    .last_runs
-                    .last()
-                    .map(|r| r.status.as_str())
-                    .unwrap_or("?");
-                format!(", last_run: {}", last_status)
+            let runs_info = {
+                // Single source: the per-job run log JSONL (last record).
+                let last = self.scheduler.read_run_log(&job.id, 1);
+                match last.first() {
+                    Some(r) => format!(", last_run: {}", r.status.as_str()),
+                    None => String::new(),
+                }
             };
             let model_info = match &job.model {
                 Some(m) => format!(", model: {}", m),
