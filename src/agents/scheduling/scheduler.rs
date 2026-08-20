@@ -310,7 +310,7 @@ impl Scheduler {
                 // as cron expressions (review finding).
                 let folded: Option<JobsFile> = serde_json::from_str::<serde_json::Value>(&content)
                     .ok()
-                    .map(|v| fold_schedule_kind(v))
+                    .map(fold_schedule_kind)
                     .and_then(|v| serde_json::from_value(v).ok());
                 if let Some(mut parsed) = folded {
                     normalize_schedule_specs(&mut parsed.jobs);
@@ -1093,7 +1093,7 @@ impl Scheduler {
                 // Same Value-level fold as Scheduler::new — see note there.
                 let folded: Option<JobsFile> = serde_json::from_str::<serde_json::Value>(&content)
                     .ok()
-                    .map(|v| fold_schedule_kind(v))
+                    .map(fold_schedule_kind)
                     .and_then(|v| serde_json::from_value(v).ok());
                 if let Some(mut parsed) = folded {
                     normalize_schedule_specs(&mut parsed.jobs);
