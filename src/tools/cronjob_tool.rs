@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use crate::agents::SharedScheduler;
 use crate::agents::scheduling::cron_types::{
-    DeliveryConfig, FailureAlertConfig, RetryConfig, ScheduleKind,
+    DeliveryConfig, FailureAlertConfig, RetryConfig, ScheduleKind, ScheduleSpec,
 };
 use crate::agents::scheduling::scheduler::{
     self, JobEntry, validate_active_hours, validate_at_timestamp, validate_schedule, validate_tz,
@@ -56,7 +56,7 @@ impl Tool for CronJobTool {
                 },
                 "schedule": {
                     "type": "string",
-                    "description": "Timer trigger: cron expression 'sec min hour day month weekday' (Unix-style: 0=Sunday) (e.g. '0 0 9 * * *'), or 'every 30m', or 'at 2026-05-15T09:00:00+08:00'. Optional — omit for webhook-only jobs; jobs need at least one trigger (schedule and/or webhook). In 'update', pass null to clear the timer."
+                    "description": "Timer trigger: cron expression 'sec min hour day month weekday' (Unix-style: 0=Sunday) (e.g. '0 0 9 * * *'), or 'every 30m', or 'at 2026-05-15T09:00:00+08:00'. Stored as a polymorphic object {kind: cron|every|at}. Optional — omit for webhook-only jobs. In 'update', pass null to clear the timer."
                 },
                 "webhook": {
                     "type": "object",
@@ -255,17 +255,16 @@ impl CronJobTool {
             .unwrap_or(false);
 
         // Validate schedule (when present).
-        let (schedule, schedule_kind): (Option<String>, Option<ScheduleKind>) = match &schedule_input
-        {
+        let schedule: Option<ScheduleSpec> = match &schedule_input {
             Some(input) => match parse_schedule_input(input) {
-                Ok((s, k)) => (Some(s), k),
+                Ok(spec) => Some(spec),
                 Err(e) => return Ok(err_result(&e)),
             },
-            None => (None, None),
+            None => None,
         };
 
         // Validate one-shot timestamps are in the future.
-        if let Some(ScheduleKind::At { ref at }) = schedule_kind {
+        if let Some(ScheduleSpec::Kind(ScheduleKind::At { ref at })) = &schedule {
             if let Err(e) = validate_at_timestamp(at) {
                 return Ok(err_result(&e));
             }
@@ -318,7 +317,6 @@ impl CronJobTool {
             delivery,
             enabled_tools,
             disabled_tools,
-            schedule_kind,
             enabled: true,
             last_run_at: None,
             next_run_at: None,
@@ -347,8 +345,8 @@ impl CronJobTool {
                         id
                     ),
                 ];
-                if let Some(ref s) = schedule {
-                    details.push(format!("  schedule: {}", s));
+                if let Some(ref spec) = schedule {
+                    details.push(format!("  schedule: {}", spec.describe()));
                 }
                 if let Some(ref wh) = webhook {
                     details.push(format!(
@@ -462,24 +460,23 @@ impl CronJobTool {
         // the timer channel (webhook-only job); `schedule: ""` is rejected.
         if let Some(v) = args.get("schedule") {
             if v.is_null() {
-                update.schedule = None;
+                // Some(None): clear the timer channel (webhook-only job).
+                update.schedule = Some(None);
                 update.schedule_changed = true;
-                update.schedule_kind = None;
             } else if let Some(schedule_input) = v.as_str() {
                 if schedule_input.trim().is_empty() {
                     return Ok(err_result("'schedule' must be a cron/every/at expression or null (to clear)."));
                 }
-                let (schedule, kind) = match parse_schedule_input(schedule_input) {
+                let spec = match parse_schedule_input(schedule_input) {
                     Ok(v) => v,
                     Err(e) => return Ok(err_result(&e)),
                 };
-                if let Some(ScheduleKind::At { ref at }) = kind {
+                if let Some(ScheduleKind::At { ref at }) = spec.at_time() {
                     if let Err(e) = validate_at_timestamp(at) {
                         return Ok(err_result(&e));
                     }
                 }
-                update.schedule = Some(schedule);
-                update.schedule_kind = kind;
+                update.schedule = Some(Some(spec));
                 update.schedule_changed = true;
             }
         }
@@ -634,7 +631,7 @@ impl CronJobTool {
                 status = status,
                 id = job.id,
                 name = name,
-                schedule = job.schedule.as_deref().unwrap_or("(webhook-only)"),
+                schedule = job.schedule.as_ref().map(ScheduleSpec::describe).as_deref().unwrap_or("(webhook-only)"),
                 target = job.target,
                 next = next,
                 last = last,
@@ -721,7 +718,7 @@ impl CronJobTool {
                     success: true,
                     output: format!(
                         "Job '{}' ({}) scheduled for immediate execution: fires on the next scheduler tick (within ~30s).\nSchedule: {}\nTarget: {}{}",
-                        name, job.id, job.schedule.as_deref().unwrap_or("(webhook-only)"), job.target, note
+                        name, job.id, job.schedule.as_ref().map(ScheduleSpec::describe).as_deref().unwrap_or("(webhook-only)"), job.target, note
                     ),
                     error: None,
                 })
@@ -941,33 +938,29 @@ fn parse_webhook_channel(
 }
 
 /// Parse schedule input: cron expression, "every 30m", or "at <ISO>".
-fn parse_schedule_input(input: &str) -> Result<(String, Option<ScheduleKind>), String> {
+/// Parse the tool's string schedule input into the canonical polymorphic
+/// `ScheduleSpec` object (§3.4): "every 30m" / "at <rfc3339>" / cron expr.
+fn parse_schedule_input(input: &str) -> Result<ScheduleSpec, String> {
     let trimmed = input.trim();
 
     // "every 30m" / "every 1h" / "every 90s"
     if let Some(rest) = trimmed.strip_prefix("every ") {
         let ms = parse_duration_to_ms(rest)?;
-        return Ok((
-            trimmed.to_string(),
-            Some(ScheduleKind::Every { interval_ms: ms }),
-        ));
+        return Ok(ScheduleSpec::Kind(ScheduleKind::Every { interval_ms: ms }));
     }
 
     // "at 2026-05-15T09:00:00+08:00"
     if let Some(rest) = trimmed.strip_prefix("at ") {
         chrono::DateTime::parse_from_rfc3339(rest)
             .map_err(|e| format!("invalid datetime '{}': {}", rest, e))?;
-        return Ok((
-            trimmed.to_string(),
-            Some(ScheduleKind::At {
-                at: rest.to_string(),
-            }),
-        ));
+        return Ok(ScheduleSpec::Kind(ScheduleKind::At {
+            at: rest.to_string(),
+        }));
     }
 
     // Standard cron expression (6-field). Validate upfront.
     validate_schedule(trimmed)?;
-    Ok((trimmed.to_string(), None))
+    Ok(ScheduleSpec::cron(trimmed))
 }
 
 /// Parse duration string to milliseconds.

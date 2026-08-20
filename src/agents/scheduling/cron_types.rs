@@ -187,10 +187,9 @@ impl RunRecord {
     }
 }
 
-// ── Schedule Kind ───────────────────────────────────────────────────────────
+// ── Schedule spec (§3.4 polymorphic object) ─────────────────────────────────
 
-/// Scheduling type for a cron job.
-/// When present, overrides the `schedule` string field.
+/// Scheduling type for a cron job. Serialized as an internally tagged object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScheduleKind {
@@ -200,4 +199,63 @@ pub enum ScheduleKind {
     Every { interval_ms: u64 },
     /// One-shot: run once at a specific time, then auto-disable.
     At { at: String },
+}
+
+/// Unified polymorphic schedule spec (§3.4 final form): absorbs the legacy
+/// `schedule: String` + `schedule_kind` discriminator pair into a single
+/// object.
+///
+/// Canonical persisted shape (never a bare string):
+/// `{"kind": "cron", "expr": "0 0 9 * * *"}` /
+/// `{"kind": "every", "interval_ms": 1800000}` /
+/// `{"kind": "at", "at": "2026-05-15T09:00:00+08:00"}`
+///
+/// The untagged [`ScheduleSpec::Legacy`] variant exists only to read old
+/// meta.json files whose `schedule` was a plain string; the loader folds it
+/// (and the legacy `schedule_kind` sibling field) into `Kind` so nothing
+/// downstream ever sees it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ScheduleSpec {
+    /// Legacy bare cron expression string (read-compat only, never written).
+    Legacy(String),
+    /// Canonical tagged object.
+    Kind(ScheduleKind),
+}
+
+impl ScheduleSpec {
+    /// Canonical cron spec.
+    pub fn cron(expr: impl Into<String>) -> Self {
+        Self::Kind(ScheduleKind::Cron { expr: expr.into() })
+    }
+
+    /// Normalized kind view — legacy strings are bare cron expressions.
+    pub fn kind(&self) -> ScheduleKind {
+        match self {
+            Self::Legacy(s) => ScheduleKind::Cron { expr: s.clone() },
+            Self::Kind(k) => k.clone(),
+        }
+    }
+
+    /// One-shot "at" spec (auto-disables after execution).
+    pub fn is_at(&self) -> bool {
+        matches!(self.kind(), ScheduleKind::At { .. })
+    }
+
+    /// The one-shot timestamp, when this is an "at" spec.
+    pub fn at_time(&self) -> Option<&str> {
+        match self {
+            Self::Kind(ScheduleKind::At { at }) => Some(at),
+            _ => None,
+        }
+    }
+
+    /// Human-readable display form.
+    pub fn describe(&self) -> String {
+        match self.kind() {
+            ScheduleKind::Cron { expr } => expr,
+            ScheduleKind::Every { interval_ms } => format!("every {}ms", interval_ms),
+            ScheduleKind::At { at } => format!("at {}", at),
+        }
+    }
 }

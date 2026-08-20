@@ -19,7 +19,7 @@ use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::agents::orchestrator::SchedulerEvent;
-use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
+use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind, ScheduleSpec};
 use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::config::scheduler::WebhookConfig;
 
@@ -33,12 +33,13 @@ pub type SharedScheduler = Arc<Scheduler>;
 pub struct JobEntry {
     /// Unique ID — FQID `<ns>/job/<uuidv7>`; legacy 12-hex ids remain readable.
     pub id: String,
-    /// Cron expression (6-field: sec min hour day month weekday).
-    /// e.g. "0 0 9 * * *" = every day at 09:00.
-    /// Orthogonal trigger model: optional — a job with no schedule never
-    /// fires from the timer (webhook-only or archived jobs).
+    /// Timer trigger channel (§3.4 orthogonal model): optional polymorphic
+    /// object `{kind: cron|every|at, …}`. Legacy plain-string cron
+    /// expressions and the legacy `schedule_kind` sibling field are folded
+    /// into the canonical object at load. None = no timer channel
+    /// (webhook-only or archived jobs).
     #[serde(default)]
-    pub schedule: Option<String>,
+    pub schedule: Option<ScheduleSpec>,
     /// Prompt to send to the agent when triggered.
     pub prompt: String,
     /// Where to send output: "last" | "none" | channel name.
@@ -79,9 +80,6 @@ pub struct JobEntry {
     /// Tool blacklist. These tools are disabled for this job.
     #[serde(default)]
     pub disabled_tools: Option<Vec<String>>,
-    /// Schedule kind override (every/at). If None, use schedule string as cron.
-    #[serde(default)]
-    pub schedule_kind: Option<ScheduleKind>,
     // ── New fields ──────────────────────────────────────────────────────────
     /// Per-job retry policy for transient errors.
     #[serde(default)]
@@ -195,11 +193,10 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct JobUpdate {
     pub name: Option<String>,
-    /// New schedule string; None here means "unchanged" — pair with
+    /// New schedule spec; None here means "unchanged" — pair with
     /// `schedule_changed` (Some(None) clears the timer channel).
-    pub schedule: Option<String>,
+    pub schedule: Option<Option<ScheduleSpec>>,
     pub schedule_changed: bool,
-    pub schedule_kind: Option<crate::agents::scheduling::cron_types::ScheduleKind>,
     /// Webhook channel; pair with `webhook_changed` (Some(None) removes it).
     pub webhook: Option<Option<WebhookDef>>,
     pub webhook_changed: bool,
@@ -307,7 +304,8 @@ impl Scheduler {
         let mut from_dirs = load_jobs_from_dirs(&jobs_root);
         if from_dirs.is_empty() && legacy_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&legacy_path) {
-                if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
+                if let Ok(mut parsed) = serde_json::from_str::<JobsFile>(&content) {
+                    normalize_schedule_specs(&mut parsed.jobs);
                     from_dirs = parsed.jobs;
                 }
             }
@@ -489,9 +487,8 @@ impl Scheduler {
                             if let Some(job) = data.jobs.iter_mut().find(|j| j.id == *id) {
                                 let now = chrono::Utc::now().to_rfc3339();
                                 job.last_run_at = Some(now);
-                                job.next_run_at = compute_next_run_full(
-                                    job.schedule_kind.as_ref(),
-                                    job.schedule.as_deref(),
+                                job.next_run_at = compute_next_run(
+                                    job.schedule.as_ref(),
                                     job.last_run_at.as_deref(),
                                     job.tz.as_deref().unwrap_or(&self.timezone),
                                 );
@@ -579,9 +576,8 @@ impl Scheduler {
         if entry.created_at.is_none() {
             entry.created_at = Some(chrono::Utc::now().to_rfc3339());
         }
-        entry.next_run_at = compute_next_run_full(
-            entry.schedule_kind.as_ref(),
-            entry.schedule.as_deref(),
+        entry.next_run_at = compute_next_run(
+            entry.schedule.as_ref(),
             None,
             entry.tz.as_deref().unwrap_or(&self.timezone),
         );
@@ -603,10 +599,8 @@ impl Scheduler {
             }
             if update.schedule_changed {
                 job.schedule = update.schedule;
-                job.schedule_kind = update.schedule_kind.clone();
-                job.next_run_at = compute_next_run_full(
-                    job.schedule_kind.as_ref(),
-                    job.schedule.as_deref(),
+                job.next_run_at = compute_next_run(
+                    job.schedule.as_ref(),
                     job.last_run_at.as_deref(),
                     job.tz.as_deref().unwrap_or(&self.timezone),
                 );
@@ -619,9 +613,8 @@ impl Scheduler {
             }
             if let Some(tz) = update.tz {
                 job.tz = Some(tz);
-                job.next_run_at = compute_next_run_full(
-                    job.schedule_kind.as_ref(),
-                    job.schedule.as_deref(),
+                job.next_run_at = compute_next_run(
+                    job.schedule.as_ref(),
                     job.last_run_at.as_deref(),
                     job.tz.as_deref().unwrap_or(&self.timezone),
                 );
@@ -634,9 +627,8 @@ impl Scheduler {
                 if !enabled {
                     job.next_run_at = None;
                 } else {
-                    job.next_run_at = compute_next_run_full(
-                        job.schedule_kind.as_ref(),
-                        job.schedule.as_deref(),
+                    job.next_run_at = compute_next_run(
+                        job.schedule.as_ref(),
                         job.last_run_at.as_deref(),
                         job.tz.as_deref().unwrap_or(&self.timezone),
                     );
@@ -725,9 +717,8 @@ impl Scheduler {
         let mut data = self.jobs.write();
         if let Some(job) = data.jobs.iter_mut().find(|j| j.id == id) {
             job.last_run_at = Some(record.run_at.clone());
-            job.next_run_at = compute_next_run_full(
-                job.schedule_kind.as_ref(),
-                job.schedule.as_deref(),
+            job.next_run_at = compute_next_run(
+                job.schedule.as_ref(),
                 job.last_run_at.as_deref(),
                 job.tz.as_deref().unwrap_or(&self.timezone),
             );
@@ -811,7 +802,7 @@ impl Scheduler {
             }
 
             // One-shot "at" jobs auto-disable after execution.
-            if matches!(job.schedule_kind, Some(ScheduleKind::At { .. })) {
+            if job.schedule.as_ref().is_some_and(ScheduleSpec::is_at) {
                 job.enabled = false;
             }
 
@@ -919,6 +910,17 @@ impl Scheduler {
 
 // ── Persistence ─────────────────────────────────────────────────────────────
 
+/// Fold any Legacy (plain-string) schedule specs into the canonical Kind
+/// form so the store invariant holds: persisted `schedule` is always the
+/// polymorphic object, never a bare string.
+fn normalize_schedule_specs(jobs: &mut [JobEntry]) {
+    for job in jobs {
+        if let Some(spec) = job.schedule.take() {
+            job.schedule = Some(ScheduleSpec::Kind(spec.kind()));
+        }
+    }
+}
+
 /// Load every `{jobs_root}/{dir}/meta.json` (P1-B2 directory-based store).
 /// Malformed entries are skipped. Sorted by id for stable ordering.
 fn load_jobs_from_dirs(jobs_root: &Path) -> Vec<JobEntry> {
@@ -936,7 +938,35 @@ fn load_jobs_from_dirs(jobs_root: &Path) -> Vec<JobEntry> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        match serde_json::from_str::<JobEntry>(&content) {
+        // §3.4 convergence: fold the legacy `schedule_kind` discriminator
+        // (and the plain-string `schedule` it accompanied) into the
+        // canonical polymorphic schedule object. schedule_kind is
+        // authoritative when present; a bare string schedule is a cron
+        // expression. The old keys are never written back.
+        let value = match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(path = %meta.display(), err = %e,
+                    "jobs store: skipping malformed meta.json");
+                continue;
+            }
+        };
+        let mut value = value;
+        if let Some(obj) = value.as_object_mut() {
+            let legacy_kind = obj.remove("schedule_kind").filter(|k| !k.is_null());
+            match (legacy_kind, obj.get("schedule")) {
+                (Some(kind), _) => {
+                    obj.insert("schedule".to_string(), kind);
+                }
+                (None, Some(serde_json::Value::String(s))) if !s.is_empty() => {
+                    obj.insert("schedule".to_string(), serde_json::json!({
+                        "kind": "cron", "expr": s
+                    }));
+                }
+                _ => {}
+            }
+        }
+        match serde_json::from_value::<JobEntry>(value) {
             Ok(mut job) => {
                 // §3.4: name is required. Legacy meta.json without a name
                 // backfills with the bare uuid (which is a valid slug) and
@@ -1022,7 +1052,8 @@ impl Scheduler {
         // Legacy fallback: only when the dir store is empty.
         if jobs.is_empty() && self.legacy_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&self.legacy_path) {
-                if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
+                if let Ok(mut parsed) = serde_json::from_str::<JobsFile>(&content) {
+                    normalize_schedule_specs(&mut parsed.jobs);
                     jobs = parsed.jobs;
                 }
             }
@@ -1074,17 +1105,17 @@ impl Scheduler {
 
             let active_hours = crate::str_utils::extract_yaml_string(&front_matter, "active_hours");
 
-            let already_exists = data
-                .jobs
-                .iter()
-                .any(|j| j.schedule.as_deref() == Some(schedule.as_str()) && j.prompt == prompt);
+            let already_exists = data.jobs.iter().any(|j| {
+                j.schedule.as_ref().map(ScheduleSpec::describe).as_deref() == Some(schedule.as_str())
+                    && j.prompt == prompt
+            });
             if already_exists {
                 continue;
             }
 
             let entry = JobEntry {
                 id: self.generate_id(),
-                schedule: Some(schedule),
+                schedule: Some(ScheduleSpec::cron(schedule)),
                 webhook: None,
                 prompt,
                 target,
@@ -1099,7 +1130,6 @@ impl Scheduler {
                 last_runs: Vec::new(),
                 enabled_tools: None,
                 disabled_tools: None,
-                schedule_kind: None,
                 retry: None,
                 failure_alert: None,
                 consecutive_errors: 0,
@@ -1307,33 +1337,18 @@ pub fn resolve_tz(name: &str) -> chrono_tz::Tz {
     })
 }
 
-/// Compute the next run time for a job.
-/// Supports both legacy cron expressions and new ScheduleKind.
-pub fn compute_next_run(schedule: &str, last_run: Option<&str>, tz_name: &str) -> Option<String> {
-    compute_next_run_inner(None, Some(schedule), last_run, tz_name)
-}
-
-/// Full compute with ScheduleKind support.
-pub fn compute_next_run_full(
-    kind: Option<&ScheduleKind>,
-    schedule: Option<&str>,
+/// Compute the next run time for a job from its schedule spec.
+/// Orthogonal trigger model: None = never timer-due (webhook-only or
+/// archived jobs); the HTTP server handles their other channel.
+pub fn compute_next_run(
+    spec: Option<&ScheduleSpec>,
     last_run: Option<&str>,
     tz_name: &str,
 ) -> Option<String> {
-    compute_next_run_inner(kind, schedule, last_run, tz_name)
-}
-
-fn compute_next_run_inner(
-    kind: Option<&ScheduleKind>,
-    schedule: Option<&str>,
-    last_run: Option<&str>,
-    tz_name: &str,
-) -> Option<String> {
-    // Orthogonal trigger model: no schedule = never timer-due (webhook-only
-    // or archived jobs); the HTTP server handles their other channel.
-    let schedule = schedule?;
-    match kind {
-        Some(ScheduleKind::Every { interval_ms }) => {
+    let kind = spec?.kind();
+    match &kind {
+        ScheduleKind::Every { interval_ms } => {
+            let interval_ms = *interval_ms;
             let base_ms = last_run
                 .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
                 .map(|dt| dt.timestamp_millis() as u64)
@@ -1342,7 +1357,7 @@ fn compute_next_run_inner(
             chrono::DateTime::from_timestamp_millis(next_ms as i64)
                 .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
         }
-        Some(ScheduleKind::At { at }) => {
+        ScheduleKind::At { at } => {
             if last_run.is_some() {
                 return None; // Already executed
             }
@@ -1350,7 +1365,7 @@ fn compute_next_run_inner(
                 .ok()
                 .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
         }
-        Some(ScheduleKind::Cron { expr }) => {
+        ScheduleKind::Cron { expr } => {
             let normalized = normalize_weekday_unix(expr);
             let cron_schedule: cron::Schedule = match normalized.parse() {
                 Ok(s) => s,
@@ -2418,7 +2433,7 @@ mod tests {
     fn test_entry(schedule: &str) -> JobEntry {
         JobEntry {
             id: String::new(),
-            schedule: Some(schedule.to_string()),
+            schedule: Some(ScheduleSpec::cron(schedule)),
             webhook: None,
             prompt: "p".to_string(),
             target: "last".to_string(),
@@ -2433,7 +2448,6 @@ mod tests {
             last_runs: Vec::new(),
             enabled_tools: None,
             disabled_tools: None,
-            schedule_kind: None,
             retry: None,
             failure_alert: None,
             consecutive_errors: 0,
@@ -2712,7 +2726,10 @@ mod tests {
         let on_disk: JobEntry =
             serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
         assert_eq!(on_disk.id, id);
-        assert_eq!(on_disk.schedule.as_deref(), Some("0 9 * * *"));
+        assert!(matches!(
+            on_disk.schedule,
+            Some(ScheduleSpec::Kind(ScheduleKind::Cron { ref expr })) if expr == "0 9 * * *"
+        ));
         // The legacy single file must NOT be (re)created.
         assert!(!jobs_root.join("jobs.json").exists());
 
@@ -2733,7 +2750,7 @@ mod tests {
                 payload_off: false,
             }),
             name: name.map(|s| s.to_string()),
-            schedule: schedule.map(|s| s.to_string()),
+            schedule: schedule.map(ScheduleSpec::cron),
             ..test_entry("0 0 9 * * *")
         }
     }
@@ -2793,12 +2810,105 @@ mod tests {
         assert_eq!(jobs[0].secret, "s1");
     }
 
+    // ── §3.4 schedule_kind convergence (legacy → polymorphic object) ──────
+
+    #[test]
+    fn legacy_string_schedule_folds_to_cron_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let id = "test/job/019fe4ceaaaa";
+        let meta_dir = jobs_root.join(crate::ids::dir_name(id));
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        // Pre-convergence shape: bare string + null discriminator.
+        std::fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"id": "test/job/019fe4ceaaaa", "name": "legacy-cron", "schedule": "0 9 * * *",
+                "prompt": "p", "target": "last", "schedule_kind": null}"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+            dir.path().join("lc"), dir.path().join("lr"),
+        );
+        let jobs = sched.jobs();
+        assert!(matches!(
+            jobs[0].schedule,
+            Some(ScheduleSpec::Kind(ScheduleKind::Cron { ref expr })) if expr == "0 9 * * *"
+        ));
+        // Persisted back as the canonical object (no bare string, no
+        // schedule_kind key).
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                jobs_root.join(crate::ids::dir_name(id)).join("meta.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["schedule"]["kind"], "cron");
+        assert_eq!(saved["schedule"]["expr"], "0 9 * * *");
+        assert!(saved.get("schedule_kind").is_none());
+    }
+
+    #[test]
+    fn legacy_schedule_kind_discriminator_is_authoritative() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let id = "test/job/019fe4cebbbb";
+        let meta_dir = jobs_root.join(crate::ids::dir_name(id));
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        // Old shape for interval jobs: display string + discriminator object.
+        std::fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"id": "test/job/019fe4cebbbb", "name": "legacy-every", "schedule": "every 30m",
+                "prompt": "p", "target": "last",
+                "schedule_kind": {"kind": "every", "interval_ms": 1800000}}"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+            dir.path().join("lc"), dir.path().join("lr"),
+        );
+        let jobs = sched.jobs();
+        assert!(matches!(
+            jobs[0].schedule,
+            Some(ScheduleSpec::Kind(ScheduleKind::Every { interval_ms: 1_800_000 }))
+        ));
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                jobs_root.join(crate::ids::dir_name(id)).join("meta.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["schedule"]["kind"], "every");
+        assert_eq!(saved["schedule"]["interval_ms"], 1_800_000);
+        assert!(saved.get("schedule_kind").is_none());
+    }
+
+    #[test]
+    fn schedule_spec_serde_roundtrip() {
+        let spec = ScheduleSpec::cron("0 0 9 * * *");
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(v, serde_json::json!({"kind": "cron", "expr": "0 0 9 * * *"}));
+        let back: ScheduleSpec = serde_json::from_value(v).unwrap();
+        assert!(matches!(back, ScheduleSpec::Kind(ScheduleKind::Cron { .. })));
+        // Legacy string still parses (untagged read-compat).
+        let legacy: ScheduleSpec =
+            serde_json::from_value(serde_json::json!("0 0 9 * * *")).unwrap();
+        assert!(legacy.is_at() == false);
+        assert_eq!(legacy.describe(), "0 0 9 * * *");
+    }
+
     #[test]
     fn cron_timer_skips_scheduleless_jobs() {
-        // compute_next_run_full(None schedule) never yields a due time.
-        assert!(compute_next_run_full(None, None, None, "UTC").is_none());
+        // compute_next_run(None schedule) never yields a due time.
+        assert!(compute_next_run(None, None, "UTC").is_none());
         // And with a schedule it still works.
-        assert!(compute_next_run_full(None, Some("0 0 9 * * *"), None, "UTC").is_some());
+        assert!(compute_next_run(Some(&ScheduleSpec::cron("0 0 9 * * *")), None, "UTC").is_some());
     }
 
     // ── Event extraction / filters / payload appendix ─────────────────
