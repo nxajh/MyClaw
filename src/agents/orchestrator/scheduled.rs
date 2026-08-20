@@ -110,7 +110,8 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
             crate::agents::scheduling::cron_types::RunStatus::Ok,
         )
         .with_duration(duration_ms)
-        .with_output_preview(response),
+        .with_output_preview(response)
+        .with_trigger("cron"),
         Err(e) => {
             let err_str = e.to_string();
             tracing::warn!(session_key = %effective_session_key, err = %err_str, "cron job failed");
@@ -119,6 +120,7 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
             )
             .with_duration(duration_ms)
             .with_error(err_str)
+            .with_trigger("cron")
         }
     };
 

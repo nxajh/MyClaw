@@ -19,8 +19,7 @@ use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::agents::orchestrator::SchedulerEvent;
-use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
-use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
+use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind, ScheduleSpec};
 use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::config::scheduler::WebhookConfig;
 
@@ -34,9 +33,13 @@ pub type SharedScheduler = Arc<Scheduler>;
 pub struct JobEntry {
     /// Unique ID — FQID `<ns>/job/<uuidv7>`; legacy 12-hex ids remain readable.
     pub id: String,
-    /// Cron expression (6-field: sec min hour day month weekday).
-    /// e.g. "0 0 9 * * *" = every day at 09:00.
-    pub schedule: String,
+    /// Timer trigger channel (§3.4 orthogonal model): optional polymorphic
+    /// object `{kind: cron|every|at, …}`. Legacy plain-string cron
+    /// expressions and the legacy `schedule_kind` sibling field are folded
+    /// into the canonical object at load. None = no timer channel
+    /// (webhook-only or archived jobs).
+    #[serde(default)]
+    pub schedule: Option<ScheduleSpec>,
     /// Prompt to send to the agent when triggered.
     pub prompt: String,
     /// Where to send output: "last" | "none" | channel name.
@@ -66,8 +69,10 @@ pub struct JobEntry {
     /// Per-job delivery configuration (overrides target when set).
     #[serde(default)]
     pub delivery: Option<DeliveryConfig>,
-    /// Run history (most recent entries, also persisted to run log file).
-    #[serde(default)]
+    /// Run history (in-memory cache of recent entries; the durable source is
+    /// the per-job run log JSONL — `read_run_log`). Not serialized: meta.json
+    /// no longer duplicates what the run log already stores.
+    #[serde(default, skip_serializing)]
     pub last_runs: Vec<RunRecord>,
     /// Tool whitelist. If set, only these tools are available for this job.
     #[serde(default)]
@@ -75,9 +80,6 @@ pub struct JobEntry {
     /// Tool blacklist. These tools are disabled for this job.
     #[serde(default)]
     pub disabled_tools: Option<Vec<String>>,
-    /// Schedule kind override (every/at). If None, use schedule string as cron.
-    #[serde(default)]
-    pub schedule_kind: Option<ScheduleKind>,
     // ── New fields ──────────────────────────────────────────────────────────
     /// Per-job retry policy for transient errors.
     #[serde(default)]
@@ -113,6 +115,67 @@ pub struct JobEntry {
     /// Defaults to Inject for cron jobs.
     #[serde(default = "default_context_policy")]
     pub context_policy: crate::config::scheduler::ContextPolicy,
+    /// Webhook trigger channel (orthogonal to `schedule` — a job may have
+    /// either, both, or neither). When present, the HTTP server registers
+    /// `POST /hooks/{name}` for this job; `name` is the URL-safe route slug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<WebhookDef>,
+}
+
+/// Webhook trigger channel on a JobEntry (design doc §3.4 orthogonal model:
+/// triggering is an optional capability, not a job type). Route derives from
+/// the job name: `/hooks/{name}` — name is the external URL contract and must
+/// be a URL-safe slug, unique across webhook-enabled jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookDef {
+    /// Auth method: "hmac" (default) or "bearer".
+    #[serde(default = "default_webhook_auth")]
+    pub auth: String,
+    /// HMAC secret or Bearer token. Required — jobs with a webhook channel
+    /// but no secret are rejected at load.
+    pub secret: String,
+    /// Event-type whitelist (e.g. ["issues", "issue_comment"]). Event type
+    /// is extracted at request time via the header/payload fallback chain;
+    /// non-matching events get 200 "ignored" + a skipped history entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<String>>,
+    /// Simple condition filters, AND semantics: all must pass to trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters: Option<Vec<WebhookFilter>>,
+    /// Disable the automatic full-payload appendix (§3.4.1). Default false =
+    /// render template placeholders, then append the pretty-printed payload
+    /// (truncated to 4000 chars) for context.
+    #[serde(default)]
+    pub payload_off: bool,
+}
+
+/// A single condition in a webhook channel's `filters` list.
+/// Field navigates the payload by dot path (e.g. "action", "issue.state").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookFilter {
+    pub field: String,
+    /// Value equality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<String>,
+    /// Regex match (unanchored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matches: Option<String>,
+    /// Negate the matched condition (field must NOT equal/match).
+    #[serde(default)]
+    pub not: bool,
+}
+
+fn default_webhook_auth() -> String {
+    "hmac".to_string()
+}
+
+impl WebhookDef {
+    pub fn auth_kind(&self) -> WebhookAuth {
+        match self.auth.as_str() {
+            "bearer" => WebhookAuth::Bearer,
+            _ => WebhookAuth::Hmac,
+        }
+    }
 }
 
 fn default_context_policy() -> crate::config::scheduler::ContextPolicy {
@@ -130,7 +193,13 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct JobUpdate {
     pub name: Option<String>,
-    pub schedule: Option<String>,
+    /// New schedule spec; None here means "unchanged" — pair with
+    /// `schedule_changed` (Some(None) clears the timer channel).
+    pub schedule: Option<Option<ScheduleSpec>>,
+    pub schedule_changed: bool,
+    /// Webhook channel; pair with `webhook_changed` (Some(None) removes it).
+    pub webhook: Option<Option<WebhookDef>>,
+    pub webhook_changed: bool,
     pub prompt: Option<String>,
     pub target: Option<String>,
     pub tz: Option<String>,
@@ -235,7 +304,16 @@ impl Scheduler {
         let mut from_dirs = load_jobs_from_dirs(&jobs_root);
         if from_dirs.is_empty() && legacy_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&legacy_path) {
-                if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
+                // Value-level fold first: JobEntry no longer carries
+                // schedule_kind, so a direct struct parse would silently drop
+                // every/at discriminators and misread their display strings
+                // as cron expressions (review finding).
+                let folded: Option<JobsFile> = serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .map(fold_schedule_kind)
+                    .and_then(|v| serde_json::from_value(v).ok());
+                if let Some(mut parsed) = folded {
+                    normalize_schedule_specs(&mut parsed.jobs);
                     from_dirs = parsed.jobs;
                 }
             }
@@ -377,6 +455,7 @@ impl Scheduler {
                         let now = chrono::Utc::now();
                         data.jobs.iter()
                             .filter(|j| j.enabled)
+                            .filter(|j| j.schedule.is_some())
                             .filter(|j| {
                                 j.next_run_at.as_ref()
                                     .and_then(|n| chrono::DateTime::parse_from_rfc3339(n).ok())
@@ -392,12 +471,12 @@ impl Scheduler {
                     for j in &due_jobs {
                         tracing::info!(
                             job_id = %j.id,
-                            schedule = %j.schedule,
+                            schedule = ?j.schedule,
                             target = %j.target,
                             "cron job triggered"
                         );
                         let _ = self.event_tx.send(SchedulerEvent::Cron(crate::agents::orchestrator::CronTrigger {
-                            session_key: format!("_cron_{}", j.id),
+                            session_key: format!("_job_{}", crate::ids::bare_dir_name(&j.id)),
                             prompt: j.prompt.clone(),
                             target_channel: parse_target_channel(&j.target),
                             target_account: parse_target_account(&j.target),
@@ -416,9 +495,8 @@ impl Scheduler {
                             if let Some(job) = data.jobs.iter_mut().find(|j| j.id == *id) {
                                 let now = chrono::Utc::now().to_rfc3339();
                                 job.last_run_at = Some(now);
-                                job.next_run_at = compute_next_run_full(
-                                    job.schedule_kind.as_ref(),
-                                    &job.schedule,
+                                job.next_run_at = compute_next_run(
+                                    job.schedule.as_ref(),
                                     job.last_run_at.as_deref(),
                                     job.tz.as_deref().unwrap_or(&self.timezone),
                                 );
@@ -440,6 +518,54 @@ impl Scheduler {
         self.jobs.read().jobs.clone()
     }
 
+    /// Jobs with a webhook channel (orthogonal model: `webhook.is_some()`,
+    /// independent of `schedule` — a job can be timer-only, webhook-only, or
+    /// both). Projected into the server's `WebhookJobDef` view; route derives
+    /// from the job name. Jobs whose name is not a URL-safe slug, or whose
+    /// name collides with another webhook job, are skipped with a warning.
+    pub fn webhook_jobs(&self) -> Vec<WebhookJobDef> {
+        let mut out: Vec<WebhookJobDef> = Vec::new();
+        let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for j in self.jobs.read().jobs.iter() {
+            let Some(wh) = j.webhook.as_ref() else { continue };
+            let route = match j.name.as_deref() {
+                Some(n) if !n.is_empty() => n.to_string(),
+                _ => {
+                    tracing::warn!(job_id = %j.id, "webhook job without a name: no route");
+                    continue;
+                }
+            };
+            if route == "agent" || route == "wake" {
+                tracing::warn!(job_id = %j.id, route = %route, "webhook route collides with a built-in /hooks endpoint: skipped");
+                continue;
+            }
+            if !is_route_slug(&route) {
+                tracing::warn!(job_id = %j.id, route = %route, "webhook route name is not a URL-safe slug [a-z0-9-]: skipped");
+                continue;
+            }
+            if !seen_routes.insert(route.clone()) {
+                tracing::warn!(route = %route, "duplicate webhook route (job names must be unique): keeping first");
+                continue;
+            }
+            if wh.secret.is_empty() {
+                tracing::warn!(job_id = %j.id, route = %route, "webhook job without a secret: rejected at load (design §3.4.1)");
+                continue;
+            }
+            out.push(WebhookJobDef {
+                id: j.id.clone(),
+                route,
+                secret: wh.secret.clone(),
+                auth: wh.auth_kind(),
+                target: j.target.clone(),
+                prompt_template: j.prompt.clone(),
+                events: wh.events.clone(),
+                filters: wh.filters.clone(),
+                payload_off: wh.payload_off,
+            });
+        }
+        out
+    }
+
     /// Number of jobs.
     pub fn job_count(&self) -> usize {
         self.jobs.read().jobs.len()
@@ -447,15 +573,19 @@ impl Scheduler {
 
     /// Add a new job. Returns the generated ID.
     pub fn add_job(&self, mut entry: JobEntry) -> anyhow::Result<String> {
+        // §3.4: name is required — user-facing identity and (for webhook
+        // channels) the route segment.
+        if entry.name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            anyhow::bail!("job name is required (design §3.4)");
+        }
         if entry.id.is_empty() {
             entry.id = self.generate_id();
         }
         if entry.created_at.is_none() {
             entry.created_at = Some(chrono::Utc::now().to_rfc3339());
         }
-        entry.next_run_at = compute_next_run_full(
-            entry.schedule_kind.as_ref(),
-            &entry.schedule,
+        entry.next_run_at = compute_next_run(
+            entry.schedule.as_ref(),
             None,
             entry.tz.as_deref().unwrap_or(&self.timezone),
         );
@@ -475,11 +605,10 @@ impl Scheduler {
             if let Some(name) = update.name {
                 job.name = Some(name);
             }
-            if let Some(schedule) = update.schedule {
-                job.schedule = schedule;
-                job.next_run_at = compute_next_run_full(
-                    job.schedule_kind.as_ref(),
-                    &job.schedule,
+            if update.schedule_changed {
+                job.schedule = update.schedule.flatten();
+                job.next_run_at = compute_next_run(
+                    job.schedule.as_ref(),
                     job.last_run_at.as_deref(),
                     job.tz.as_deref().unwrap_or(&self.timezone),
                 );
@@ -492,9 +621,8 @@ impl Scheduler {
             }
             if let Some(tz) = update.tz {
                 job.tz = Some(tz);
-                job.next_run_at = compute_next_run_full(
-                    job.schedule_kind.as_ref(),
-                    &job.schedule,
+                job.next_run_at = compute_next_run(
+                    job.schedule.as_ref(),
                     job.last_run_at.as_deref(),
                     job.tz.as_deref().unwrap_or(&self.timezone),
                 );
@@ -507,9 +635,8 @@ impl Scheduler {
                 if !enabled {
                     job.next_run_at = None;
                 } else {
-                    job.next_run_at = compute_next_run_full(
-                        job.schedule_kind.as_ref(),
-                        &job.schedule,
+                    job.next_run_at = compute_next_run(
+                        job.schedule.as_ref(),
                         job.last_run_at.as_deref(),
                         job.tz.as_deref().unwrap_or(&self.timezone),
                     );
@@ -517,6 +644,9 @@ impl Scheduler {
             }
             if let Some(delivery) = update.delivery {
                 job.delivery = Some(delivery);
+            }
+            if update.webhook_changed {
+                job.webhook = update.webhook.clone().flatten();
             }
             if let Some(enabled_tools) = update.enabled_tools {
                 job.enabled_tools = Some(enabled_tools);
@@ -547,6 +677,13 @@ impl Scheduler {
             if update.trigger_now {
                 if !job.enabled {
                     anyhow::bail!("job '{}' is paused; resume it first", id);
+                }
+                if job.schedule.is_none() {
+                    anyhow::bail!(
+                        "job '{}' has no schedule (webhook-only): 'run' needs a timer channel — POST its /hooks/{} route instead",
+                        id,
+                        job.name.as_deref().unwrap_or("?")
+                    );
                 }
                 job.next_run_at = Some(chrono::Utc::now().to_rfc3339());
             }
@@ -588,9 +725,8 @@ impl Scheduler {
         let mut data = self.jobs.write();
         if let Some(job) = data.jobs.iter_mut().find(|j| j.id == id) {
             job.last_run_at = Some(record.run_at.clone());
-            job.next_run_at = compute_next_run_full(
-                job.schedule_kind.as_ref(),
-                &job.schedule,
+            job.next_run_at = compute_next_run(
+                job.schedule.as_ref(),
                 job.last_run_at.as_deref(),
                 job.tz.as_deref().unwrap_or(&self.timezone),
             );
@@ -674,7 +810,7 @@ impl Scheduler {
             }
 
             // One-shot "at" jobs auto-disable after execution.
-            if matches!(job.schedule_kind, Some(ScheduleKind::At { .. })) {
+            if job.schedule.as_ref().is_some_and(ScheduleSpec::is_at) {
                 job.enabled = false;
             }
 
@@ -765,6 +901,15 @@ impl Scheduler {
         }
     }
 
+    /// Append a webhook-triggered run to the job's history WITHOUT touching
+    /// scheduler state (last_run_at / next_run_at belong to the timer
+    /// channel — a webhook hit must not shift an "every 30m" cadence, and a
+    /// webhook-only job has no cadence at all). §3.4: webhook runs land in
+    /// the same single history source with `trigger: "webhook"`.
+    pub fn record_webhook_run(&self, job_id: &str, record: RunRecord) {
+        self.append_run_log_inner(job_id, &record);
+    }
+
     /// Generate a new job FQID (`<ns>/job/<uuidv7>`).
     fn generate_id(&self) -> String {
         crate::ids::Fqid::new(&self.namespace, crate::ids::TYPE_JOB).to_string()
@@ -772,6 +917,62 @@ impl Scheduler {
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────────
+
+/// Fold any Legacy (plain-string) schedule specs into the canonical Kind
+/// form so the store invariant holds: persisted `schedule` is always the
+/// polymorphic object, never a bare string.
+fn normalize_schedule_specs(jobs: &mut [JobEntry]) {
+    for job in jobs {
+        if let Some(spec) = job.schedule.take() {
+            job.schedule = Some(ScheduleSpec::Kind(spec.kind()));
+        }
+    }
+}
+
+/// Fold the legacy `schedule_kind` sibling into `schedule` on ONE job object
+/// (Value level, before struct parsing). The discriminator is authoritative
+/// when present; a bare string schedule is a cron expression.
+fn fold_one_schedule_kind(value: serde_json::Value) -> serde_json::Value {
+    let mut value = value;
+    let Some(obj) = value.as_object_mut() else { return value };
+    let legacy_kind = obj.remove("schedule_kind").filter(|k| !k.is_null());
+    match (legacy_kind, obj.get("schedule")) {
+        (Some(kind), _) => {
+            obj.insert("schedule".to_string(), kind);
+        }
+        (None, Some(serde_json::Value::String(s))) if !s.is_empty() => {
+            let expr = s.clone();
+            obj.insert(
+                "schedule".to_string(),
+                serde_json::json!({"kind": "cron", "expr": expr}),
+            );
+        }
+        _ => {}
+    }
+    value
+}
+
+/// Apply [`fold_one_schedule_kind`] to a jobs document — either a bare
+/// `JobsFile` object `{"jobs": [...]}` or a bare jobs array.
+fn fold_schedule_kind(value: serde_json::Value) -> serde_json::Value {
+    let mut value = value;
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(jobs) = obj.get_mut("jobs") {
+            if let Some(arr) = jobs.as_array_mut() {
+                for job in arr.iter_mut() {
+                    *job = fold_one_schedule_kind(job.take());
+                }
+            }
+        }
+        return value;
+    }
+    if let Some(arr) = value.as_array_mut() {
+        for job in arr.iter_mut() {
+            *job = fold_one_schedule_kind(job.take());
+        }
+    }
+    value
+}
 
 /// Load every `{jobs_root}/{dir}/meta.json` (P1-B2 directory-based store).
 /// Malformed entries are skipped. Sorted by id for stable ordering.
@@ -790,8 +991,32 @@ fn load_jobs_from_dirs(jobs_root: &Path) -> Vec<JobEntry> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        match serde_json::from_str::<JobEntry>(&content) {
-            Ok(job) => jobs.push(job),
+        // §3.4 convergence: fold the legacy `schedule_kind` discriminator
+        // (and the plain-string `schedule` it accompanied) into the
+        // canonical polymorphic schedule object (shared with the legacy
+        // jobs.json fallback — see fold_schedule_kind).
+        let value: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(path = %meta.display(), err = %e,
+                    "jobs store: skipping malformed meta.json");
+                continue;
+            }
+        };
+        let value = fold_one_schedule_kind(value);
+        match serde_json::from_value::<JobEntry>(value) {
+            Ok(mut job) => {
+                // §3.4: name is required. Legacy meta.json without a name
+                // backfills with the bare uuid (which is a valid slug) and
+                // warns; persisted back on the next save.
+                if job.name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    let fallback = crate::ids::bare_dir_name(&job.id);
+                    tracing::warn!(job_id = %job.id, fallback = %fallback,
+                        "jobs store: meta.json without name, backfilling with bare uuid");
+                    job.name = Some(fallback);
+                }
+                jobs.push(job)
+            }
             Err(e) => tracing::warn!(
                 path = %meta.display(),
                 err = %e,
@@ -865,7 +1090,13 @@ impl Scheduler {
         // Legacy fallback: only when the dir store is empty.
         if jobs.is_empty() && self.legacy_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&self.legacy_path) {
-                if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
+                // Same Value-level fold as Scheduler::new — see note there.
+                let folded: Option<JobsFile> = serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .map(fold_schedule_kind)
+                    .and_then(|v| serde_json::from_value(v).ok());
+                if let Some(mut parsed) = folded {
+                    normalize_schedule_specs(&mut parsed.jobs);
                     jobs = parsed.jobs;
                 }
             }
@@ -917,17 +1148,18 @@ impl Scheduler {
 
             let active_hours = crate::str_utils::extract_yaml_string(&front_matter, "active_hours");
 
-            let already_exists = data
-                .jobs
-                .iter()
-                .any(|j| j.schedule == schedule && j.prompt == prompt);
+            let already_exists = data.jobs.iter().any(|j| {
+                j.schedule.as_ref().map(ScheduleSpec::describe).as_deref() == Some(schedule.as_str())
+                    && j.prompt == prompt
+            });
             if already_exists {
                 continue;
             }
 
             let entry = JobEntry {
                 id: self.generate_id(),
-                schedule,
+                schedule: Some(ScheduleSpec::cron(schedule)),
+                webhook: None,
                 prompt,
                 target,
                 name: path.file_stem().map(|s| s.to_string_lossy().to_string()),
@@ -941,7 +1173,6 @@ impl Scheduler {
                 last_runs: Vec::new(),
                 enabled_tools: None,
                 disabled_tools: None,
-                schedule_kind: None,
                 retry: None,
                 failure_alert: None,
                 consecutive_errors: 0,
@@ -1149,30 +1380,18 @@ pub fn resolve_tz(name: &str) -> chrono_tz::Tz {
     })
 }
 
-/// Compute the next run time for a job.
-/// Supports both legacy cron expressions and new ScheduleKind.
-pub fn compute_next_run(schedule: &str, last_run: Option<&str>, tz_name: &str) -> Option<String> {
-    compute_next_run_inner(None, schedule, last_run, tz_name)
-}
-
-/// Full compute with ScheduleKind support.
-pub fn compute_next_run_full(
-    kind: Option<&ScheduleKind>,
-    schedule: &str,
+/// Compute the next run time for a job from its schedule spec.
+/// Orthogonal trigger model: None = never timer-due (webhook-only or
+/// archived jobs); the HTTP server handles their other channel.
+pub fn compute_next_run(
+    spec: Option<&ScheduleSpec>,
     last_run: Option<&str>,
     tz_name: &str,
 ) -> Option<String> {
-    compute_next_run_inner(kind, schedule, last_run, tz_name)
-}
-
-fn compute_next_run_inner(
-    kind: Option<&ScheduleKind>,
-    schedule: &str,
-    last_run: Option<&str>,
-    tz_name: &str,
-) -> Option<String> {
-    match kind {
-        Some(ScheduleKind::Every { interval_ms }) => {
+    let kind = spec?.kind();
+    match &kind {
+        ScheduleKind::Every { interval_ms } => {
+            let interval_ms = *interval_ms;
             let base_ms = last_run
                 .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
                 .map(|dt| dt.timestamp_millis() as u64)
@@ -1181,7 +1400,7 @@ fn compute_next_run_inner(
             chrono::DateTime::from_timestamp_millis(next_ms as i64)
                 .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
         }
-        Some(ScheduleKind::At { at }) => {
+        ScheduleKind::At { at } => {
             if last_run.is_some() {
                 return None; // Already executed
             }
@@ -1189,35 +1408,12 @@ fn compute_next_run_inner(
                 .ok()
                 .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
         }
-        Some(ScheduleKind::Cron { expr }) => {
+        ScheduleKind::Cron { expr } => {
             let normalized = normalize_weekday_unix(expr);
             let cron_schedule: cron::Schedule = match normalized.parse() {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(schedule = %expr, err = %e, "invalid cron expression");
-                    return None;
-                }
-            };
-            let tz = resolve_tz(tz_name);
-            let base_utc = match last_run {
-                Some(ts) => chrono::DateTime::parse_from_rfc3339(ts)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|_| chrono::Utc::now()),
-                None => chrono::Utc::now(),
-            };
-            let base_local = base_utc.with_timezone(&tz);
-            cron_schedule
-                .after(&base_local)
-                .next()
-                .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
-        }
-        None => {
-            // Legacy cron expression from schedule string.
-            let normalized = normalize_weekday_unix(schedule);
-            let cron_schedule: cron::Schedule = match normalized.parse() {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(schedule = %schedule, err = %e, "invalid cron expression");
                     return None;
                 }
             };
@@ -1248,6 +1444,201 @@ pub struct WebhookContext {
     pub ctx: Arc<crate::agents::OrchestratorCtx>,
     /// Timezone string used for cron evaluation in the webhook server.
     pub timezone: String,
+}
+
+// ── Webhook channel view + template rendering (migrated from the removed
+// webhook_loader.rs per §4 checklist) ───────────────────────────────────────
+
+/// Webhook job definition (server-facing view projected from a JobEntry's
+/// `webhook` channel). Route derives from the job name: `POST /hooks/{route}`.
+#[derive(Debug, Clone)]
+pub struct WebhookJobDef {
+    /// Owning job id — FQID `<ns>/job/<uuid>`; used for the `_job_{uuid}`
+    /// session key.
+    pub id: String,
+    /// Route segment (the job's name, URL-safe slug): full route is
+    /// `POST /hooks/{route}`.
+    pub route: String,
+    /// HMAC secret or Bearer token (required — validated at projection).
+    pub secret: String,
+    /// Auth method: hmac (default) or bearer.
+    pub auth: WebhookAuth,
+    /// Output delivery target: last | none | channel name (from the job).
+    pub target: String,
+    /// Prompt template (the job's prompt field), with `{{a.b.c}}`
+    /// placeholders rendered from the payload.
+    pub prompt_template: String,
+    /// Event-type whitelist (optional; non-matching events are ignored).
+    pub events: Option<Vec<String>>,
+    /// Condition filters (AND semantics, optional).
+    pub filters: Option<Vec<WebhookFilter>>,
+    /// Disable the automatic full-payload appendix.
+    pub payload_off: bool,
+}
+
+/// Webhook auth method.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WebhookAuth {
+    /// HMAC-SHA256 via the X-Hub-Signature-256 header.
+    Hmac,
+    /// Bearer token via the Authorization header.
+    Bearer,
+}
+
+/// Route-segment validity: lowercase URL-safe slug `[a-z0-9-]`, 1-64 chars.
+/// Names are user-facing, so validation is strict (no `_`, no unicode).
+pub fn is_route_slug(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Render a prompt template, replacing `{{path.to.field}}` placeholders with
+/// values from the JSON payload.
+///
+/// - `{{issue.title}}` → reads `issue.title` from the payload
+/// - `{{commits[0].message}}` → array indexing supported
+/// - missing fields render as an empty string
+pub fn render_template(template: &str, payload: &serde_json::Value) -> String {
+    let mut result = template.to_string();
+    let mut start = 0;
+
+    while let Some(open) = result[start..].find("{{") {
+        let abs_open = start + open;
+        let Some(close) = result[abs_open..].find("}}") else {
+            break;
+        };
+        let abs_close = abs_open + close;
+
+        let key = result[abs_open + 2..abs_close].trim();
+        let replacement = match navigate_json_value(payload, key) {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            Some(serde_json::Value::Bool(b)) => b.to_string(),
+            Some(serde_json::Value::Null) => String::new(),
+            Some(other) => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+            None => String::new(),
+        };
+
+        let placeholder_len = abs_close + 2 - abs_open; // includes {{ and }}
+        result.replace_range(abs_open..abs_open + placeholder_len, &replacement);
+        // Move past the replacement to avoid infinite loops
+        start = abs_open + replacement.len();
+    }
+
+    result
+}
+
+/// Navigate a JSON value by dot-separated path with array index support.
+fn navigate_json_value<'a>(
+    val: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = val;
+    for segment in path.split('.') {
+        if let Some(bracket) = segment.find('[') {
+            let field = &segment[..bracket];
+            if !field.is_empty() {
+                current = current.get(field)?;
+            }
+            let rest = &segment[bracket..];
+            for idx_str in rest.split(']').filter(|s| !s.is_empty()) {
+                let idx: usize = idx_str.trim_start_matches('[').parse().ok()?;
+                current = current.get(idx)?;
+            }
+        } else {
+            current = current.get(segment)?;
+        }
+    }
+    Some(current)
+}
+
+// ── Webhook safety stack (§3.4.1) ──────────────────────────────────────────
+
+/// Per-route + per-IP request guard: rate limit, in-flight cap, delivery-id
+/// idempotency cache. Cheap checks first; body-size caps live in
+/// `collect_body_capped`.
+#[derive(Default)]
+pub struct WebhookGuard {
+    /// (route, ip) → request timestamps within the sliding 60s window.
+    rate: std::sync::Mutex<std::collections::HashMap<(String, String), std::collections::VecDeque<std::time::Instant>>>,
+    /// route → in-flight request count (cap 8 per route).
+    inflight: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+    /// delivery id → first-seen instant (dedupe window 1h).
+    deliveries: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+}
+
+/// RAII in-flight slot release.
+pub struct InflightGuard {
+    route: String,
+    guard: Arc<WebhookGuard>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.guard.inflight.lock() {
+            if let Some(c) = m.get_mut(&self.route) {
+                *c = c.saturating_sub(1);
+                if *c == 0 {
+                    m.remove(&self.route);
+                }
+            }
+        }
+    }
+}
+
+const WEBHOOK_RATE_MAX: usize = 120;
+const WEBHOOK_RATE_WINDOW_SECS: u64 = 60;
+const WEBHOOK_CONCURRENCY_MAX: usize = 8;
+const WEBHOOK_DELIVERY_TTL_SECS: u64 = 3600;
+/// Hard body cap for custom webhook routes.
+pub const WEBHOOK_BODY_LIMIT: usize = 256 * 1024;
+/// Body read timeout.
+pub const WEBHOOK_BODY_TIMEOUT_SECS: u64 = 15;
+/// Allowed clock skew for V2 timestamped signatures.
+const WEBHOOK_V2_MAX_SKEW_SECS: i64 = 300;
+
+impl WebhookGuard {
+    /// Sliding-window rate check: ≤120 requests / 60s per (route, ip).
+    pub fn check_rate(&self, route: &str, ip: &str) -> bool {
+        let now = std::time::Instant::now();
+        let Ok(mut m) = self.rate.lock() else { return true };
+        let key = (route.to_string(), ip.to_string());
+        let win = m.entry(key).or_default();
+        let cutoff = now - std::time::Duration::from_secs(WEBHOOK_RATE_WINDOW_SECS);
+        while win.front().is_some_and(|t| *t < cutoff) {
+            win.pop_front();
+        }
+        if win.len() >= WEBHOOK_RATE_MAX {
+            return false;
+        }
+        win.push_back(now);
+        true
+    }
+
+    /// Acquire an in-flight slot; None when the route already has 8 running.
+    pub fn acquire(&self, route: &str, guard: Arc<WebhookGuard>) -> Option<InflightGuard> {
+        let Ok(mut m) = self.inflight.lock() else { return None };
+        let c = m.entry(route.to_string()).or_insert(0);
+        if *c >= WEBHOOK_CONCURRENCY_MAX {
+            return None;
+        }
+        *c += 1;
+        Some(InflightGuard { route: route.to_string(), guard })
+    }
+
+    /// Delivery-id idempotency: true when this id is seen for the first time
+    /// within the 1h TTL (and is now recorded); false = duplicate.
+    pub fn check_delivery(&self, delivery_id: &str) -> bool {
+        let now = std::time::Instant::now();
+        let Ok(mut m) = self.deliveries.lock() else { return true };
+        m.retain(|_, t| now.duration_since(*t).as_secs() < WEBHOOK_DELIVERY_TTL_SECS);
+        if m.contains_key(delivery_id) {
+            return false;
+        }
+        m.insert(delivery_id.to_string(), now);
+        true
+    }
 }
 
 // ── Interval parsing ───────────────────────────────────────────────────────
@@ -1439,6 +1830,7 @@ pub async fn run_webhook_server(
 
     let global_secret = config.secret.clone();
     let jobs = Arc::new(jobs);
+    let guard = Arc::new(WebhookGuard::default());
 
     tracing::info!(
         port = config.port,
@@ -1447,25 +1839,29 @@ pub async fn run_webhook_server(
     );
 
     loop {
-        let (stream, _addr) = match listener.accept().await {
+        let (stream, addr) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(err = %e, "webhook: accept failed");
                 continue;
             }
         };
+        let remote_ip = addr.ip().to_string();
 
         let io = TokioIo::new(stream);
         let ctx = ctx.clone();
         let jobs = jobs.clone();
         let global_secret = global_secret.clone();
+        let guard = guard.clone();
 
         tokio::spawn(async move {
             let service = service_fn(move |req| {
                 let ctx = ctx.clone();
                 let jobs = jobs.clone();
                 let global_secret = global_secret.clone();
-                async move { handle_request(req, ctx, &jobs, &global_secret).await }
+                let guard = guard.clone();
+                let ip = remote_ip.clone();
+                async move { handle_request(req, ctx, &jobs, &global_secret, &guard, ip).await }
             });
 
             if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
@@ -1481,6 +1877,8 @@ async fn handle_request(
     ctx: Arc<WebhookContext>,
     jobs: &[WebhookJobDef],
     global_secret: &Option<String>,
+    guard: &Arc<WebhookGuard>,
+    remote_ip: String,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     if req.method() != Method::POST {
         return ok_response(StatusCode::METHOD_NOT_ALLOWED, "POST only");
@@ -1495,10 +1893,39 @@ async fn handle_request(
         _ => {}
     }
 
-    // ── Custom webhook routes ─────────────────────────────────────────
-    let job = match jobs.iter().find(|j| j.path == path) {
+    // ── Custom webhook routes: /hooks/{name}, name = job name slug ────
+    let Some(route_name) = path.strip_prefix("/hooks/") else {
+        return ok_response(StatusCode::NOT_FOUND, "no webhook at this path");
+    };
+    if route_name.contains('/') {
+        return ok_response(StatusCode::NOT_FOUND, "no webhook at this path");
+    }
+    let job = match jobs.iter().find(|j| j.route == route_name) {
         Some(j) => j,
         None => return ok_response(StatusCode::NOT_FOUND, "no webhook at this path"),
+    };
+
+    // ── Safety stack (§3.4.1): method/Content-Type → rate limit →
+    // concurrency → (auth → idempotency → body below). Cheap rejections
+    // come first. ─────────
+    // Content-Type: JSON parses as payload; text/form bodies pass through
+    // verbatim as string payloads (§3.4.1); multipart is rejected (we do
+    // not decode it and should not read large uploads).
+    if !acceptable_content_type(req.headers().get("Content-Type").and_then(|v| v.to_str().ok())) {
+        return ok_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Content-Type must be application/json, text/* or application/x-www-form-urlencoded",
+        );
+    }
+    if !guard.check_rate(&job.route, &remote_ip) {
+        return ok_response(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
+    }
+    let _inflight = match guard.acquire(&job.route, Arc::clone(guard)) {
+        Some(g) => g,
+        None => {
+            tracing::warn!(route = %job.route, "webhook: route at concurrency cap");
+            return ok_response(StatusCode::SERVICE_UNAVAILABLE, "route busy");
+        }
     };
 
     // Extract auth headers before consuming body.
@@ -1514,56 +1941,211 @@ async fn handle_request(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Collect body bytes.
-    let body_bytes = match collect_body(req.into_body()).await {
+    // Event-type header (§3.4.1 fallback chain head; payload fallbacks are
+    // consulted after the body is parsed).
+    let event_header = req
+        .headers()
+        .get("X-GitHub-Event")
+        .or_else(|| req.headers().get("X-GitLab-Event"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // V2 replay protection: optional timestamped signature binding.
+    let ts_header = req
+        .headers()
+        .get("X-MyClaw-Timestamp")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Delivery id for idempotency (provider fallback chain, §3.4.1).
+    let delivery_id = req
+        .headers()
+        .get("X-GitHub-Delivery")
+        .or_else(|| req.headers().get("svix-id"))
+        .or_else(|| req.headers().get("X-Request-ID"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Pre-read size gate: Content-Length over the cap rejects without reading.
+    if let Some(cl) = req
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        if cl > WEBHOOK_BODY_LIMIT {
+            return ok_response(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
+        }
+    }
+
+    // Collect body bytes (256KB cap + 15s read timeout).
+    let body_bytes = match collect_body_capped(req.into_body()).await {
         Ok(b) => b,
+        Err(e) if e.to_string().contains("too large") => {
+            return ok_response(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
+        }
+        Err(e) if e.to_string().contains("timeout") => {
+            return ok_response(StatusCode::REQUEST_TIMEOUT, "body read timeout");
+        }
         Err(e) => {
             tracing::warn!(err = %e, "webhook: failed to read body");
             return ok_response(StatusCode::BAD_REQUEST, "failed to read body");
         }
     };
 
-    // Verify auth per-route.
-    if let Some(ref secret) = job.secret {
-        match job.auth {
-            WebhookAuth::Hmac => match sig_header {
-                Some(ref sig) if !verify_hmac_signature(&body_bytes, secret, sig) => {
-                    tracing::warn!(path = %path, "webhook: HMAC verification failed");
+    // Verify auth per-route (§3.4.1: secret is required on every custom
+    // route — projection already rejected empty secrets, defense here).
+    if job.secret.is_empty() {
+        return ok_response(StatusCode::INTERNAL_SERVER_ERROR, "route misconfigured");
+    }
+    match job.auth {
+        WebhookAuth::Hmac => {
+            // V2 replay protection: when the client sends X-MyClaw-Timestamp,
+            // the signature must cover "v2:{ts}:{body}" and the timestamp
+            // must be within ±300s. Without the header, plain GitHub-style
+            // body signature (V1) applies.
+            if let Some(ts) = ts_header.as_deref() {
+                let skew = ts
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+                    .map(|dt| (chrono::Utc::now() - dt).num_seconds().abs())
+                    .unwrap_or(i64::MAX);
+                if skew > WEBHOOK_V2_MAX_SKEW_SECS {
+                    tracing::warn!(route = %job.route, "webhook: V2 timestamp outside allowed skew");
+                    return ok_response(StatusCode::UNAUTHORIZED, "stale timestamp");
+                }
+                let signed = format!("v2:{}:{}", ts, String::from_utf8_lossy(&body_bytes));
+                let ok = sig_header
+                    .as_deref()
+                    .map(|sig| verify_hmac_signature(signed.as_bytes(), &job.secret, sig))
+                    .unwrap_or(false);
+                if !ok {
+                    tracing::warn!(route = %job.route, "webhook: V2 HMAC verification failed");
                     return ok_response(StatusCode::UNAUTHORIZED, "invalid signature");
                 }
-                None => {
-                    tracing::warn!(path = %path, "webhook: missing signature header");
-                    return ok_response(StatusCode::UNAUTHORIZED, "missing signature");
-                }
-                _ => {}
-            },
-            WebhookAuth::Bearer => {
-                let expected = format!("Bearer {}", secret);
-                match auth_header {
-                    Some(ref h) if h.as_str() == expected => {}
-                    _ => {
-                        tracing::warn!(path = %path, "webhook: Bearer auth failed");
-                        return ok_response(StatusCode::UNAUTHORIZED, "invalid token");
+            } else {
+                match sig_header {
+                    Some(ref sig) if !verify_hmac_signature(&body_bytes, &job.secret, sig) => {
+                        tracing::warn!(route = %job.route, "webhook: HMAC verification failed");
+                        return ok_response(StatusCode::UNAUTHORIZED, "invalid signature");
                     }
+                    None => {
+                        tracing::warn!(route = %job.route, "webhook: missing signature header");
+                        return ok_response(StatusCode::UNAUTHORIZED, "missing signature");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        WebhookAuth::Bearer => {
+            let expected = format!("Bearer {}", job.secret);
+            match auth_header {
+                Some(ref h) if h.as_str() == expected => {}
+                _ => {
+                    tracing::warn!(route = %job.route, "webhook: Bearer auth failed");
+                    return ok_response(StatusCode::UNAUTHORIZED, "invalid token");
                 }
             }
         }
     }
 
-    tracing::info!(path = %path, "webhook triggered");
+    // Idempotency: duplicate delivery ids are acknowledged and dropped.
+    if let Some(did) = delivery_id.as_deref() {
+        if !guard.check_delivery(did) {
+            tracing::info!(route = %job.route, delivery_id = %did, "webhook: duplicate delivery, ignored");
+            return ok_response(StatusCode::OK, "duplicate");
+        }
+    }
 
-    // Parse payload as JSON for template rendering.
-    let payload: serde_json::Value =
-        serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+    tracing::info!(route = %job.route, "webhook triggered");
 
-    // Render template with payload.
-    let prompt = render_template(&job.prompt_template, &payload);
+    // Parse payload: JSON bodies become objects; anything else is passed
+    // through as a plain string (§3.4.1 — no silent Null).
+    let payload: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(_) => serde_json::Value::String(
+            String::from_utf8_lossy(&body_bytes).to_string(),
+        ),
+    };
+
+    // Event whitelist + condition filters (§3.4.1). Non-matching requests
+    // are acknowledged 200 "ignored" and leave a Skipped history entry.
+    let event_type = extract_event_type(event_header.as_deref(), &payload);
+    let ignore_reason = if let Some(events) = job.events.as_ref() {
+        let et = event_type.as_deref().unwrap_or("");
+        if !events.iter().any(|e| e == et) {
+            Some(format!("event '{}' not in whitelist", et))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+    .or_else(|| {
+        job.filters
+            .as_ref()
+            .filter(|fs| !fs.iter().all(|f| filter_matches(f, &payload)))
+            .map(|_| "filters not satisfied".to_string())
+    });
+    if let Some(reason) = ignore_reason {
+        tracing::info!(route = %job.route, reason = %reason, "webhook: ignored");
+        if let Some(sched) = ctx.ctx.scheduler.as_ref() {
+            sched.record_webhook_run(
+                &job.id,
+                RunRecord {
+                    run_at: chrono::Utc::now().to_rfc3339(),
+                    status: RunStatus::Skipped,
+                    trigger: Some("webhook".to_string()),
+                    error: Some(reason),
+                    payload: Some(pretty_payload(&payload, 8192)),
+                    ..Default::default()
+                },
+            );
+        }
+        return ok_response(StatusCode::OK, "ignored");
+    }
+
+    // Render template with payload, then append the full payload for context
+    // (§3.4.1: full-payload default, 4000-char truncation, {{payload}} and
+    // {{event_type}} reserved placeholders).
+    let mut prompt = render_template(&job.prompt_template, &payload);
+    if prompt.contains("{{payload}}") {
+        prompt = prompt.replace("{{payload}}", &pretty_payload(&payload, 4000));
+    } else if let Some(et) = event_type.as_deref() {
+        prompt = prompt.replace("{{event_type}}", et);
+    }
+    if !job.payload_off && !job.prompt_template.contains("{{payload}}") {
+        let appendix = pretty_payload(&payload, 4000);
+        if !appendix.is_empty() {
+            prompt.push_str("\n\n--- webhook payload ---\n");
+            prompt.push_str(&appendix);
+        }
+    }
 
     let session_key = format!(
-        "_webhook_{}",
-        path.trim_start_matches('/').replace('/', "_")
+        "_job_{}",
+        crate::ids::bare_dir_name(&job.id)
     );
+    let started = std::time::Instant::now();
     let result = run_scheduled_task(&ctx, &session_key, &prompt).await;
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    // History record (§3.4: trigger field + webhook audit fields).
+    if let Some(sched) = ctx.ctx.scheduler.as_ref() {
+        let mut record = RunRecord::now(match &result {
+            Ok(_) => RunStatus::Ok,
+            Err(_) => RunStatus::Error,
+        });
+        record.trigger = Some("webhook".to_string());
+        record.duration_ms = duration_ms;
+        record.payload = Some(pretty_payload(&payload, 8192));
+        record.prompt_head = Some(prompt.chars().take(512).collect());
+        if let Err(e) = &result {
+            record = record.with_error(e.to_string());
+        }
+        sched.record_webhook_run(&job.id, record);
+    }
 
     match result {
         Ok(response) => {
@@ -1586,6 +2168,17 @@ async fn handle_hooks_agent(
     ctx: Arc<WebhookContext>,
     global_secret: &Option<String>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
+    // JSON API: cheap Content-Type rejection before auth/body work.
+    let ct_json = req
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json"))
+        .unwrap_or(false);
+    if !ct_json {
+        return ok_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Content-Type must be application/json");
+    }
+
     // Verify global Bearer token.
     if let Some(secret) = global_secret {
         let expected = format!("Bearer {}", secret);
@@ -1685,6 +2278,71 @@ async fn handle_hooks_wake(
 
 // ── Auth helpers ───────────────────────────────────────────────────────────
 
+/// Extract the event type: header fallback chain first (X-GitHub-Event →
+/// X-GitLab-Event, captured before body consumption), then payload fields
+/// (`event_type` → `type`) — hermes 5-level chain, §3.4.1.
+fn extract_event_type(event_header: Option<&str>, payload: &serde_json::Value) -> Option<String> {
+    if let Some(h) = event_header.filter(|h| !h.is_empty()) {
+        return Some(h.to_string());
+    }
+    payload
+        .get("event_type")
+        .or_else(|| payload.get("type"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Evaluate a single webhook filter condition against the payload.
+/// AND semantics across the filter list; `not` negates the match.
+fn filter_matches(
+    f: &crate::agents::scheduling::scheduler::WebhookFilter,
+    payload: &serde_json::Value,
+) -> bool {
+    let mut cur = payload;
+    for seg in f.field.split('.') {
+        cur = match cur.get(seg) {
+            Some(v) => v,
+            None => return f.not, // missing field: only a `not` filter passes
+        };
+    }
+    // Strings compare directly; numbers/bools against their string form.
+    let actual = match cur {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        _ => return f.not,
+    };
+    let matched = if let Some(eq) = f.equals.as_deref() {
+        actual == eq
+    } else if let Some(re) = f.matches.as_deref() {
+        regex::Regex::new(re).map(|r| r.is_match(&actual)).unwrap_or(false)
+    } else {
+        true
+    };
+    matched != f.not
+}
+
+/// Pretty-print a payload for prompt context, truncated to `max_chars`.
+fn pretty_payload(payload: &serde_json::Value, max_chars: usize) -> String {
+    let s = serde_json::to_string_pretty(payload).unwrap_or_default();
+    if s.chars().count() <= max_chars {
+        s
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{}\n…[truncated]", truncated)
+    }
+}
+
+/// Content-Type gate (§3.4.1 first stack step): application/json parses as
+/// the payload; text/* and form-urlencoded bodies pass through verbatim as
+/// string payloads; anything else (missing, multipart, …) is rejected cheap
+/// before any body read.
+fn acceptable_content_type(ct: Option<&str>) -> bool {
+    let Some(ct) = ct else { return false };
+    let mime = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    mime == "application/json" || mime.starts_with("text/") || mime == "application/x-www-form-urlencoded"
+}
+
 /// Verify HMAC-SHA256 signature against the `X-Hub-Signature-256` header value.
 fn verify_hmac_signature(body: &[u8], secret: &str, header_value: &str) -> bool {
     use hmac::{Hmac, Mac};
@@ -1726,6 +2384,45 @@ where
     Ok(collected.to_bytes())
 }
 
+/// Capped body read for custom webhook routes (§3.4.1): 256KB hard limit,
+/// 15s read timeout. `Err(anyhow!("too large"))` maps to 413 upstream.
+async fn collect_body_capped<B>(body: B) -> anyhow::Result<Bytes>
+where
+    B: hyper::body::Body,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    let fut = async {
+        use http_body_util::BodyExt;
+        let mut body = std::pin::pin!(body);
+        let mut buf: Vec<u8> = Vec::with_capacity(4096);
+        while let Some(frame) = body.as_mut().frame().await {
+            let frame = frame?;
+            if let Ok(mut data) = frame.into_data() {
+                use bytes::Buf;
+                while data.has_remaining() {
+                    let chunk = data.chunk();
+                    if buf.len() + chunk.len() > WEBHOOK_BODY_LIMIT {
+                        anyhow::bail!("too large");
+                    }
+                    let n = chunk.len();
+                    buf.extend_from_slice(chunk);
+                    data.advance(n);
+                }
+            }
+        }
+        Ok(Bytes::from(buf))
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(WEBHOOK_BODY_TIMEOUT_SECS),
+        fut,
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(_) => anyhow::bail!("body read timeout"),
+    }
+}
+
 fn ok_response(status: StatusCode, body: &str) -> anyhow::Result<Response<Full<Bytes>>> {
     Response::builder()
         .status(status)
@@ -1756,10 +2453,11 @@ mod tests {
     fn test_entry(schedule: &str) -> JobEntry {
         JobEntry {
             id: String::new(),
-            schedule: schedule.to_string(),
+            schedule: Some(ScheduleSpec::cron(schedule)),
+            webhook: None,
             prompt: "p".to_string(),
             target: "last".to_string(),
-            name: None,
+            name: Some("test-job".to_string()),
             tz: None,
             active_hours: None,
             enabled: true,
@@ -1770,7 +2468,6 @@ mod tests {
             last_runs: Vec::new(),
             enabled_tools: None,
             disabled_tools: None,
-            schedule_kind: None,
             retry: None,
             failure_alert: None,
             consecutive_errors: 0,
@@ -2049,12 +2746,417 @@ mod tests {
         let on_disk: JobEntry =
             serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
         assert_eq!(on_disk.id, id);
-        assert_eq!(on_disk.schedule, "0 9 * * *");
+        assert!(matches!(
+            on_disk.schedule,
+            Some(ScheduleSpec::Kind(ScheduleKind::Cron { ref expr })) if expr == "0 9 * * *"
+        ));
         // The legacy single file must NOT be (re)created.
         assert!(!jobs_root.join("jobs.json").exists());
 
         // Remove → meta.json gone.
         assert!(sched.remove_job(&id).unwrap());
         assert!(!meta.exists());
+    }
+
+    // ── Orthogonal trigger model (§3.4) tests ─────────────────────────
+
+    fn wh_entry(name: Option<&str>, secret: &str, schedule: Option<&str>) -> JobEntry {
+        JobEntry {
+            webhook: Some(WebhookDef {
+                auth: "hmac".to_string(),
+                secret: secret.to_string(),
+                events: None,
+                filters: None,
+                payload_off: false,
+            }),
+            name: name.map(|s| s.to_string()),
+            schedule: schedule.map(ScheduleSpec::cron),
+            ..test_entry("0 0 9 * * *")
+        }
+    }
+
+    #[test]
+    fn webhook_projection_derives_route_from_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
+        sched
+            .add_job(wh_entry(Some("gh-issues"), "s3cret", None))
+            .unwrap();
+        let jobs = sched.webhook_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].route, "gh-issues");
+        assert_eq!(jobs[0].secret, "s3cret");
+    }
+
+    #[test]
+    fn add_job_rejects_nameless_entry() {
+        // §3.4: name is required at the write boundary; the load path
+        // backfills legacy files, so the store invariant always holds.
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
+        let err = sched.add_job(wh_entry(None, "s", None));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn webhook_projection_rejects_bad_slug_secret_and_builtin_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
+        // Empty secret → rejected at load.
+        sched
+            .add_job(wh_entry(Some("no-secret"), "", None))
+            .unwrap();
+        // Non-slug name → rejected.
+        sched
+            .add_job(wh_entry(Some("Bad Slug"), "s", None))
+            .unwrap();
+        // Built-in route collision → rejected.
+        sched.add_job(wh_entry(Some("agent"), "s", None)).unwrap();
+        assert!(sched.webhook_jobs().is_empty());
+    }
+
+    #[test]
+    fn webhook_projection_duplicate_routes_keep_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = test_scheduler(tmp.path());
+        sched
+            .add_job(wh_entry(Some("dup"), "s1", None))
+            .unwrap();
+        sched
+            .add_job(wh_entry(Some("dup"), "s2", None))
+            .unwrap();
+        let jobs = sched.webhook_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].secret, "s1");
+    }
+
+    // ── §3.4 schedule_kind convergence (legacy → polymorphic object) ──────
+
+    #[test]
+    fn legacy_string_schedule_folds_to_cron_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let id = "test/job/019fe4ceaaaa";
+        let meta_dir = jobs_root.join(crate::ids::dir_name(id));
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        // Pre-convergence shape: bare string + null discriminator.
+        std::fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"id": "test/job/019fe4ceaaaa", "name": "legacy-cron", "schedule": "0 9 * * *",
+                "prompt": "p", "target": "last", "schedule_kind": null}"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+            dir.path().join("lc"), dir.path().join("lr"),
+        );
+        let jobs = sched.jobs();
+        assert!(matches!(
+            jobs[0].schedule,
+            Some(ScheduleSpec::Kind(ScheduleKind::Cron { ref expr })) if expr == "0 9 * * *"
+        ));
+        // The fold happens at load; an empty update forces a save so the
+        // canonical object hits the disk.
+        sched.update_job(id, JobUpdate::default()).unwrap();
+        // Persisted back as the canonical object (no bare string, no
+        // schedule_kind key).
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                jobs_root.join(crate::ids::dir_name(id)).join("meta.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["schedule"]["kind"], "cron");
+        assert_eq!(saved["schedule"]["expr"], "0 9 * * *");
+        assert!(saved.get("schedule_kind").is_none());
+    }
+
+    #[test]
+    fn legacy_schedule_kind_discriminator_is_authoritative() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let id = "test/job/019fe4cebbbb";
+        let meta_dir = jobs_root.join(crate::ids::dir_name(id));
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        // Old shape for interval jobs: display string + discriminator object.
+        std::fs::write(
+            meta_dir.join("meta.json"),
+            r#"{"id": "test/job/019fe4cebbbb", "name": "legacy-every", "schedule": "every 30m",
+                "prompt": "p", "target": "last",
+                "schedule_kind": {"kind": "every", "interval_ms": 1800000}}"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+            dir.path().join("lc"), dir.path().join("lr"),
+        );
+        let jobs = sched.jobs();
+        assert!(matches!(
+            jobs[0].schedule,
+            Some(ScheduleSpec::Kind(ScheduleKind::Every { interval_ms: 1_800_000 }))
+        ));
+        sched.update_job(id, JobUpdate::default()).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                jobs_root.join(crate::ids::dir_name(id)).join("meta.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["schedule"]["kind"], "every");
+        assert_eq!(saved["schedule"]["interval_ms"], 1_800_000);
+        assert!(saved.get("schedule_kind").is_none());
+    }
+
+    #[test]
+    fn legacy_jobs_json_single_file_folds_discriminators() {
+        // Review finding: the pre-P1-B2 single-file fallback must fold
+        // schedule_kind at the Value level too, or every/at display strings
+        // would be misread as cron expressions (silently never firing).
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        std::fs::create_dir_all(&jobs_root).unwrap();
+        std::fs::write(
+            jobs_root.join("jobs.json"),
+            r#"{"jobs": [
+                {"id": "test/job/019fe4cedddd", "name": "tick", "schedule": "every 30m",
+                 "prompt": "p", "target": "last",
+                 "schedule_kind": {"kind": "every", "interval_ms": 1800000}},
+                {"id": "test/job/019fe4ceeeee", "name": "old-cron", "schedule": "0 9 * * *",
+                 "prompt": "p", "target": "last", "schedule_kind": null}
+            ]}"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root, "test", "UTC".to_string(), None, tx,
+            dir.path().join("lc"), dir.path().join("lr"),
+        );
+        let jobs = sched.jobs();
+        assert_eq!(jobs.len(), 2);
+        let tick = jobs.iter().find(|j| j.name.as_deref() == Some("tick")).unwrap();
+        assert!(matches!(
+            tick.schedule,
+            Some(ScheduleSpec::Kind(ScheduleKind::Every { interval_ms: 1_800_000 }))
+        ));
+        let cron = jobs.iter().find(|j| j.name.as_deref() == Some("old-cron")).unwrap();
+        assert!(matches!(
+            cron.schedule,
+            Some(ScheduleSpec::Kind(ScheduleKind::Cron { ref expr })) if expr == "0 9 * * *"
+        ));
+    }
+
+    #[test]
+    fn schedule_spec_serde_roundtrip() {
+        let spec = ScheduleSpec::cron("0 0 9 * * *");
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(v, serde_json::json!({"kind": "cron", "expr": "0 0 9 * * *"}));
+        let back: ScheduleSpec = serde_json::from_value(v).unwrap();
+        assert!(matches!(back, ScheduleSpec::Kind(ScheduleKind::Cron { .. })));
+        // Legacy string still parses (untagged read-compat).
+        let legacy: ScheduleSpec =
+            serde_json::from_value(serde_json::json!("0 0 9 * * *")).unwrap();
+        assert!(legacy.is_at() == false);
+        assert_eq!(legacy.describe(), "0 0 9 * * *");
+    }
+
+    #[test]
+    fn cron_timer_skips_scheduleless_jobs() {
+        // compute_next_run(None schedule) never yields a due time.
+        assert!(compute_next_run(None, None, "UTC").is_none());
+        // And with a schedule it still works.
+        assert!(compute_next_run(Some(&ScheduleSpec::cron("0 0 9 * * *")), None, "UTC").is_some());
+    }
+
+    // ── Event extraction / filters / payload appendix ─────────────────
+
+    #[test]
+    fn extract_event_type_header_chain() {
+        let payload = serde_json::json!({"type": "payload-type"});
+        assert_eq!(
+            extract_event_type(Some("push"), &payload),
+            Some("push".to_string())
+        );
+        assert_eq!(
+            extract_event_type(None, &payload),
+            Some("payload-type".to_string())
+        );
+        let payload2 = serde_json::json!({"event_type": "et"});
+        assert_eq!(
+            extract_event_type(None, &payload2),
+            Some("et".to_string())
+        );
+        assert_eq!(extract_event_type(None, &serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn filter_matches_equals_matches_not() {
+        let payload = serde_json::json!({
+            "action": "opened",
+            "issue": {"state": "open", "number": 7}
+        });
+        let f = |field: &str, equals: Option<&str>, matches_: Option<&str>, not: bool| WebhookFilter {
+            field: field.to_string(),
+            equals: equals.map(|s| s.to_string()),
+            matches: matches_.map(|s| s.to_string()),
+            not,
+        };
+        assert!(filter_matches(&f("action", Some("opened"), None, false), &payload));
+        assert!(!filter_matches(&f("action", Some("closed"), None, false), &payload));
+        assert!(filter_matches(&f("action", Some("closed"), None, true), &payload));
+        assert!(filter_matches(&f("issue.state", Some("open"), None, false), &payload));
+        assert!(filter_matches(&f("issue.number", Some("7"), None, false), &payload));
+        assert!(filter_matches(&f("issue.title", Some("x"), None, true), &payload)); // missing + not
+        assert!(filter_matches(&f("action", None, Some("open.*"), false), &payload));
+    }
+
+    #[test]
+    fn pretty_payload_truncates_to_limit() {
+        let big = serde_json::json!({"data": "x".repeat(10_000)});
+        let out = pretty_payload(&big, 4000);
+        assert!(out.chars().count() < 4100);
+        assert!(out.ends_with("…[truncated]"));
+        assert_eq!(
+            pretty_payload(&serde_json::json!({"a": 1}), 4000),
+            "{\n  \"a\": 1\n}"
+        );
+    }
+
+    // ── Webhook guard (rate / concurrency / idempotency) ──────────────
+
+    #[test]
+    fn guard_rate_limit_window() {
+        let g = WebhookGuard::default();
+        for _ in 0..120 {
+            assert!(g.check_rate("r", "1.2.3.4"));
+        }
+        assert!(!g.check_rate("r", "1.2.3.4")); // over cap
+        assert!(g.check_rate("r", "5.6.7.8")); // other IP fine
+        assert!(g.check_rate("other", "1.2.3.4")); // other route fine
+    }
+
+    #[test]
+    fn guard_inflight_cap_and_release() {
+        let g = std::sync::Arc::new(WebhookGuard::default());
+        let a = g.acquire("r", std::sync::Arc::clone(&g)).unwrap();
+        assert!(g.acquire("r", std::sync::Arc::clone(&g)).is_some());
+        drop(a);
+        // Slot released → acquire succeeds again.
+        assert!(g.acquire("r", std::sync::Arc::clone(&g)).is_some());
+    }
+
+    #[test]
+    fn guard_inflight_enforces_cap_of_8() {
+        let g = std::sync::Arc::new(WebhookGuard::default());
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            held.push(g.acquire("r", std::sync::Arc::clone(&g)).unwrap());
+        }
+        assert!(g.acquire("r", std::sync::Arc::clone(&g)).is_none());
+    }
+
+    #[test]
+    fn guard_delivery_idempotency() {
+        let g = WebhookGuard::default();
+        assert!(g.check_delivery("d-1"));
+        assert!(!g.check_delivery("d-1")); // duplicate
+        assert!(g.check_delivery("d-2"));
+    }
+
+    // ── Template rendering tests (migrated from webhook_loader.rs) ────
+
+    #[test]
+    fn render_template_simple() {
+        let template = "Hello {{name}}!";
+        let payload = serde_json::json!({"name": "world"});
+        assert_eq!(render_template(template, &payload), "Hello world!");
+    }
+
+    #[test]
+    fn render_template_nested() {
+        let template = "Issue: {{issue.title}} by {{issue.user.login}}";
+        let payload = serde_json::json!({
+            "issue": {
+                "title": "Fix bug",
+                "user": {"login": "alice"}
+            }
+        });
+        assert_eq!(
+            render_template(template, &payload),
+            "Issue: Fix bug by alice"
+        );
+    }
+
+    #[test]
+    fn render_template_array_index() {
+        let template = "First commit: {{commits[0].message}}";
+        let payload = serde_json::json!({
+            "commits": [{"message": "fix"}, {"message": "feat"}]
+        });
+        assert_eq!(render_template(template, &payload), "First commit: fix");
+    }
+
+    #[test]
+    fn render_template_missing_field() {
+        let template = "Hello {{name}}!";
+        let payload = serde_json::json!({});
+        assert_eq!(render_template(template, &payload), "Hello !");
+    }
+
+    #[test]
+    fn render_template_multiple_same_field() {
+        let template = "{{x}} and {{x}}";
+        let payload = serde_json::json!({"x": "foo"});
+        assert_eq!(render_template(template, &payload), "foo and foo");
+    }
+
+    #[test]
+    fn render_template_no_placeholders() {
+        let template = "No placeholders here.";
+        let payload = serde_json::json!({});
+        assert_eq!(render_template(template, &payload), "No placeholders here.");
+    }
+
+    #[test]
+    fn render_template_number_and_bool() {
+        let template = "Count: {{count}}, Active: {{active}}";
+        let payload = serde_json::json!({"count": 42, "active": true});
+        assert_eq!(
+            render_template(template, &payload),
+            "Count: 42, Active: true"
+        );
+    }
+
+    #[test]
+    fn render_template_unclosed_braces_ignored() {
+        let template = "Hello {{name} not closed";
+        let payload = serde_json::json!({"name": "world"});
+        assert_eq!(
+            render_template(template, &payload),
+            "Hello {{name} not closed"
+        );
+    }
+
+    #[test]
+    fn route_slug_accepts_lowercase_slugs() {
+        assert!(is_route_slug("github-issues"));
+        assert!(is_route_slug("r2d2"));
+        assert!(is_route_slug("a"));
+    }
+
+    #[test]
+    fn route_slug_rejects_bad_names() {
+        assert!(!is_route_slug("")); // empty
+        assert!(!is_route_slug("GitHub")); // uppercase
+        assert!(!is_route_slug("under_score")); // underscore
+        assert!(!is_route_slug("中文")); // unicode
+        assert!(!is_route_slug("has/slash"));
+        assert!(!is_route_slug(&"x".repeat(65))); // too long
     }
 }

@@ -483,6 +483,7 @@ impl Orchestrator {
         mut self,
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
         unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
+        all_sessions: Vec<crate::storage::SessionInfo>,
     ) -> anyhow::Result<()> {
         use tokio_stream::wrappers::ReceiverStream;
         use tokio_stream::{Stream, StreamExt};
@@ -502,6 +503,7 @@ impl Orchestrator {
         // old process is still draining can persist before we re-exec.
         let ctx = Arc::clone(&self.ctx);
         let unfinished = unfinished_subagents;
+        let all_sessions_for_recovery = all_sessions;
         tokio::spawn(async move {
             #[cfg(unix)]
             if crate::hot_switch::is_hot_switch() {
@@ -513,7 +515,7 @@ impl Orchestrator {
                     .await;
                 }
             }
-            recovery::run_startup(&ctx, &unfinished);
+            recovery::run_startup(&ctx, &unfinished, all_sessions_for_recovery);
         });
 
         // Known-users persistence flush (every 60s).

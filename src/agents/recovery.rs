@@ -5,7 +5,7 @@
 //! importing the Composition Root.
 //!
 //! F37 + H50: the old `subagent_running_*.json` marker mechanism is gone.
-//! `scan_unfinished_subagents` now reads `SessionManager.list_all_sessions`
+//! `scan_unfinished_subagents` receives the shared startup session scan
 //! and reconstructs `UnfinishedSubAgent` records from session metadata
 //! (`parent_session_id`, `agent_name`, parent's `owner` / `last_message`).
 //! This works because B15 made sub-sessions top-level peers of regular
@@ -45,9 +45,12 @@ pub struct UnfinishedSubAgent {
 /// approximation that `incomplete_turn` is true OR the last message is a
 /// `user` / `tool` role (the orchestrator's per-session recovery does the
 /// authoritative check before re-executing).
-pub fn scan_unfinished_subagents(session_manager: &SessionManager) -> Vec<UnfinishedSubAgent> {
+pub fn scan_unfinished_subagents(
+    session_manager: &SessionManager,
+    all_sessions: &[crate::storage::SessionInfo],
+) -> Vec<UnfinishedSubAgent> {
     let mut unfinished = Vec::new();
-    for info in session_manager.list_all_sessions() {
+    for info in all_sessions {
         let session = match session_manager.get_by_id(&info.id) {
             Some(s) => s,
             None => continue,
