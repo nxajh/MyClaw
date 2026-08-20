@@ -1049,6 +1049,7 @@ fn parse_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> 
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect()
     })
+}
 
 #[cfg(test)]
 mod webhook_parse_tests {
