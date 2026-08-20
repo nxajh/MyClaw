@@ -2130,41 +2130,55 @@ async fn handle_request(
         "_job_{}",
         crate::ids::bare_dir_name(&job.id)
     );
-    let started = std::time::Instant::now();
-    let result = run_scheduled_task(&ctx, &session_key, &prompt).await;
-    let duration_ms = started.elapsed().as_millis() as u64;
 
-    // History record (§3.4: trigger field + webhook audit fields).
-    if let Some(sched) = ctx.ctx.scheduler.as_ref() {
-        let mut record = RunRecord::now(match &result {
-            Ok(_) => RunStatus::Ok,
-            Err(_) => RunStatus::Error,
-        });
-        record.trigger = Some("webhook".to_string());
-        record.duration_ms = duration_ms;
-        record.payload = Some(pretty_payload(&payload, 8192));
-        record.prompt_head = Some(prompt.chars().take(512).collect());
-        if let Ok(response) = &result {
-            record = record.with_output_preview(response);
-        }
-        if let Err(e) = &result {
-            record = record.with_error(e.to_string());
-        }
-        sched.record_webhook_run(&job.id, record);
-    }
+    // Fire-and-forget dispatch: the turn runs in a background task so the
+    // HTTP response does not depend on LLM latency. Awaiting the turn inside
+    // the hyper service future couples its lifetime to the client connection
+    // — when the peer disconnects (GitHub webhooks time out at 10s), hyper
+    // drops the connection task and the turn is cancelled mid-flight with
+    // no run record. 202 acknowledges acceptance; the turn's outcome lands
+    // in the job's run log (`record_webhook_run`) and `send_to_target`.
+    let inflight = _inflight; // hold the concurrency slot until the turn ends
+    let bg_ctx = Arc::clone(&ctx);
+    let bg_job = job.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let result = run_scheduled_task(&bg_ctx, &session_key, &prompt).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
 
-    match result {
-        Ok(response) => {
-            if !response.trim().is_empty() && job.target != "none" {
-                send_to_target(&ctx, &job.target, &response).await;
+        // History record (§3.4: trigger field + webhook audit fields).
+        if let Some(sched) = bg_ctx.ctx.scheduler.as_ref() {
+            let mut record = RunRecord::now(match &result {
+                Ok(_) => RunStatus::Ok,
+                Err(_) => RunStatus::Error,
+            });
+            record.trigger = Some("webhook".to_string());
+            record.duration_ms = duration_ms;
+            record.payload = Some(pretty_payload(&payload, 8192));
+            record.prompt_head = Some(prompt.chars().take(512).collect());
+            if let Ok(response) = &result {
+                record = record.with_output_preview(response);
             }
-            ok_response(StatusCode::OK, "ok")
+            if let Err(e) = &result {
+                record = record.with_error(e.to_string());
+            }
+            sched.record_webhook_run(&bg_job.id, record);
         }
-        Err(e) => {
-            tracing::warn!(err = %e, "webhook: agent run failed");
-            ok_response(StatusCode::INTERNAL_SERVER_ERROR, "agent error")
+
+        match result {
+            Ok(response) => {
+                if !response.trim().is_empty() && bg_job.target != "none" {
+                    send_to_target(&bg_ctx, &bg_job.target, &response).await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(route = %bg_job.route, err = %e, "webhook: agent run failed");
+            }
         }
-    }
+        drop(inflight);
+    });
+
+    ok_response(StatusCode::ACCEPTED, "accepted")
 }
 
 /// `POST /hooks/agent` — Run an isolated agent turn.
@@ -2224,20 +2238,26 @@ async fn handle_hooks_agent(
 
     tracing::info!(target = target, "/hooks/agent triggered");
 
-    let result = run_scheduled_task(&ctx, "_hooks_agent", &message).await;
-
-    match result {
-        Ok(response) => {
-            if !response.trim().is_empty() && target != "none" {
-                send_to_target(&ctx, target, &response).await;
+    // Fire-and-forget dispatch (same rationale as custom webhook routes):
+    // awaiting the turn inside the hyper service future ties it to the
+    // client connection — a peer disconnect cancels the turn mid-flight.
+    // 202 acknowledges acceptance; the response (if any) goes to `target`.
+    let bg_ctx = Arc::clone(&ctx);
+    let bg_target = target.to_string();
+    tokio::spawn(async move {
+        match run_scheduled_task(&bg_ctx, "_hooks_agent", &message).await {
+            Ok(response) => {
+                if !response.trim().is_empty() && bg_target != "none" {
+                    send_to_target(&bg_ctx, &bg_target, &response).await;
+                }
             }
-            ok_response(StatusCode::OK, "ok")
+            Err(e) => {
+                tracing::warn!(err = %e, "/hooks/agent: agent run failed");
+            }
         }
-        Err(e) => {
-            tracing::warn!(err = %e, "/hooks/agent: agent run failed");
-            ok_response(StatusCode::INTERNAL_SERVER_ERROR, "agent error")
-        }
-    }
+    });
+
+    ok_response(StatusCode::ACCEPTED, "accepted")
 }
 
 /// `POST /hooks/wake` — Wake endpoint (kept for URL contract; the old
