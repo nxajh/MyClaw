@@ -203,7 +203,7 @@ pub(super) fn run_startup(
                 .and_then(|j| serde_json::from_str::<TurnSuspension>(&j).ok())
                 .is_some_and(|s| !s.pending.is_empty())
         })
-        .map(|info| info.id)
+        .map(|info| info.id.clone())
         .collect();
 
     // Sub-session ids (FQID) the sub-agent recovery loop below will complete:
@@ -222,7 +222,7 @@ pub(super) fn run_startup(
     // resume when the user switches back and sends a normal message.
     let mut seen_owners = std::collections::HashSet::new();
     for info in &all_sessions {
-        let key = info.owner;
+        let key = info.owner.clone();
         if !seen_owners.insert(key.clone()) {
             continue;
         }
