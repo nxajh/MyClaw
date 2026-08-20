@@ -11,29 +11,29 @@ use crate::providers::capability_chat::{
 use crate::providers::provider_id::{ProviderId, well_known};
 
 pub fn image_marker_path(path: &str) -> String {
-    format!("[图片: {path}]")
+    format!("[image: {path}]")
 }
 
 pub fn audio_marker_path(path: &str) -> String {
-    format!("[语音: {path}]")
+    format!("[audio: {path}]")
 }
 
 pub fn video_marker_path(path: &str) -> String {
-    format!("[视频: {path}]")
+    format!("[video: {path}]")
 }
 
 pub fn file_marker_path(path: &str) -> String {
-    format!("[文件: {path}]")
+    format!("[file: {path}]")
 }
 
 /// Legacy marker for old in-memory/base64 history.
 pub fn image_marker(n: usize) -> String {
-    format!("[图片 #{n}]")
+    format!("[image #{n}]")
 }
 
 /// Legacy marker for old in-memory/base64 history.
 pub fn audio_marker(n: usize) -> String {
-    format!("[语音 #{n}]")
+    format!("[audio #{n}]")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -612,19 +612,19 @@ mod tests {
     fn file_markers_use_path_and_modality() {
         assert_eq!(
             marker_for_file("sessions/s/files/photo.jpg", Some("image/jpeg")),
-            "[图片: sessions/s/files/photo.jpg]"
+            "[image: sessions/s/files/photo.jpg]"
         );
         assert_eq!(
             marker_for_file("sessions/s/files/voice.ogg", Some("audio/ogg; codecs=opus")),
-            "[语音: sessions/s/files/voice.ogg]"
+            "[audio: sessions/s/files/voice.ogg]"
         );
         assert_eq!(
             marker_for_file("sessions/s/files/clip.mp4", None),
-            "[视频: sessions/s/files/clip.mp4]"
+            "[video: sessions/s/files/clip.mp4]"
         );
         assert_eq!(
             marker_for_file("sessions/s/files/report.pdf", Some("application/pdf")),
-            "[文件: sessions/s/files/report.pdf]"
+            "[file: sessions/s/files/report.pdf]"
         );
     }
 
@@ -720,10 +720,10 @@ mod tests {
             lower_media_for(&[msg], MediaPolicy::from_model_support(true, true, true)).unwrap();
 
         assert!(
-            matches!(&lowered[0].parts[0], ContentPart::Text { text } if text == "[语音: sessions/s/files/voice.ogg]")
+            matches!(&lowered[0].parts[0], ContentPart::Text { text } if text == "[audio: sessions/s/files/voice.ogg]")
         );
         assert!(
-            matches!(&lowered[0].parts[1], ContentPart::Text { text } if text == "[视频: sessions/s/files/clip.mp4]")
+            matches!(&lowered[0].parts[1], ContentPart::Text { text } if text == "[video: sessions/s/files/clip.mp4]")
         );
     }
 

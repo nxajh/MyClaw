@@ -188,14 +188,14 @@ impl Tool for ViewImageTool {
     }
 
     fn description(&self) -> &str {
-        "View image file content. When the conversation contains a `[图片: sessions/.../files/xxx]` or `[image: sessions/.../files/xxx]` marker, call this tool with the path exactly as it appears in the marker and a specific question. Only use it for image files; do not use it for video or audio. Path can be a `sessions/...` marker path, workspace-relative, absolute, or a URL (http/https)."
+        "View image file content. When the conversation contains an `[image: sessions/.../files/xxx]` marker, call this tool with the path exactly as it appears in the marker and a specific question. Only use it for image files; do not use it for video or audio. Path can be a `sessions/...` marker path, workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Image file path or URL. A `sessions/<id>/files/...` marker path (copy it verbatim from the `[图片: ...]` marker) resolves against the data directory; other relative paths are workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
+                "path": { "type": "string", "description": "Image file path or URL. A `sessions/<id>/files/...` marker path (copy it verbatim from the `[image: ...]` marker) resolves against the data directory; other relative paths are workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
                 "question": { "type": "string", "description": "The specific question you want answered about this image, e.g. 'how many people are in the image?', 'identify text in the image'." }
             },
             "required": ["path", "question"]

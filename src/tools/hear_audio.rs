@@ -185,14 +185,14 @@ impl Tool for HearAudioTool {
     }
 
     fn description(&self) -> &str {
-        "Listen to voice/audio file content. When the conversation contains a `[语音: sessions/.../files/xxx]`, `[音频: sessions/.../files/xxx]`, or `[voice: sessions/.../files/xxx]` marker, call this tool with the path exactly as it appears in the marker. Only use it for audio files; do not use it for image or video. Path can be a `sessions/...` marker path, workspace-relative, absolute, or a URL (http/https)."
+        "Listen to voice/audio file content. When the conversation contains an `[audio: sessions/.../files/xxx]` marker, call this tool with the path exactly as it appears in the marker. Only use it for audio files; do not use it for image or video. Path can be a `sessions/...` marker path, workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Audio file path or URL. A `sessions/<id>/files/...` marker path (copy it verbatim from the `[语音: ...]` marker) resolves against the data directory; other relative paths are workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
+                "path": { "type": "string", "description": "Audio file path or URL. A `sessions/<id>/files/...` marker path (copy it verbatim from the `[audio: ...]` marker) resolves against the data directory; other relative paths are workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
                 "question": { "type": "string", "description": "The question you want answered about this audio, e.g. 'what did the user say?', 'translate to English'. Leave empty for full transcription." }
             },
             "required": ["path"]

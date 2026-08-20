@@ -1200,7 +1200,7 @@ fn user_text_for_hard_fold(text: &str) -> String {
 
 /// Collect File-part path markers so hard-fold does not drop media references.
 /// `text_content()` only joins Text parts; pure-image user turns would otherwise
-/// fold to empty / system-reminder-only and lose `[图片: path]`.
+/// fold to empty / system-reminder-only and lose `[image: path]`.
 fn media_markers_for_hard_fold(msg: &ChatMessage) -> String {
     let mut markers = Vec::new();
     for part in &msg.parts {
@@ -1593,7 +1593,7 @@ mod tests {
         assert!(msg.text_content().is_empty());
         let fold = hard_fold_history(&[msg]);
         assert!(
-            fold.contains(&format!("[图片: {path}]")),
+            fold.contains(&format!("[image: {path}]")),
             "hard-fold must keep image marker, got: {fold}"
         );
     }
@@ -1622,7 +1622,7 @@ mod tests {
             usage: None,
         };
         let fold = hard_fold_history(&[msg]);
-        assert!(fold.contains(&format!("[图片: {path}]")), "got: {fold}");
+        assert!(fold.contains(&format!("[image: {path}]")), "got: {fold}");
         assert!(fold.contains("这是什么"), "got: {fold}");
     }
 

@@ -191,14 +191,14 @@ impl Tool for ViewVideoTool {
     }
 
     fn description(&self) -> &str {
-        "View video file content. When the conversation contains a `[视频: sessions/.../files/xxx]` or `[video: sessions/.../files/xxx]` marker, call this tool with the path exactly as it appears in the marker and a specific question. Only use it for video files; do not use it for image or audio. Path can be a `sessions/...` marker path, workspace-relative, absolute, or a URL (http/https)."
+        "View video file content. When the conversation contains a `[video: sessions/.../files/xxx]` marker, call this tool with the path exactly as it appears in the marker and a specific question. Only use it for video files; do not use it for image or audio. Path can be a `sessions/...` marker path, workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Video file path or URL. A `sessions/<id>/files/...` marker path (copy it verbatim from the `[视频: ...]` marker) resolves against the data directory; other relative paths are workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
+                "path": { "type": "string", "description": "Video file path or URL. A `sessions/<id>/files/...` marker path (copy it verbatim from the `[video: ...]` marker) resolves against the data directory; other relative paths are workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
                 "question": { "type": "string", "description": "The specific question you want answered about this video, e.g. 'summarize the video', 'what happened?', 'identify text in the video'." }
             },
             "required": ["path", "question"]

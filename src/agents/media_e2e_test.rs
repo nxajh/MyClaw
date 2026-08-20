@@ -7,7 +7,7 @@
 //!
 //! Scenario: a text-only primary + a vision model in the chain, and a user
 //! message carrying a real image. We assert the full loop:
-//!   1. the text-only model receives the image lowered to a `[图片: path]` marker
+//!   1. the text-only model receives the image lowered to a `[image: path]` marker
 //!      (provider-layer, per-model lowering — NOT pre-rendered by the agent);
 //!   2. the model's `view_image` call is dispatched (proving advertise+execute);
 //!   3. the tool sends the REAL image to the vision model;
@@ -302,8 +302,8 @@ async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
         "text-only model must NOT receive a native image part"
     );
     assert!(
-        joined_text(&text_seen[0]).contains("[图片:"),
-        "image must be lowered to a [图片: path] marker for the text-only model: {}",
+        joined_text(&text_seen[0]).contains("[image:"),
+        "image must be lowered to a [image: path] marker for the text-only model: {}",
         joined_text(&text_seen[0])
     );
 
@@ -438,8 +438,8 @@ async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
     let text_seen = text_seen.lock().unwrap();
     assert!(text_seen.len() >= 2, "text model called twice");
     assert!(
-        joined_text(&text_seen[0]).contains("[语音:"),
-        "audio must be lowered to a [语音: path] marker: {}",
+        joined_text(&text_seen[0]).contains("[audio:"),
+        "audio must be lowered to a [audio: path] marker: {}",
         joined_text(&text_seen[0])
     );
     assert!(

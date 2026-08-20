@@ -3,8 +3,8 @@
 //! If the input starts with `http://` or `https://`, download the file to a
 //! temp directory and return the local path. Otherwise, resolve the relative
 //! path against the workspace cwd — except session-media marker paths
-//! (`sessions/<id>/files/...`, as emitted by `[图片: ...]` / `[视频: ...]` /
-//! `[语音: ...]` markers), which live under the data dir and are resolved
+//! (`sessions/<id>/files/...`, as emitted by `[image: ...]` / `[video: ...]` /
+//! `[audio: ...]` markers), which live under the data dir and are resolved
 //! there instead (see `write_session_file`, which writes under
 //! `AppConfig::sessions_root()` = `{base_dir}/sessions`).
 
@@ -16,7 +16,7 @@ pub fn is_url(s: &str) -> bool {
 }
 
 /// True if `input` is a session-media marker path (`sessions/<id>/files/...`),
-/// as produced by `write_session_file` / the `[图片: ...]` family of markers.
+/// as produced by `write_session_file` / the `[image: ...]` family of markers.
 /// These are relative to the data dir, not the workspace cwd.
 fn is_session_media_path(input: &str) -> bool {
     input.starts_with("sessions/") || input.starts_with("sessions\\")
