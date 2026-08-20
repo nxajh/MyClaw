@@ -818,6 +818,7 @@ mod tests {
             PathBuf::new(),
             "test",
             3,
+            Default::default(),
         ))
     }
 

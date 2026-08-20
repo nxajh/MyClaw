@@ -181,6 +181,13 @@ pub struct DelegationCoordinator {
     /// the full report immediately instead of via the delayed notice
     /// channel. Removed on read. (2026-08-14, sync notice B)
     sent_messages: Arc<DashMap<String, std::sync::RwLock<Vec<String>>>>,
+    /// Shared with `ShellTool`/`ShellPollTool`/`ShellKillTool` — used to kill
+    /// any shell processes a sub-agent's session still has running when its
+    /// delegation ends (timeout or `agent_kill`). See
+    /// `crate::tools::shell::kill_processes_for_session` for why this is
+    /// necessary: cancelling the delegation's future does not reach the
+    /// detached tasks tracking those processes.
+    shell_registry: crate::tools::shell::ShellRegistry,
 }
 
 impl DelegationCoordinator {
@@ -190,6 +197,7 @@ impl DelegationCoordinator {
         worktrees_root: PathBuf,
         namespace: &str,
         max_depth: u32,
+        shell_registry: crate::tools::shell::ShellRegistry,
     ) -> Self {
         Self {
             configs,
@@ -202,6 +210,7 @@ impl DelegationCoordinator {
             max_depth,
             event_tx_cell: Arc::new(OnceLock::new()),
             sent_messages: Arc::new(DashMap::new()),
+            shell_registry,
         }
     }
 
@@ -396,6 +405,10 @@ impl DelegationCoordinator {
             entry.handle.abort();
             parent_session_id
         };
+        // `abort()` only reaches the task driving the sub-agent's LLM loop —
+        // any shell process it started keeps running otherwise (see
+        // `kill_processes_for_session` docs).
+        crate::tools::shell::kill_processes_for_session(&self.shell_registry, sub_session_id).await;
         self.running.remove(sub_session_id);
         if let Some(tx) = self.event_sender() {
             if tx
@@ -788,12 +801,22 @@ impl DelegationCoordinator {
                     // this to emit `DelegationEvent::TimedOut` (distinct
                     // from a generic `Failed`). Dropping `turn_future` here
                     // cancels the sub-agent turn — the same cancellation
-                    // semantics as aborting a spawned task.
+                    // semantics as aborting a spawned task. That cancellation
+                    // does not reach any shell processes this sub-agent
+                    // started (spawn_tracked hands them off to a detached
+                    // reaper immediately, by design — see the shell module
+                    // docs) — kill them explicitly so a timed-out delegation
+                    // actually stops, not just its LLM loop.
                     tracing::warn!(
                         agent = %config.name,
                         timeout_secs,
                         "sub-agent timed out, cancelling turn"
                     );
+                    crate::tools::shell::kill_processes_for_session(
+                        &self.shell_registry,
+                        &sub_session_id,
+                    )
+                    .await;
                     Err(anyhow::Error::new(DelegationTimeout {
                         agent: config.name.clone(),
                         secs: timeout_secs,
@@ -1777,6 +1800,7 @@ mod tests {
             PathBuf::new(),
             "test",
             max_depth,
+            Default::default(),
         );
         (dc, manager)
     }
@@ -1927,6 +1951,7 @@ mod tests {
             PathBuf::new(),
             "test",
             3,
+            Default::default(),
         );
         (dc, manager, dir)
     }

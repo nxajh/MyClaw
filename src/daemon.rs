@@ -507,6 +507,7 @@ async fn build_tools(
     Arc<crate::tools::TaskBoards>,
     Arc<crate::tools::SendMessageTool>,
     Arc<crate::tools::FriendToolsCtx>,
+    crate::tools::shell::ShellRegistry,
 ) {
     let mut tools = ToolRegistry::new();
     let (builtin, shell_registry) = crate::tools::builtin_tools(Some(config.sessions_root()));
@@ -634,7 +635,7 @@ async fn build_tools(
     }
 
     tracing::info!(tool_count = tools.tool_count(), "tool registry built");
-    (tools, task_boards, send_message_tool, friend_ctx)
+    (tools, task_boards, send_message_tool, friend_ctx, shell_registry)
 }
 
 /// Build SkillManager from SKILL.md files in the base dir (P1: `{base_dir}/skills`).
@@ -1146,7 +1147,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let session_backend = build_session_backend(&config);
 
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
-    let (mut tools, task_boards, send_message_tool, friend_ctx) = build_tools(
+    let (mut tools, task_boards, send_message_tool, friend_ctx, shell_registry) = build_tools(
         &mcp_manager,
         &skills_arc,
         &shared_scheduler,
@@ -1240,6 +1241,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             config.worktrees_root(),
             &config.system.namespace,
             config.delegation.max_depth,
+            shell_registry.clone(),
         );
         let delegator_arc = Arc::new(delegator);
 
