@@ -1,27 +1,44 @@
 //! Webhook loader — webhook trigger view types + payload template rendering.
 //!
-//! Webhook jobs live in the unified jobs store (`{jobs_root}/{uuid}/meta.json`
-//! with `kind = "webhook"`); `Scheduler::webhook_jobs()` projects them into
-//! [`WebhookJobDef`] for the HTTP server. The legacy `webhooks/*.md`
-//! file-loading path was removed with the unification.
+//! Webhook channels live on unified jobs (`{jobs_root}/{uuid}/meta.json` with
+//! an optional `webhook` object — design §3.4 orthogonal trigger model);
+//! `Scheduler::webhook_jobs()` projects them into [`WebhookJobDef`] for the
+//! HTTP server. The legacy `webhooks/*.md` file-loading path was removed with
+//! the unification.
 
-/// Webhook job definition (server-facing view projected from a
-/// `kind = "webhook"` JobEntry).
+/// Webhook job definition (server-facing view projected from a JobEntry's
+/// `webhook` channel). Route derives from the job name: `POST /hooks/{route}`.
 #[derive(Debug, Clone)]
 pub struct WebhookJobDef {
     /// Owning job id — FQID `<ns>/job/<uuid>`; used for the `_job_{uuid}`
     /// session key.
     pub id: String,
-    /// URL path, e.g. "/github/issues".
-    pub path: String,
-    /// HMAC secret 或 Bearer token.
-    pub secret: Option<String>,
-    /// 认证方式：hmac（默认）或 bearer.
+    /// Route segment (the job's name, URL-safe slug): full route is
+    /// `POST /hooks/{route}`.
+    pub route: String,
+    /// HMAC secret or Bearer token (required — validated at projection).
+    pub secret: String,
+    /// Auth method: hmac (default) or bearer.
     pub auth: WebhookAuth,
-    /// 输出投递目标：last | none | channel name.
+    /// Output delivery target: last | none | channel name (from the job).
     pub target: String,
-    /// Prompt 模板（body），可含 {{path.to.field}} 占位符.
+    /// Prompt template (the job's prompt field), with `{{a.b.c}}`
+    /// placeholders rendered from the payload.
     pub prompt_template: String,
+    /// Event-type whitelist (optional; non-matching events are ignored).
+    pub events: Option<Vec<String>>,
+    /// Condition filters (AND semantics, optional).
+    pub filters: Option<Vec<crate::agents::scheduling::scheduler::WebhookFilter>>,
+    /// Disable the automatic full-payload appendix.
+    pub payload_off: bool,
+}
+
+/// Route-segment validity: lowercase URL-safe slug `[a-z0-9-]`, 1-64 chars.
+/// Names are user-facing, so validation is strict (no `_`, no unicode).
+pub fn is_route_slug(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Webhook 认证方式。
@@ -170,5 +187,24 @@ mod tests {
             render_template(template, &payload),
             "Hello {{name} not closed"
         );
+    }
+
+    // ── Route slug validation tests ────────────────────────────────────
+
+    #[test]
+    fn route_slug_accepts_lowercase_slugs() {
+        assert!(is_route_slug("github-issues"));
+        assert!(is_route_slug("r2d2"));
+        assert!(is_route_slug("a"));
+    }
+
+    #[test]
+    fn route_slug_rejects_bad_names() {
+        assert!(!is_route_slug("")); // empty
+        assert!(!is_route_slug("GitHub")); // uppercase
+        assert!(!is_route_slug("under_score")); // underscore
+        assert!(!is_route_slug("中文")); // unicode
+        assert!(!is_route_slug("has/slash"));
+        assert!(!is_route_slug(&"x".repeat(65))); // too long
     }
 }

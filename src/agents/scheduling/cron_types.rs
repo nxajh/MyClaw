@@ -128,6 +128,10 @@ pub struct RunRecord {
     pub run_at: String,
     /// Execution status.
     pub status: RunStatus,
+    /// Trigger source: "cron" (timer) or "webhook" (HTTP POST). Absent on
+    /// legacy records — treated as cron.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
     /// Execution duration in milliseconds.
     #[serde(default)]
     pub duration_ms: u64,
@@ -143,6 +147,12 @@ pub struct RunRecord {
     /// Output tokens produced.
     #[serde(default)]
     pub output_tokens: u64,
+    /// Webhook audit: received payload, truncated to 8KB (webhook runs only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// Webhook audit: first 512 chars of the rendered prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_head: Option<String>,
 }
 
 impl RunRecord {
@@ -167,6 +177,12 @@ impl RunRecord {
 
     pub fn with_output_preview(mut self, output: &str) -> Self {
         self.output_preview = output.chars().take(200).collect();
+        self
+    }
+
+    /// Tag the run's trigger source: "cron" or "webhook".
+    pub fn with_trigger(mut self, trigger: &str) -> Self {
+        self.trigger = Some(trigger.to_string());
         self
     }
 }

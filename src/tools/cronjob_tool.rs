@@ -56,11 +56,35 @@ impl Tool for CronJobTool {
                 },
                 "schedule": {
                     "type": "string",
-                    "description": "Schedule: cron expression 'sec min hour day month weekday' (Unix-style: 0=Sunday) (e.g. '0 0 9 * * *'), or 'every 30m', or 'at 2026-05-15T09:00:00+08:00'."
+                    "description": "Timer trigger: cron expression 'sec min hour day month weekday' (Unix-style: 0=Sunday) (e.g. '0 0 9 * * *'), or 'every 30m', or 'at 2026-05-15T09:00:00+08:00'. Optional — omit for webhook-only jobs; jobs need at least one trigger (schedule and/or webhook). In 'update', pass null to clear the timer."
+                },
+                "webhook": {
+                    "type": "object",
+                    "description": "HTTP trigger channel (orthogonal to schedule; both may coexist). Registers POST /hooks/{name} — the job 'name' must be a URL-safe slug ([a-z0-9-]) and is the route. In 'update', pass null to remove the channel.",
+                    "properties": {
+                        "auth": { "type": "string", "enum": ["hmac", "bearer"], "description": "Auth method. Default 'hmac' (X-Hub-Signature-256)." },
+                        "secret": { "type": "string", "description": "Required. HMAC secret or Bearer token." },
+                        "events": { "type": "array", "items": { "type": "string" }, "description": "Event-type whitelist (e.g. ['issues', 'issue_comment']). Event type comes from X-GitHub-Event / X-GitLab-Event headers or payload event_type/type. Non-matching events: 200 'ignored' + Skipped history entry." },
+                        "filters": {
+                            "type": "array",
+                            "description": "Condition filters, ALL must match (AND). Fields navigate the JSON payload by dot path.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "field": { "type": "string", "description": "e.g. 'action' or 'issue.state'" },
+                                    "equals": { "type": "string", "description": "Value equality." },
+                                    "matches": { "type": "string", "description": "Regex match." },
+                                    "not": { "type": "boolean", "description": "Negate the condition. Default false." }
+                                }
+                            }
+                        },
+                        "payload_off": { "type": "boolean", "description": "Disable the automatic full-payload appendix (pretty JSON truncated to 4000 chars, appended after the rendered prompt). Default false." }
+                    },
+                    "required": ["secret"]
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The prompt to send to the agent when the job fires."
+                    "description": "The prompt to send to the agent when the job fires. For webhook jobs this is the template: {{path.to.field}} renders payload values; {{payload}} and {{event_type}} are reserved placeholders."
                 },
                 "target": {
                     "type": "string",
@@ -178,10 +202,9 @@ impl Tool for CronJobTool {
 
 impl CronJobTool {
     fn handle_create(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-        let schedule_input = match args.get("schedule").and_then(|v| v.as_str()) {
-            Some(s) => s.to_string(),
-            None => return Ok(err_result("Missing required field: schedule")),
-        };
+        // Orthogonal trigger model: schedule is optional (webhook-only jobs),
+        // but a job needs at least one trigger channel.
+        let schedule_input = args.get("schedule").and_then(|v| v.as_str()).map(|s| s.to_string());
         let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
             None => return Ok(err_result("Missing required field: prompt")),
@@ -226,10 +249,14 @@ impl CronJobTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // Validate schedule.
-        let (schedule, schedule_kind) = match parse_schedule_input(&schedule_input) {
-            Ok(v) => v,
-            Err(e) => return Ok(err_result(&e)),
+        // Validate schedule (when present).
+        let (schedule, schedule_kind): (Option<String>, Option<ScheduleKind>) = match &schedule_input
+        {
+            Some(input) => match parse_schedule_input(input) {
+                Ok((s, k)) => (Some(s), k),
+                Err(e) => return Ok(err_result(&e)),
+            },
+            None => (None, None),
         };
 
         // Validate one-shot timestamps are in the future.
@@ -251,6 +278,17 @@ impl CronJobTool {
             if let Err(e) = validate_active_hours(hours) {
                 return Ok(err_result(&e));
             }
+        }
+
+        // Parse the optional webhook channel (orthogonal to schedule).
+        let webhook = match parse_webhook_channel(args, name.as_deref()) {
+            Ok(w) => w,
+            Err(e) => return Ok(err_result(&e)),
+        };
+        if schedule.is_none() && webhook.is_none() {
+            return Ok(err_result(
+                "Job needs at least one trigger channel: a 'schedule' (timer) and/or 'webhook' (HTTP POST /hooks/{name}).",
+            ));
         }
 
         // Parse delivery config.
@@ -294,18 +332,29 @@ impl CronJobTool {
             provider: provider.clone(),
             last_failure_alert_at: None,
             context_policy: crate::config::scheduler::ContextPolicy::Inject,
+            webhook: webhook.clone(),
         };
 
         match self.scheduler.add_job(entry) {
             Ok(id) => {
                 let mut details = vec![
                     format!(
-                        "Created cron job '{}' (id: {})",
+                        "Created job '{}' (id: {})",
                         name.as_deref().unwrap_or("unnamed"),
                         id
                     ),
-                    format!("  schedule: {}", schedule),
                 ];
+                if let Some(ref s) = schedule {
+                    details.push(format!("  schedule: {}", s));
+                }
+                if let Some(ref wh) = webhook {
+                    details.push(format!(
+                        "  webhook: POST /hooks/{} (auth: {}{})",
+                        name.as_deref().unwrap_or("?"),
+                        wh.auth,
+                        if wh.payload_off { ", payload off" } else { "" }
+                    ));
+                }
                 if let Some(ref m) = model {
                     details.push(format!("  model: {}", m));
                 }
@@ -401,20 +450,69 @@ impl CronJobTool {
             update.provider = Some(Some(v.to_string()));
         }
 
-        // If schedule is being updated, validate it.
-        if let Some(schedule_input) = args.get("schedule").and_then(|v| v.as_str()) {
-            let (schedule, _kind) = match parse_schedule_input(schedule_input) {
-                Ok(v) => v,
-                Err(e) => return Ok(err_result(&e)),
-            };
-            update.schedule = Some(schedule);
-            // Note: schedule_kind update is not supported via tool —
-            // user should remove and recreate to change schedule kind.
+        // If schedule is being updated, validate it. `schedule: null` clears
+        // the timer channel (webhook-only job); `schedule: ""` is rejected.
+        if let Some(v) = args.get("schedule") {
+            if v.is_null() {
+                update.schedule = None;
+                update.schedule_changed = true;
+                update.schedule_kind = None;
+            } else if let Some(schedule_input) = v.as_str() {
+                if schedule_input.trim().is_empty() {
+                    return Ok(err_result("'schedule' must be a cron/every/at expression or null (to clear)."));
+                }
+                let (schedule, kind) = match parse_schedule_input(schedule_input) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(err_result(&e)),
+                };
+                if let Some(ScheduleKind::At { ref at }) = kind {
+                    if let Err(e) = validate_at_timestamp(at) {
+                        return Ok(err_result(&e));
+                    }
+                }
+                update.schedule = Some(schedule);
+                update.schedule_kind = kind;
+                update.schedule_changed = true;
+            }
+        }
+
+        // Webhook channel: object to set/change, null to remove.
+        if let Some(v) = args.get("webhook") {
+            let current_name = args
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    self.scheduler
+                        .jobs()
+                        .iter()
+                        .find(|j| j.id == id)
+                        .and_then(|j| j.name.clone())
+                });
+            if v.is_null() {
+                update.webhook = None;
+                update.webhook_changed = true;
+            } else {
+                match parse_webhook_channel(&{
+                    // pass webhook object through the same parser
+                    let mut a = serde_json::Map::new();
+                    a.insert("webhook".to_string(), v.clone());
+                    serde_json::Value::Object(a)
+                }, current_name.as_deref()) {
+                    Ok(Some(wh)) => {
+                        update.webhook = Some(Some(wh));
+                        update.webhook_changed = true;
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Ok(err_result(&e)),
+                }
+            }
         }
 
         // Check that at least one field is being updated.
         let has_update = update.name.is_some()
-            || update.schedule.is_some()
+            || update.schedule_changed
+            || update.webhook_changed
             || update.prompt.is_some()
             || update.target.is_some()
             || update.tz.is_some()
@@ -428,7 +526,8 @@ impl CronJobTool {
             || update.max_runs.is_some()
             || update.delete_after_run.is_some()
             || update.model.is_some()
-            || update.provider.is_some();
+            || update.provider.is_some()
+            || update.trigger_now;
 
         if !has_update {
             return Ok(err_result(
@@ -527,7 +626,7 @@ impl CronJobTool {
                 status = status,
                 id = job.id,
                 name = name,
-                schedule = job.schedule,
+                schedule = job.schedule.as_deref().unwrap_or("(webhook-only)"),
                 target = job.target,
                 next = next,
                 last = last,
@@ -614,7 +713,7 @@ impl CronJobTool {
                     success: true,
                     output: format!(
                         "Job '{}' ({}) scheduled for immediate execution: fires on the next scheduler tick (within ~30s).\nSchedule: {}\nTarget: {}{}",
-                        name, job.id, job.schedule, job.target, note
+                        name, job.id, job.schedule.as_deref().unwrap_or("(webhook-only)"), job.target, note
                     ),
                     error: None,
                 })
@@ -737,6 +836,93 @@ fn format_run_record(i: usize, run: &crate::agents::scheduling::cron_types::RunR
         run.duration_ms,
         error_info,
     )
+}
+
+/// Parse the optional `webhook` channel from create args (§3.4 orthogonal
+/// model). Returns Ok(None) when no webhook params are present. Requires a
+/// URL-safe slug `name` (the route segment) and a non-empty secret.
+fn parse_webhook_channel(
+    args: &serde_json::Value,
+    name: Option<&str>,
+) -> Result<Option<scheduler::WebhookDef>, String> {
+    let Some(wh) = args.get("webhook") else { return Ok(None) };
+    let Some(obj) = wh.as_object() else {
+        return Err("'webhook' must be an object: { auth?, secret, events?, filters?, payload_off? }".to_string());
+    };
+    if obj.is_empty() {
+        return Ok(None);
+    }
+
+    let secret = obj
+        .get("secret")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "'webhook.secret' is required (HMAC key or Bearer token)".to_string())?
+        .to_string();
+
+    let auth = obj
+        .get("auth")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hmac")
+        .to_string();
+    if !matches!(auth.as_str(), "hmac" | "bearer") {
+        return Err(format!("invalid 'webhook.auth' '{}': use \"hmac\" or \"bearer\"", auth));
+    }
+
+    let route = name.unwrap_or("");
+    if !crate::agents::scheduling::webhook_loader::is_route_slug(route) {
+        return Err(format!(
+            "a URL-safe slug 'name' ([a-z0-9-], 1-64 chars) is required for webhook jobs: got '{:?}' — the name IS the route (POST /hooks/{{name}})",
+            route
+        ));
+    }
+    if route == "agent" || route == "wake" {
+        return Err(format!(
+            "'{}' is a reserved built-in route (/hooks/agent, /hooks/wake): pick another name",
+            route
+        ));
+    }
+
+    let events = obj
+        .get("events")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>());
+    let filters = obj.get("filters").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| {
+                let f = v.as_object()?;
+                Some(scheduler::WebhookFilter {
+                    field: f.get("field")?.as_str()?.to_string(),
+                    equals: f.get("equals").and_then(|x| x.as_str()).map(String::from),
+                    matches: f.get("matches").and_then(|x| x.as_str()).map(String::from),
+                    not: f.get("not").and_then(|x| x.as_bool()).unwrap_or(false),
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    if let Some(fs) = &filters {
+        for f in fs {
+            if f.field.is_empty() || (f.equals.is_none() && f.matches.is_none()) {
+                return Err(format!(
+                    "invalid webhook filter on '{}': needs 'equals' or 'matches'",
+                    f.field
+                ));
+            }
+        }
+    }
+
+    let payload_off = obj
+        .get("payload_off")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    Ok(Some(scheduler::WebhookDef {
+        auth,
+        secret,
+        events,
+        filters,
+        payload_off,
+    }))
 }
 
 /// Parse schedule input: cron expression, "every 30m", or "at <ISO>".
