@@ -1078,13 +1078,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         }
     }
 
-    // Read heartbeat config early for the scheduler.
-    let heartbeat_config = if config.scheduler.heartbeat.enabled {
-        Some(config.scheduler.heartbeat.clone())
-    } else {
-        None
-    };
-
     // Idle-time memory distillation config (None disables the distill tick).
     let distill_config = if config.memory.distill_enabled {
         Some(crate::agents::scheduling::scheduler::DistillConfig {
@@ -1099,7 +1092,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         jobs_root,
         &config.system.namespace,
         tz_name.clone(),
-        heartbeat_config,
         distill_config,
         scheduler_tx.clone(),
         config.last_channel_path(),
@@ -1620,10 +1612,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         });
     }
 
-    // ── Scheduler task (heartbeat + cron via mpsc) ──────────────────────────
+    // ── Scheduler task (cron via mpsc) ────────────────────────────────────────
 
     {
-        // Run the scheduler (it was created earlier with heartbeat config).
+        // Run the scheduler loop (cron jobs + distill checks).
         if shared_scheduler.should_run() {
             let scheduler = Arc::clone(&shared_scheduler);
             tokio::spawn(async move {

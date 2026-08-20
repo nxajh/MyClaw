@@ -65,45 +65,6 @@ pub(crate) async fn run_scheduled_turn(
         .map(|tr| tr.text)
 }
 
-/// Execute a heartbeat turn as an independent spawned task.
-pub(crate) async fn run_heartbeat_task(
-    orch: Arc<OrchestratorCtx>,
-    target_channel: Option<String>,
-    target_account: Option<String>,
-    prompt: String,
-    due: Vec<crate::agents::heartbeat_tasks::HeartbeatTask>,
-    mut state: crate::agents::heartbeat_tasks::HeartbeatState,
-    state_path: std::path::PathBuf,
-) {
-    let session_key = format!("_heartbeat_{}", uuid::Uuid::new_v4());
-    let result = run_scheduled_turn(&orch, &session_key, &prompt, None).await;
-
-    // Update task state on success.
-    if result.is_ok() {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        for task in &due {
-            state.last_run.insert(task.name.clone(), now_ms);
-        }
-        state.save(&state_path);
-    }
-
-    match result {
-        Ok(response) if is_silent_ok(&response, "heartbeat") => {
-            tracing::debug!("heartbeat: nothing needs attention");
-        }
-        Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(&orch, target_channel, target_account, None, &response).await;
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(err = %e, "heartbeat run failed");
-        }
-    }
-}
-
 /// Execute a cron job turn as an independent spawned task.
 pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::CronTrigger) {
     let super::CronTrigger {
@@ -227,7 +188,7 @@ async fn resolve_user_routing_key(
     Some(format!("{}:{}:{}", ch_type, acc_id, recipient))
 }
 
-/// Send a response to the configured target channel (used by heartbeat/cron).
+/// Send a response to the configured target channel (used by cron/webhook).
 async fn send_to_target_internal(
     orch: &OrchestratorCtx,
     target_channel: Option<String>,

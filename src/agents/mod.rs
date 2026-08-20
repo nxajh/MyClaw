@@ -36,10 +36,9 @@ mod user_messages;
 pub mod user_profile;
 pub mod user_registry;
 
-/// Scheduling: cron jobs, webhooks, heartbeat scheduler.
+/// Scheduling: cron jobs, webhooks, scheduler loop.
 pub mod scheduling;
 pub use scheduling::cron_loader;
-pub use scheduling::heartbeat_tasks;
 pub use scheduling::webhook_loader;
 pub use scheduling::work_unit;
 

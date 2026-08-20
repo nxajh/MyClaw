@@ -315,7 +315,7 @@ pub struct ChannelInboundMessage {
     /// RFC channel-role-split §1.1: turn-scoped "is there a human user
     /// present?" marker. `Interactive` (default) for user messages, daemon
     /// recovery synthetic messages and delegation-wake notices; `Background`
-    /// for cron/heartbeat synthesized turns (scheduled.rs). Drives
+    /// for cron/webhook synthesized turns (scheduled.rs). Drives
     /// `Session::turn_headless` + `prompt_config.run_mode` inside
     /// `process_turn` — NOT a delivery handle (that's the channel registry).
     /// Runtime-only; never persisted.

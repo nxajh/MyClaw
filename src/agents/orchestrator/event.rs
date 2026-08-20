@@ -25,7 +25,7 @@ pub enum OrchestratorEvent {
         seq: u64,
     },
 
-    /// Scheduler fired — either a heartbeat tick or a cron job. Carried
+    /// Scheduler fired — a cron job or distill check. Carried
     /// verbatim from the existing `SchedulerEvent` shape so the switch is
     /// a one-line conversion in E29.
     Scheduled(super::SchedulerEvent),

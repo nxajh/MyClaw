@@ -130,14 +130,13 @@ impl SessionManager {
 
     /// RFC channel-role-split §1.2: parse the routing key's
     /// `(channel_type, account_id)` account pair. Headless keys — cron
-    /// (`_cron_*`), heartbeat (`_heartbeat_*`) and sub-agent session ids —
+    /// (`_job_*`), webhook (`_webhook_*`) and sub-agent session ids —
     /// resolve to `None` (no delivery target). Ordinary user keys look like
     /// `channel:account:sender`.
     fn account_key_for_routing_key(routing_key: &str) -> Option<(String, String)> {
         // Sub-agent session ids look like "myclaw/s/<uuid>" (no colons) —
         // they never resolve to a delivery channel (RFC §1.2).
-        if routing_key.starts_with("_cron_")
-            || routing_key.starts_with("_heartbeat_")
+        if routing_key.starts_with('_')
             || routing_key.starts_with("myclaw/s/")
         {
             return None;
