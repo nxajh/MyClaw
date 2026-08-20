@@ -2814,6 +2814,9 @@ mod tests {
             jobs[0].schedule,
             Some(ScheduleSpec::Kind(ScheduleKind::Cron { ref expr })) if expr == "0 9 * * *"
         ));
+        // The fold happens at load; an empty update forces a save so the
+        // canonical object hits the disk.
+        sched.update_job(id, JobUpdate::default()).unwrap();
         // Persisted back as the canonical object (no bare string, no
         // schedule_kind key).
         let saved: serde_json::Value = serde_json::from_str(
@@ -2854,6 +2857,7 @@ mod tests {
             jobs[0].schedule,
             Some(ScheduleSpec::Kind(ScheduleKind::Every { interval_ms: 1_800_000 }))
         ));
+        sched.update_job(id, JobUpdate::default()).unwrap();
         let saved: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(
                 jobs_root.join(crate::ids::dir_name(id)).join("meta.json"),
