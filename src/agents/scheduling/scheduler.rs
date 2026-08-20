@@ -512,6 +512,46 @@ impl Scheduler {
 
 // ── CRUD operations ─────────────────────────────────────────────────────────
 
+/// Forensic summary of a job at the moment it was removed, captured while
+/// its run log JSONL file (the durable evidence source, per §3.4) still
+/// exists — the per-job directory is deleted right after (#77).
+#[derive(Debug, Clone)]
+pub struct JobRemovalAudit {
+    pub id: String,
+    pub name: String,
+    pub run_log_count: usize,
+    pub last_status: Option<&'static str>,
+    pub last_output_preview: Option<String>,
+}
+
+impl JobRemovalAudit {
+    fn capture(id: String, name: Option<String>, run_log: Vec<RunRecord>) -> Self {
+        let last = run_log.first();
+        Self {
+            name: name.unwrap_or_else(|| id.clone()),
+            id,
+            run_log_count: run_log.len(),
+            last_status: last.map(|r| r.status.as_str()),
+            last_output_preview: last.map(|r| r.output_preview.clone()),
+        }
+    }
+
+    /// Emit the INFO audit line. Called for both the explicit `remove`
+    /// path and the silent `delete_after_run` auto-delete path — the
+    /// journal record is what survives once the directory is gone.
+    fn log(&self, action: &str) {
+        tracing::info!(
+            job_id = %self.id,
+            job_name = %self.name,
+            run_log_entries = self.run_log_count,
+            last_status = self.last_status.unwrap_or("(no runs)"),
+            last_output_preview = %self.last_output_preview.as_deref().unwrap_or(""),
+            "{}",
+            action,
+        );
+    }
+}
+
 impl Scheduler {
     /// Get all jobs (cloned).
     pub fn jobs(&self) -> Vec<JobEntry> {
@@ -694,16 +734,34 @@ impl Scheduler {
         }
     }
 
-    /// Remove a job. Returns true if found and removed.
-    pub fn remove_job(&self, id: &str) -> anyhow::Result<bool> {
+    /// Remove a job, deleting its per-job directory (meta.json + run_logs/)
+    /// along with it. Returns the removal audit if the job was found.
+    pub fn remove_job(&self, id: &str) -> anyhow::Result<Option<JobRemovalAudit>> {
+        // Capture the audit trail (name + run history) before the run log
+        // file is deleted — it's the only evidence left once the directory
+        // is gone (#77).
+        let audit = {
+            let data = self.jobs.read();
+            data.jobs.iter().find(|j| j.id == id).map(|j| {
+                JobRemovalAudit::capture(j.id.clone(), j.name.clone(), self.read_run_log(id, usize::MAX))
+            })
+        };
+        let Some(audit) = audit else {
+            return Ok(None);
+        };
+
         let mut data = self.jobs.write();
         let len_before = data.jobs.len();
         data.jobs.retain(|j| j.id != id);
         if data.jobs.len() < len_before {
             self.save_to_disk_inner(&data)?;
-            Ok(true)
+            drop(data);
+            audit.log("job removed");
+            Ok(Some(audit))
         } else {
-            Ok(false)
+            // Raced with a concurrent removal between the read snapshot and
+            // the write lock — nothing to delete.
+            Ok(None)
         }
     }
 
@@ -827,21 +885,32 @@ impl Scheduler {
     /// Get jobs that should be auto-deleted (reached max_runs with delete_after_run).
     pub fn drain_auto_delete(&self) -> Vec<String> {
         let mut data = self.jobs.write();
-        let to_delete: Vec<String> = data
+        let to_delete: Vec<(String, Option<String>)> = data
             .jobs
             .iter()
             .filter(|j| j.max_runs.is_some_and(|max| j.completed_runs >= max) && j.delete_after_run)
-            .map(|j| j.id.clone())
+            .map(|j| (j.id.clone(), j.name.clone()))
             .collect();
-        if !to_delete.is_empty() {
-            data.jobs.retain(|j| !to_delete.contains(&j.id));
-            let _ = self.save_to_disk_inner(&data);
-            tracing::info!(
-                count = to_delete.len(),
-                "auto-deleted completed one-shot jobs"
-            );
+        if to_delete.is_empty() {
+            return Vec::new();
         }
-        to_delete
+        // Capture each job's run history before its directory disappears
+        // (#77) — this path is silent to any delivery channel by design (the
+        // job's own output was already delivered), so the journal audit
+        // line below is the only record.
+        let audits: Vec<JobRemovalAudit> = to_delete
+            .iter()
+            .map(|(id, name)| JobRemovalAudit::capture(id.clone(), name.clone(), self.read_run_log(id, usize::MAX)))
+            .collect();
+        let ids: Vec<String> = to_delete.into_iter().map(|(id, _)| id).collect();
+        data.jobs.retain(|j| !ids.contains(&j.id));
+        let _ = self.save_to_disk_inner(&data);
+        drop(data);
+        tracing::info!(count = ids.len(), "auto-deleted completed one-shot jobs");
+        for audit in &audits {
+            audit.log("job auto-deleted (max_runs + delete_after_run)");
+        }
+        ids
     }
 
     /// Read recent run log entries from the JSONL file.
@@ -917,6 +986,17 @@ impl Scheduler {
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────────
+
+/// Idempotently remove a directory tree. A missing directory is not an
+/// error (#77): the caller may be pruning a dir that a previous sweep, or a
+/// concurrent removal, already cleaned up.
+fn delete_job_dir(dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
 
 /// Fold any Legacy (plain-string) schedule specs into the canonical Kind
 /// form so the store invariant holds: persisted `schedule` is always the
@@ -1055,7 +1135,14 @@ impl Scheduler {
             std::fs::rename(&tmp, &meta)?;
             seen_dirs.insert(dir);
         }
-        // Delete per-job dirs whose job is gone from the dataset.
+        // Delete per-job dirs whose job is gone from the dataset. #77: this
+        // used to keep run_logs/ around (deleting only meta.json) so
+        // debugging a deleted job's last run stayed possible — but that
+        // left an orphan directory with no meta.json behind forever (worse
+        // than the residue it was meant to avoid; see #77's rejected
+        // alternative). Callers that need the run log for audit purposes
+        // (remove_job / drain_auto_delete) now capture it *before* calling
+        // this function, so the directory can be removed outright here.
         if let Ok(rd) = std::fs::read_dir(&self.jobs_root) {
             for entry in rd.flatten() {
                 let p = entry.path();
@@ -1063,14 +1150,8 @@ impl Scheduler {
                     continue; // run_logs/ and unknown dirs are left alone
                 }
                 if !seen_dirs.contains(&p) {
-                    // Only remove when the dir holds no run logs (keep logs).
-                    let has_logs = p.join("run_logs").is_dir();
-                    if has_logs {
-                        if let Err(e) = std::fs::remove_file(p.join("meta.json")) {
-                            tracing::warn!(err = %e, "jobs store: failed to prune stale meta.json");
-                        }
-                    } else if let Err(e) = std::fs::remove_dir_all(&p) {
-                        tracing::warn!(err = %e, "jobs store: failed to prune job dir");
+                    if let Err(e) = delete_job_dir(&p) {
+                        tracing::warn!(err = %e, dir = %p.display(), "jobs store: failed to prune removed job's directory");
                     }
                 }
             }
@@ -2816,9 +2897,87 @@ mod tests {
         // The legacy single file must NOT be (re)created.
         assert!(!jobs_root.join("jobs.json").exists());
 
-        // Remove → meta.json gone.
-        assert!(sched.remove_job(&id).unwrap());
+        // Remove → meta.json (and the whole per-job dir) gone.
+        assert!(sched.remove_job(&id).unwrap().is_some());
         assert!(!meta.exists());
+    }
+
+    #[test]
+    fn remove_job_deletes_run_logs_dir_and_returns_audit() {
+        // #77: remove_job used to leave the per-job directory (meta.json +
+        // run_logs/) behind forever. It must now be gone, and the caller
+        // must get back enough to report what was deleted.
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let sched = test_scheduler(dir.path());
+
+        let mut entry = test_entry("0 9 * * *");
+        entry.name = Some("probe".to_string());
+        let id = sched.add_job(entry).unwrap();
+        let job_dir = jobs_root.join(crate::ids::dir_name(&id));
+
+        sched.append_run_log_inner(
+            &id,
+            &RunRecord {
+                run_at: "2026-08-20T13:00:00Z".to_string(),
+                status: RunStatus::Ok,
+                output_preview: "first run ok".to_string(),
+                ..Default::default()
+            },
+        );
+        sched.append_run_log_inner(
+            &id,
+            &RunRecord {
+                run_at: "2026-08-20T13:05:00Z".to_string(),
+                status: RunStatus::Error,
+                output_preview: "second run failed".to_string(),
+                ..Default::default()
+            },
+        );
+        assert!(job_dir.join("run_logs").is_dir());
+
+        let audit = sched.remove_job(&id).unwrap().expect("job was present");
+        assert_eq!(audit.name, "probe");
+        assert_eq!(audit.run_log_count, 2);
+        assert_eq!(audit.last_status, Some("error"));
+        assert_eq!(audit.last_output_preview.as_deref(), Some("second run failed"));
+
+        // The whole per-job directory is gone — not just meta.json.
+        assert!(!job_dir.exists());
+
+        // Removing again reports "not found", not a stale audit.
+        assert!(sched.remove_job(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn drain_auto_delete_deletes_job_dir_too() {
+        // #77: the auto-delete path (max_runs + delete_after_run) had the
+        // same directory-leak bug as explicit remove.
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        let sched = test_scheduler(dir.path());
+
+        let mut entry = test_entry("0 9 * * *");
+        entry.name = Some("one-shot-probe".to_string());
+        entry.max_runs = Some(1);
+        entry.completed_runs = 1;
+        entry.delete_after_run = true;
+        let id = sched.add_job(entry).unwrap();
+        let job_dir = jobs_root.join(crate::ids::dir_name(&id));
+        sched.append_run_log_inner(
+            &id,
+            &RunRecord {
+                run_at: "2026-08-20T13:04:39Z".to_string(),
+                status: RunStatus::Ok,
+                output_preview: "done".to_string(),
+                ..Default::default()
+            },
+        );
+        assert!(job_dir.is_dir());
+
+        let deleted = sched.drain_auto_delete();
+        assert_eq!(deleted, vec![id]);
+        assert!(!job_dir.exists());
     }
 
     // ── Orthogonal trigger model (§3.4) tests ─────────────────────────

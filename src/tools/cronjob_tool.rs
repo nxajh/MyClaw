@@ -540,10 +540,71 @@ impl CronJobTool {
             ));
         }
 
+        // Echo which fields this call actually touched. Without this, every
+        // successful update returns the identical "Job 'x' updated." string,
+        // which makes a legitimate sequence of field-by-field patches look
+        // like a stuck loop to the NoProgress loop breaker (same tool +
+        // different args + same result, N times in a row) — see #76.
+        let mut changed_fields = Vec::new();
+        if update.name.is_some() {
+            changed_fields.push("name");
+        }
+        if update.schedule_changed {
+            changed_fields.push("schedule");
+        }
+        if update.webhook_changed {
+            changed_fields.push("webhook");
+        }
+        if update.prompt.is_some() {
+            changed_fields.push("prompt");
+        }
+        if update.target.is_some() {
+            changed_fields.push("target");
+        }
+        if update.tz.is_some() {
+            changed_fields.push("tz");
+        }
+        if update.active_hours.is_some() {
+            changed_fields.push("active_hours");
+        }
+        if update.enabled.is_some() {
+            changed_fields.push("enabled");
+        }
+        if update.delivery.is_some() {
+            changed_fields.push("delivery");
+        }
+        if update.enabled_tools.is_some() {
+            changed_fields.push("enabled_tools");
+        }
+        if update.disabled_tools.is_some() {
+            changed_fields.push("disabled_tools");
+        }
+        if update.retry.is_some() {
+            changed_fields.push("retry");
+        }
+        if update.failure_alert.is_some() {
+            changed_fields.push("failure_alert");
+        }
+        if update.max_runs.is_some() {
+            changed_fields.push("max_runs");
+        }
+        if update.delete_after_run.is_some() {
+            changed_fields.push("delete_after_run");
+        }
+        if update.model.is_some() {
+            changed_fields.push("model");
+        }
+        if update.provider.is_some() {
+            changed_fields.push("provider");
+        }
+        if update.trigger_now {
+            changed_fields.push("trigger_now");
+        }
+
         match self.scheduler.update_job(&id, update) {
             Ok(true) => Ok(ToolResult {
                 success: true,
-                output: format!("Job '{}' updated.", id),
+                output: format!("Job '{}' updated: {}.", id, changed_fields.join(", ")),
                 error: None,
             }),
             Ok(false) => Ok(err_result(&format!("Job '{}' not found.", id))),
@@ -739,12 +800,15 @@ impl CronJobTool {
         };
 
         match self.scheduler.remove_job(&id) {
-            Ok(true) => Ok(ToolResult {
+            Ok(Some(audit)) => Ok(ToolResult {
                 success: true,
-                output: format!("Job '{}' removed.", id),
+                output: format!(
+                    "Job '{}' removed ({} run log entries deleted).",
+                    audit.name, audit.run_log_count
+                ),
                 error: None,
             }),
-            Ok(false) => Ok(err_result(&format!("Job '{}' not found.", id))),
+            Ok(None) => Ok(err_result(&format!("Job '{}' not found.", id))),
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -1082,5 +1146,108 @@ mod webhook_parse_tests {
         .unwrap()
         .unwrap();
         assert_eq!(wh.filters.as_deref().map(|f| f.len()), Some(1));
+    }
+}
+
+#[cfg(test)]
+mod update_echo_tests {
+    use super::*;
+    use crate::agents::scheduling::scheduler::Scheduler;
+
+    fn test_tool(dir: &std::path::Path) -> CronJobTool {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            dir.join("jobs"),
+            "test",
+            "UTC".to_string(),
+            None,
+            tx,
+            dir.join("last_channel"),
+            dir.join("last_recipient"),
+        );
+        let entry = JobEntry {
+            id: String::new(),
+            schedule: Some(ScheduleSpec::cron("0 9 * * *")),
+            webhook: None,
+            prompt: "p".to_string(),
+            target: "last".to_string(),
+            name: Some("probe".to_string()),
+            tz: None,
+            active_hours: None,
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            created_at: None,
+            delivery: None,
+            last_runs: Vec::new(),
+            enabled_tools: None,
+            disabled_tools: None,
+            retry: None,
+            failure_alert: None,
+            consecutive_errors: 0,
+            consecutive_skipped: 0,
+            max_runs: None,
+            completed_runs: 0,
+            delete_after_run: false,
+            model: None,
+            provider: None,
+            last_failure_alert_at: None,
+            context_policy: crate::config::scheduler::ContextPolicy::Inject,
+        };
+        sched.add_job(entry).unwrap();
+        CronJobTool::new(sched)
+    }
+
+    fn job_id(tool: &CronJobTool) -> String {
+        tool.scheduler.jobs()[0].id.clone()
+    }
+
+    #[test]
+    fn update_echoes_only_the_changed_fields() {
+        // #76: five consecutive patches to *different* fields must produce
+        // five *different* result strings, or the NoProgress loop breaker
+        // (same tool + different args + same result, N times) kills a
+        // perfectly legitimate field-by-field update sequence.
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = test_tool(tmp.path());
+        let id = job_id(&tool);
+
+        let cases: Vec<(serde_json::Value, &str)> = vec![
+            (serde_json::json!({"id": &id, "target": "wechat"}), "target"),
+            (serde_json::json!({"id": &id, "schedule": "every 2m"}), "schedule"),
+            (
+                serde_json::json!({"id": &id, "active_hours": "09:00-18:00"}),
+                "active_hours",
+            ),
+            (serde_json::json!({"id": &id, "tz": "Asia/Shanghai"}), "tz"),
+            (serde_json::json!({"id": &id, "enabled": false}), "enabled"),
+        ];
+
+        let mut outputs = std::collections::HashSet::new();
+        for (args, expected_field) in &cases {
+            let result = tool.handle_update(args).unwrap();
+            assert!(result.success, "update failed: {:?}", result.error);
+            assert!(
+                result.output.contains(expected_field),
+                "expected '{}' to mention field '{}'",
+                result.output,
+                expected_field
+            );
+            outputs.insert(result.output.clone());
+        }
+        assert_eq!(
+            outputs.len(),
+            cases.len(),
+            "every distinct-field update must produce a distinct result string"
+        );
+    }
+
+    #[test]
+    fn update_with_no_fields_is_still_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = test_tool(tmp.path());
+        let id = job_id(&tool);
+        let result = tool.handle_update(&serde_json::json!({"id": &id})).unwrap();
+        assert!(!result.success);
     }
 }
