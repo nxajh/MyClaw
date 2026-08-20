@@ -15,11 +15,20 @@ pub fn is_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
-/// True if `input` is a session-media marker path (`sessions/<id>/files/...`),
-/// as produced by `write_session_file` / the `[image: ...]` family of markers.
-/// These are relative to the data dir, not the workspace cwd.
+/// True if `input` has the exact `sessions/<id>/files/<name>` shape produced
+/// by `write_session_file` / the `[image: ...]` family of markers. Requires
+/// a non-empty id segment and a literal `files` segment rather than just a
+/// `sessions/` prefix, so an unrelated workspace directory that happens to
+/// be named `sessions/` (e.g. a PHP/Express session store) isn't hijacked
+/// into resolving against the data dir instead of cwd.
 fn is_session_media_path(input: &str) -> bool {
-    input.starts_with("sessions/") || input.starts_with("sessions\\")
+    let mut segments = input.replace('\\', "/");
+    segments = segments.trim_start_matches("./").to_string();
+    let mut parts = segments.split('/');
+    parts.next() == Some("sessions")
+        && parts.next().is_some_and(|id| !id.is_empty())
+        && parts.next() == Some("files")
+        && parts.next().is_some_and(|name| !name.is_empty())
 }
 
 /// Resolve a path-or-URL to a local file path.
@@ -158,5 +167,29 @@ fn infer_extension_from_url(url: &str, content_type: &str) -> &'static str {
         }
     } else {
         "bin"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_media_path_requires_full_shape() {
+        assert!(is_session_media_path("sessions/abc123/files/photo.png"));
+        assert!(is_session_media_path("sessions\\abc123\\files\\photo.png"));
+        assert!(is_session_media_path("./sessions/abc123/files/photo.png"));
+    }
+
+    #[test]
+    fn plain_sessions_prefix_is_not_hijacked() {
+        // A workspace's own `sessions/` directory (e.g. a PHP/Express session
+        // store) must not be misrouted to the data dir just because it starts
+        // with "sessions/".
+        assert!(!is_session_media_path("sessions/config.php"));
+        assert!(!is_session_media_path("sessions/abc123/photo.png"));
+        assert!(!is_session_media_path("sessions//files/photo.png"));
+        assert!(!is_session_media_path("sessions/abc123/files/"));
+        assert!(!is_session_media_path("sessionsfoo/abc123/files/photo.png"));
     }
 }
