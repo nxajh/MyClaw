@@ -63,6 +63,7 @@ pub use delegation::{
     AgentMail, AgentMessage, DelegationEvent, MessageKind, render_agent_mail_reminder,
 };
 pub use delegation_coordinator::DelegationCoordinator;
+pub(crate) use delegation_coordinator::SUB_AGENT_TIMEOUT_MAX_SECS;
 pub use delegator::{AgentDelegator, AgentMessenger};
 pub use error::AgentError;
 pub use loop_breaker::{LoopBreak, LoopBreakReason, LoopBreaker, LoopBreakerConfig};

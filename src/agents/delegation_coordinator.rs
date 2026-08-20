@@ -45,8 +45,14 @@ use crate::ids::{Fqid, TYPE_SESSION};
 const SUB_AGENT_TIMEOUT_DEFAULT_SECS: u64 = 1200;
 
 /// Hard ceiling: no delegation may run longer than this, tool-call `timeout`
-/// included — there is no per-agent override.
-const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
+/// included — there is no per-agent override. `pub(crate)` so
+/// `tools::delegate::AgentDelegateTool::preferred_timeout_secs` can use it
+/// as the floor for the *generic* per-tool-call timeout `ToolExecutor`
+/// applies to every tool — without that override, that outer wrapper
+/// (`[agent] tool_timeout_secs`, default far below this) would silently
+/// drop the whole `agent_delegate` call before a delegation ever gets to
+/// run for the `timeout` its own caller actually asked for.
+pub(crate) const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
 
 /// Capacity of each running sub-agent's inbox (parent → sub messages).
 const SUB_AGENT_INBOX_CAPACITY: usize = 64;

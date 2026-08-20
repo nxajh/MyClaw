@@ -111,6 +111,18 @@ impl Tool for AgentDelegateTool {
         20_000
     }
 
+    /// Without this, `ToolExecutor::run_tool` would wrap this call in its
+    /// own generic per-tool-call timeout (`[agent] tool_timeout_secs`,
+    /// commonly far below a minute-scale delegation budget) instead of the
+    /// `timeout` this call's own `args` may request — silently dropping the
+    /// whole `agent_delegate` call, and everything the sub-agent was doing,
+    /// before the delegation's own internal timeout ever gets a chance to
+    /// fire. Floor it at the delegation system's own hard ceiling so the
+    /// generic wrapper can never fire first for any valid `timeout`.
+    fn preferred_timeout_secs(&self) -> Option<u64> {
+        Some(crate::agents::SUB_AGENT_TIMEOUT_MAX_SECS)
+    }
+
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -232,6 +244,21 @@ mod tests {
         fn list_available(&self) -> Vec<(String, Option<String>)> {
             vec![]
         }
+    }
+
+    #[test]
+    fn preferred_timeout_floors_the_generic_tool_call_wrapper() {
+        // Without this override, ToolExecutor::run_tool wraps the whole
+        // agent_delegate call in its own generic per-tool-call timeout —
+        // oblivious to a `timeout` argument the call itself might request —
+        // and drops it before the delegation's own internal timeout logic
+        // ever runs. Must floor at the delegation system's hard ceiling so
+        // that outer wrapper can never fire first for any valid `timeout`.
+        let tool = AgentDelegateTool::new(Arc::new(StubDelegator));
+        assert_eq!(
+            tool.preferred_timeout_secs(),
+            Some(crate::agents::SUB_AGENT_TIMEOUT_MAX_SECS)
+        );
     }
 
     #[test]
