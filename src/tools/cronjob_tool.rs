@@ -895,19 +895,26 @@ fn parse_webhook_channel(
         .get("events")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>());
-    let filters = obj.get("filters").and_then(|v| v.as_array()).map(|arr| {
-        arr.iter()
-            .filter_map(|v| {
-                let f = v.as_object()?;
-                Some(scheduler::WebhookFilter {
-                    field: f.get("field")?.as_str()?.to_string(),
-                    equals: f.get("equals").and_then(|x| x.as_str()).map(String::from),
-                    matches: f.get("matches").and_then(|x| x.as_str()).map(String::from),
-                    not: f.get("not").and_then(|x| x.as_bool()).unwrap_or(false),
-                })
-            })
-            .collect::<Vec<_>>()
-    });
+    let filters = if let Some(arr) = obj.get("filters").and_then(|v| v.as_array()) {
+        let mut out = Vec::new();
+        for v in arr {
+            let Some(f) = v.as_object() else {
+                return Err("Each filter must be an object {field, equals/matches, not?}".to_string());
+            };
+            let Some(field) = f.get("field").and_then(|x| x.as_str()) else {
+                return Err("Webhook filter requires a 'field' property (string)".to_string());
+            };
+            out.push(scheduler::WebhookFilter {
+                field: field.to_string(),
+                equals: f.get("equals").and_then(|x| x.as_str()).map(String::from),
+                matches: f.get("matches").and_then(|x| x.as_str()).map(String::from),
+                not: f.get("not").and_then(|x| x.as_bool()).unwrap_or(false),
+            });
+        }
+        Some(out)
+    } else {
+        None
+    };
     if let Some(fs) = &filters {
         for f in fs {
             if f.field.is_empty() || (f.equals.is_none() && f.matches.is_none()) {
@@ -1042,4 +1049,44 @@ fn parse_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> 
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect()
     })
+
+#[cfg(test)]
+mod webhook_parse_tests {
+    use super::*;
+
+    fn args(json: serde_json::Value) -> serde_json::Value { json }
+
+    #[test]
+    fn rejects_malformed_filter_object() {
+        // Review finding: silently dropping a malformed filter would widen
+        // the trigger condition beyond what the user expects — reject hard.
+        let e = parse_webhook_channel(
+            &args(serde_json::json!({"webhook": {"secret": "s", "filters": ["oops"]}})),
+            Some("ok-name"),
+        )
+        .unwrap_err();
+        assert!(e.contains("must be an object"));
+    }
+
+    #[test]
+    fn rejects_filter_missing_field() {
+        let e = parse_webhook_channel(
+            &args(serde_json::json!({"webhook": {"secret": "s", "filters": [{"equals": "x"}]}})),
+            Some("ok-name"),
+        )
+        .unwrap_err();
+        assert!(e.contains("'field'"));
+    }
+
+    #[test]
+    fn accepts_valid_filters() {
+        let wh = parse_webhook_channel(
+            &args(serde_json::json!({"webhook": {"secret": "s",
+                "filters": [{"field": "action", "equals": "opened"}]}})),
+            Some("ok-name"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(wh.filters.as_deref().map(|f| f.len()), Some(1));
+    }
 }
