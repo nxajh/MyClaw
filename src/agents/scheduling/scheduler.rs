@@ -304,7 +304,15 @@ impl Scheduler {
         let mut from_dirs = load_jobs_from_dirs(&jobs_root);
         if from_dirs.is_empty() && legacy_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&legacy_path) {
-                if let Ok(mut parsed) = serde_json::from_str::<JobsFile>(&content) {
+                // Value-level fold first: JobEntry no longer carries
+                // schedule_kind, so a direct struct parse would silently drop
+                // every/at discriminators and misread their display strings
+                // as cron expressions (review finding).
+                let folded: Option<JobsFile> = serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .map(|v| fold_schedule_kind(v))
+                    .and_then(|v| serde_json::from_value(v).ok());
+                if let Some(mut parsed) = folded {
                     normalize_schedule_specs(&mut parsed.jobs);
                     from_dirs = parsed.jobs;
                 }
@@ -921,6 +929,51 @@ fn normalize_schedule_specs(jobs: &mut [JobEntry]) {
     }
 }
 
+/// Fold the legacy `schedule_kind` sibling into `schedule` on ONE job object
+/// (Value level, before struct parsing). The discriminator is authoritative
+/// when present; a bare string schedule is a cron expression.
+fn fold_one_schedule_kind(value: serde_json::Value) -> serde_json::Value {
+    let mut value = value;
+    let Some(obj) = value.as_object_mut() else { return value };
+    let legacy_kind = obj.remove("schedule_kind").filter(|k| !k.is_null());
+    match (legacy_kind, obj.get("schedule")) {
+        (Some(kind), _) => {
+            obj.insert("schedule".to_string(), kind);
+        }
+        (None, Some(serde_json::Value::String(s))) if !s.is_empty() => {
+            let expr = s.clone();
+            obj.insert(
+                "schedule".to_string(),
+                serde_json::json!({"kind": "cron", "expr": expr}),
+            );
+        }
+        _ => {}
+    }
+    value
+}
+
+/// Apply [`fold_one_schedule_kind`] to a jobs document — either a bare
+/// `JobsFile` object `{"jobs": [...]}` or a bare jobs array.
+fn fold_schedule_kind(value: serde_json::Value) -> serde_json::Value {
+    let mut value = value;
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(jobs) = obj.get_mut("jobs") {
+            if let Some(arr) = jobs.as_array_mut() {
+                for job in arr.iter_mut() {
+                    *job = fold_one_schedule_kind(job.take());
+                }
+            }
+        }
+        return value;
+    }
+    if let Some(arr) = value.as_array_mut() {
+        for job in arr.iter_mut() {
+            *job = fold_one_schedule_kind(job.take());
+        }
+    }
+    value
+}
+
 /// Load every `{jobs_root}/{dir}/meta.json` (P1-B2 directory-based store).
 /// Malformed entries are skipped. Sorted by id for stable ordering.
 fn load_jobs_from_dirs(jobs_root: &Path) -> Vec<JobEntry> {
@@ -940,10 +993,9 @@ fn load_jobs_from_dirs(jobs_root: &Path) -> Vec<JobEntry> {
         };
         // §3.4 convergence: fold the legacy `schedule_kind` discriminator
         // (and the plain-string `schedule` it accompanied) into the
-        // canonical polymorphic schedule object. schedule_kind is
-        // authoritative when present; a bare string schedule is a cron
-        // expression. The old keys are never written back.
-        let value = match serde_json::from_str::<serde_json::Value>(&content) {
+        // canonical polymorphic schedule object (shared with the legacy
+        // jobs.json fallback — see fold_schedule_kind).
+        let value: serde_json::Value = match serde_json::from_str(&content) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(path = %meta.display(), err = %e,
@@ -951,21 +1003,7 @@ fn load_jobs_from_dirs(jobs_root: &Path) -> Vec<JobEntry> {
                 continue;
             }
         };
-        let mut value = value;
-        if let Some(obj) = value.as_object_mut() {
-            let legacy_kind = obj.remove("schedule_kind").filter(|k| !k.is_null());
-            match (legacy_kind, obj.get("schedule")) {
-                (Some(kind), _) => {
-                    obj.insert("schedule".to_string(), kind);
-                }
-                (None, Some(serde_json::Value::String(s))) if !s.is_empty() => {
-                    obj.insert("schedule".to_string(), serde_json::json!({
-                        "kind": "cron", "expr": s
-                    }));
-                }
-                _ => {}
-            }
-        }
+        let value = fold_one_schedule_kind(value);
         match serde_json::from_value::<JobEntry>(value) {
             Ok(mut job) => {
                 // §3.4: name is required. Legacy meta.json without a name
@@ -1052,7 +1090,12 @@ impl Scheduler {
         // Legacy fallback: only when the dir store is empty.
         if jobs.is_empty() && self.legacy_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&self.legacy_path) {
-                if let Ok(mut parsed) = serde_json::from_str::<JobsFile>(&content) {
+                // Same Value-level fold as Scheduler::new — see note there.
+                let folded: Option<JobsFile> = serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .map(|v| fold_schedule_kind(v))
+                    .and_then(|v| serde_json::from_value(v).ok());
+                if let Some(mut parsed) = folded {
                     normalize_schedule_specs(&mut parsed.jobs);
                     jobs = parsed.jobs;
                 }
@@ -2868,6 +2911,45 @@ mod tests {
         assert_eq!(saved["schedule"]["kind"], "every");
         assert_eq!(saved["schedule"]["interval_ms"], 1_800_000);
         assert!(saved.get("schedule_kind").is_none());
+    }
+
+    #[test]
+    fn legacy_jobs_json_single_file_folds_discriminators() {
+        // Review finding: the pre-P1-B2 single-file fallback must fold
+        // schedule_kind at the Value level too, or every/at display strings
+        // would be misread as cron expressions (silently never firing).
+        let dir = tempfile::tempdir().unwrap();
+        let jobs_root = dir.path().join("jobs");
+        std::fs::create_dir_all(&jobs_root).unwrap();
+        std::fs::write(
+            jobs_root.join("jobs.json"),
+            r#"{"jobs": [
+                {"id": "test/job/019fe4cedddd", "name": "tick", "schedule": "every 30m",
+                 "prompt": "p", "target": "last",
+                 "schedule_kind": {"kind": "every", "interval_ms": 1800000}},
+                {"id": "test/job/019fe4ceeeee", "name": "old-cron", "schedule": "0 9 * * *",
+                 "prompt": "p", "target": "last", "schedule_kind": null}
+            ]}"#,
+        )
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            jobs_root, "test", "UTC".to_string(), None, tx,
+            dir.path().join("lc"), dir.path().join("lr"),
+        );
+        let jobs = sched.jobs();
+        assert_eq!(jobs.len(), 2);
+        let tick = jobs.iter().find(|j| j.name.as_deref() == Some("tick")).unwrap();
+        assert!(matches!(
+            tick.schedule,
+            Some(ScheduleSpec::Kind(ScheduleKind::Every { interval_ms: 1_800_000 }))
+        ));
+        let cron = jobs.iter().find(|j| j.name.as_deref() == Some("old-cron")).unwrap();
+        assert!(matches!(
+            cron.schedule,
+            Some(ScheduleSpec::Kind(ScheduleKind::Cron { ref expr })) if expr == "0 9 * * *"
+        ));
     }
 
     #[test]
