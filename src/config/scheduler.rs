@@ -9,6 +9,10 @@ fn default_webhook_port() -> u16 {
     18789
 }
 
+fn default_target() -> String {
+    "last".to_string()
+}
+
 /// Context policy for scheduled turns — determines whether the turn
 /// is injected into the user's active session or run in isolation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
