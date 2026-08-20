@@ -90,7 +90,7 @@ fn append_memory_audit(base_dir: &Path, session: &Session, audit: MemoryAudit<'_
     // P1-B2: audit is runtime state, lives on the data side
     // ({base_dir}/state/memory/memory_audit.jsonl), not under the
     // memory root (which is the flat agent/user memory pool).
-    let audit_dir = base_dir.join("state").join("memory").join(".audit");
+    let audit_dir = crate::config::memory_audit_dir(base_dir);
     if let Err(e) = std::fs::create_dir_all(&audit_dir) {
         tracing::warn!(err = %e, "memory audit: failed to create audit dir");
         return;

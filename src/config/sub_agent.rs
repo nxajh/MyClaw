@@ -87,17 +87,15 @@ pub struct SubAgentConfig {
     #[serde(default)]
     pub isolation: AgentIsolation,
 
-    /// Maximum wall-clock seconds a delegation may run before being killed.
-    /// If unset, falls back to the system default (600s); the hard ceiling
-    /// is the per-agent `max_timeout` (or the global 1800s) regardless of
-    /// what the tool caller or this config requests.
+    /// Maximum wall-clock seconds a delegation may run before being killed,
+    /// used only when the `agent_delegate` tool call omits `timeout` — an
+    /// explicit tool-call value always wins over this. Falls back to the
+    /// system default (1200s) if neither is set. Either way the global
+    /// 1800s hard ceiling still applies; there is no per-agent override of
+    /// that ceiling (removed — it let this config silently clamp an
+    /// explicit tool-call timeout down with no visibility to the caller).
     #[serde(default)]
     pub timeout: Option<u64>,
-    /// Per-agent hard ceiling for delegation wall-clock time. Overrides the
-    /// global 1800s clamp for this agent only (e.g. coder waiting on CI
-    /// feedback loops may want 3600s+). None = global clamp applies.
-    #[serde(default)]
-    pub max_timeout: Option<u64>,
 }
 
 impl SubAgentConfig {
@@ -176,7 +174,6 @@ mod tests {
             model: None,
             isolation: AgentIsolation::default(),
             timeout: None,
-            max_timeout: None,
         };
         assert_eq!(config.isolation, AgentIsolation::Shared);
     }
@@ -194,7 +191,6 @@ mod tests {
             model: None,
             isolation: AgentIsolation::default(),
             timeout: None,
-            max_timeout: None,
         };
         assert!(config.allows_skill("anything"));
         assert!(config.allows_mcp("anything"));
@@ -216,7 +212,6 @@ mod tests {
             model: None,
             isolation: AgentIsolation::default(),
             timeout: None,
-            max_timeout: None,
         };
         assert!(config.allows_tool("shell"));
         assert!(config.allows_tool("file_read"));

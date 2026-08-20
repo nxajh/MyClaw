@@ -507,6 +507,7 @@ async fn build_tools(
     Arc<crate::tools::TaskBoards>,
     Arc<crate::tools::SendMessageTool>,
     Arc<crate::tools::FriendToolsCtx>,
+    crate::tools::shell::ShellRegistry,
 ) {
     let mut tools = ToolRegistry::new();
     let (builtin, shell_registry) = crate::tools::builtin_tools(Some(config.sessions_root()));
@@ -634,7 +635,7 @@ async fn build_tools(
     }
 
     tracing::info!(tool_count = tools.tool_count(), "tool registry built");
-    (tools, task_boards, send_message_tool, friend_ctx)
+    (tools, task_boards, send_message_tool, friend_ctx, shell_registry)
 }
 
 /// Build SkillManager from SKILL.md files in the base dir (P1: `{base_dir}/skills`).
@@ -1068,8 +1069,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             None,
             None,
             dummy_tx,
-            config.workspace_dir.join(".last_channel"),
-            config.workspace_dir.join(".last_recipient"),
+            config.last_channel_path(),
+            config.last_recipient_path(),
         );
         let count = migrator.migrate_from_markdown(&cron_dir);
         if count > 0 {
@@ -1093,8 +1094,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tz_name.clone(),
         distill_config,
         scheduler_tx.clone(),
-        config.workspace_dir.join(".last_channel"),
-        config.workspace_dir.join(".last_recipient"),
+        config.last_channel_path(),
+        config.last_recipient_path(),
     );
 
     // Global base dir (known_users.json, user_resolver.json) — computed early
@@ -1138,7 +1139,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let session_backend = build_session_backend(&config);
 
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
-    let (mut tools, task_boards, send_message_tool, friend_ctx) = build_tools(
+    let (mut tools, task_boards, send_message_tool, friend_ctx, shell_registry) = build_tools(
         &mcp_manager,
         &skills_arc,
         &shared_scheduler,
@@ -1229,9 +1230,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let delegator = DelegationCoordinator::new(
             sub_agent_registry.clone(),
             Arc::clone(&session_manager),
-            config.workspace_dir.join("worktrees"),
+            config.worktrees_root(),
             &config.system.namespace,
             config.delegation.max_depth,
+            shell_registry.clone(),
         );
         let delegator_arc = Arc::new(delegator);
 
@@ -1562,7 +1564,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Scheduler tasks ────────────────────────────────────────────────────
 
     if scheduler_config.webhook.enabled {
-        let wh_dir = config.workspace_dir.join("webhooks");
+        let wh_dir = config.webhooks_dir();
         let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
             ctx: Arc::clone(orchestrator.ctx()),
@@ -1893,7 +1895,6 @@ mod tests {
             model: None,
             isolation: AgentIsolation::default(),
             timeout: None,
-            max_timeout: None,
         };
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(NamedTool("shell")));
@@ -1938,7 +1939,7 @@ mod tests {
 /// recent messages instead of skipping everything the old process already
 /// fetched.  The dedup layer in TelegramChannel will filter any duplicates.
 fn reset_telegram_offset(base_dir: &std::path::Path) {
-    let offset_path = base_dir.join("telegram_offset");
+    let offset_path = crate::config::telegram_offset_path(base_dir);
     if offset_path.exists() {
         if let Err(e) = std::fs::remove_file(&offset_path) {
             tracing::warn!(err = %e, path = %offset_path.display(),

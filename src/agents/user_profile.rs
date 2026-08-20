@@ -48,7 +48,7 @@ impl UserResolver {
     /// Persistent resolver backed by `{base_dir}/user_resolver.json`.
     /// Loads existing overrides at startup; every `set` writes through.
     pub fn persistent(base_dir: &Path) -> Self {
-        let data_path = base_dir.join("user_resolver.json");
+        let data_path = crate::config::user_resolver_path(base_dir);
         let resolver = Self {
             overrides: RwLock::new(std::collections::HashMap::new()),
             data_path: data_path.clone(),

@@ -198,7 +198,7 @@ pub struct KnownUsersRegistry {
 impl KnownUsersRegistry {
     /// Create a persistent registry backed by `{base_dir}/known_users.json`.
     pub fn new(base_dir: &Path) -> Self {
-        let data_path = base_dir.join("known_users.json");
+        let data_path = crate::config::known_users_path(base_dir);
         let reg = Self {
             users: DashMap::new(),
             rate_buckets: DashMap::new(),

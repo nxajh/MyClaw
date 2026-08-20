@@ -366,6 +366,41 @@ pub async fn adopt_after_restart(
     }
 }
 
+/// Kill every process still tracked `running` for `session_id`.
+///
+/// Cancelling a sub-agent's turn (delegation timeout, `agent_kill`) only
+/// drops/aborts the future driving its LLM conversation loop — it does not
+/// reach into the detached `tokio::spawn` reaper tasks that track any shell
+/// children that sub-agent started (`spawn_tracked` hands each `Child` off
+/// to one of those immediately, by design, so `myclaw restart` can adopt
+/// them — see the module docs). Without this, a sub-agent's shell process
+/// keeps running for real after its delegation has already been reported as
+/// timed out or killed, which looks exactly like the delegation timeout
+/// having no effect. Call this from both cancellation paths so a delegation
+/// ending always means its shell children stop too.
+///
+/// Sends SIGTERM only (not SIGKILL) — same default as `shell_kill` — and
+/// does not wait for confirmation; the process's own reaper task (already
+/// running) updates the table once it actually exits.
+pub async fn kill_processes_for_session(registry: &ShellRegistry, session_id: &str) {
+    let victims: Vec<(String, i32)> = registry
+        .read()
+        .await
+        .values()
+        .filter(|e| e.session_id == session_id && e.state == "running")
+        .map(|e| (e.process_id.clone(), e.pid))
+        .collect();
+    for (process_id, pid) in victims {
+        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if rc == 0 {
+            tracing::info!(process_id, pid, session_id, "killed shell process on delegation end");
+        } else {
+            let err = std::io::Error::last_os_error();
+            tracing::warn!(process_id, pid, session_id, err = %err, "failed to kill shell process on delegation end");
+        }
+    }
+}
+
 /// Describe the most recently spawned tracked process for a session, if
 /// any — used by `agent.rs`'s crash-recovery path (the `exec_marker`
 /// mechanism) to tell the LLM what an interrupted `shell` call was doing
@@ -1078,6 +1113,58 @@ mod tests {
             assert!(tokio::time::Instant::now() < deadline, "killed process never reaped");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn kill_processes_for_session_only_kills_that_sessions_running_entries() {
+        // Simulates the delegation-timeout/agent_kill cleanup: a sub-agent's
+        // session has a shell process still running when its delegation
+        // ends, and cancelling the delegation's future alone would not have
+        // touched it (see kill_processes_for_session's doc comment).
+        let tool = ShellTool::new(None);
+        let session_a = crate::agents::session::Session::new("session-a".to_string());
+        let session_b = crate::agents::session::Session::new("session-b".to_string());
+
+        let result_a = tool
+            .execute(json!({ "command": "sleep 30", "background": true }), &session_a)
+            .await
+            .unwrap();
+        let pid_a = result_a
+            .output
+            .lines()
+            .find_map(|l| l.strip_prefix("process_id="))
+            .unwrap()
+            .to_string();
+
+        let result_b = tool
+            .execute(json!({ "command": "sleep 30", "background": true }), &session_b)
+            .await
+            .unwrap();
+        let pid_b = result_b
+            .output
+            .lines()
+            .find_map(|l| l.strip_prefix("process_id="))
+            .unwrap()
+            .to_string();
+
+        kill_processes_for_session(&tool.registry(), "session-a").await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = tool.registry().read().await.get(&pid_a).map(|e| e.state.clone());
+            if state.as_deref() == Some("exited") {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "session-a process never reaped");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // session-b's process was never targeted — still running.
+        let state_b = tool.registry().read().await.get(&pid_b).map(|e| e.state.clone());
+        assert_eq!(state_b.as_deref(), Some("running"));
+
+        // Clean up so the test doesn't leave a sleep(30) orphan behind.
+        kill_processes_for_session(&tool.registry(), "session-b").await;
     }
 
     #[tokio::test]

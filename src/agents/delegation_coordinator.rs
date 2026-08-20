@@ -44,10 +44,15 @@ use crate::ids::{Fqid, TYPE_SESSION};
 /// sub-agents on CI-only hosts.
 const SUB_AGENT_TIMEOUT_DEFAULT_SECS: u64 = 1200;
 
-/// Hard ceiling: no delegation may run longer than this unless the agent's
-/// config raises it via `max_timeout` (per-agent override). The global clamp
-/// still bounds every agent that does not opt in.
-const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
+/// Hard ceiling: no delegation may run longer than this, tool-call `timeout`
+/// included — there is no per-agent override. `pub(crate)` so
+/// `tools::delegate::AgentDelegateTool::preferred_timeout_secs` can use it
+/// as the floor for the *generic* per-tool-call timeout `ToolExecutor`
+/// applies to every tool — without that override, that outer wrapper
+/// (`[agent] tool_timeout_secs`, default far below this) would silently
+/// drop the whole `agent_delegate` call before a delegation ever gets to
+/// run for the `timeout` its own caller actually asked for.
+pub(crate) const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
 
 /// Capacity of each running sub-agent's inbox (parent → sub messages).
 const SUB_AGENT_INBOX_CAPACITY: usize = 64;
@@ -55,12 +60,18 @@ const SUB_AGENT_INBOX_CAPACITY: usize = 64;
 /// Resolve the effective timeout.
 ///
 /// Priority: `tool_timeout` > `config_timeout` > `SUB_AGENT_TIMEOUT_DEFAULT_SECS`,
-/// clamped to the agent's `max_timeout` when configured, else the global
-/// `SUB_AGENT_TIMEOUT_MAX_SECS`. Per-agent ceilings let long-running agents
-/// (e.g. coder waiting on CI feedback loops) opt into larger budgets.
-fn resolve_timeout(tool_timeout: Option<u64>, config_timeout: Option<u64>, max_timeout: Option<u64>) -> u64 {
-    let secs = tool_timeout.or(config_timeout).unwrap_or(SUB_AGENT_TIMEOUT_DEFAULT_SECS);
-    secs.min(max_timeout.unwrap_or(SUB_AGENT_TIMEOUT_MAX_SECS))
+/// clamped only to the global `SUB_AGENT_TIMEOUT_MAX_SECS` hard ceiling.
+/// There is deliberately no per-agent override of that ceiling anymore
+/// (removed 2026-08-19) — it let `SubAgentConfig.max_timeout` silently clamp
+/// an explicit `agent_delegate` tool-call `timeout` down with no visibility
+/// to the caller, which looked indistinguishable from the parameter being
+/// ignored outright. The tool-call value is now authoritative up to the
+/// global ceiling, full stop.
+fn resolve_timeout(tool_timeout: Option<u64>, config_timeout: Option<u64>) -> u64 {
+    tool_timeout
+        .or(config_timeout)
+        .unwrap_or(SUB_AGENT_TIMEOUT_DEFAULT_SECS)
+        .min(SUB_AGENT_TIMEOUT_MAX_SECS)
 }
 
 /// Builds the git branch name used for a sub-agent worktree.
@@ -176,6 +187,13 @@ pub struct DelegationCoordinator {
     /// the full report immediately instead of via the delayed notice
     /// channel. Removed on read. (2026-08-14, sync notice B)
     sent_messages: Arc<DashMap<String, std::sync::RwLock<Vec<String>>>>,
+    /// Shared with `ShellTool`/`ShellPollTool`/`ShellKillTool` — used to kill
+    /// any shell processes a sub-agent's session still has running when its
+    /// delegation ends (timeout or `agent_kill`). See
+    /// `crate::tools::shell::kill_processes_for_session` for why this is
+    /// necessary: cancelling the delegation's future does not reach the
+    /// detached tasks tracking those processes.
+    shell_registry: crate::tools::shell::ShellRegistry,
 }
 
 impl DelegationCoordinator {
@@ -185,6 +203,7 @@ impl DelegationCoordinator {
         worktrees_root: PathBuf,
         namespace: &str,
         max_depth: u32,
+        shell_registry: crate::tools::shell::ShellRegistry,
     ) -> Self {
         Self {
             configs,
@@ -197,6 +216,7 @@ impl DelegationCoordinator {
             max_depth,
             event_tx_cell: Arc::new(OnceLock::new()),
             sent_messages: Arc::new(DashMap::new()),
+            shell_registry,
         }
     }
 
@@ -391,6 +411,10 @@ impl DelegationCoordinator {
             entry.handle.abort();
             parent_session_id
         };
+        // `abort()` only reaches the task driving the sub-agent's LLM loop —
+        // any shell process it started keeps running otherwise (see
+        // `kill_processes_for_session` docs).
+        crate::tools::shell::kill_processes_for_session(&self.shell_registry, sub_session_id).await;
         self.running.remove(sub_session_id);
         if let Some(tx) = self.event_sender() {
             if tx
@@ -783,12 +807,22 @@ impl DelegationCoordinator {
                     // this to emit `DelegationEvent::TimedOut` (distinct
                     // from a generic `Failed`). Dropping `turn_future` here
                     // cancels the sub-agent turn — the same cancellation
-                    // semantics as aborting a spawned task.
+                    // semantics as aborting a spawned task. That cancellation
+                    // does not reach any shell processes this sub-agent
+                    // started (spawn_tracked hands them off to a detached
+                    // reaper immediately, by design — see the shell module
+                    // docs) — kill them explicitly so a timed-out delegation
+                    // actually stops, not just its LLM loop.
                     tracing::warn!(
                         agent = %config.name,
                         timeout_secs,
                         "sub-agent timed out, cancelling turn"
                     );
+                    crate::tools::shell::kill_processes_for_session(
+                        &self.shell_registry,
+                        &sub_session_id,
+                    )
+                    .await;
                     Err(anyhow::Error::new(DelegationTimeout {
                         agent: config.name.clone(),
                         secs: timeout_secs,
@@ -1409,8 +1443,7 @@ impl DelegationCoordinator {
             );
         }
         let requested = extra_secs.unwrap_or(cp.timeout_secs);
-        let max_timeout = self.find_agent(&cp.agent_name).and_then(|a| a.config.max_timeout);
-        let budget = requested.min(max_timeout.unwrap_or(SUB_AGENT_TIMEOUT_MAX_SECS)).max(1);
+        let budget = requested.min(SUB_AGENT_TIMEOUT_MAX_SECS).max(1);
 
         // Re-arm the parent side. Registered (active) context first; the
         // fallback load covers a parent that switched away or whose turn
@@ -1620,8 +1653,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
     ) -> anyhow::Result<String> {
         let config = self.find_agent(agent_name);
         let config_timeout = config.as_ref().and_then(|a| a.config.timeout);
-        let config_max = config.as_ref().and_then(|a| a.config.max_timeout);
-        let timeout_secs = resolve_timeout(timeout, config_timeout, config_max);
+        let timeout_secs = resolve_timeout(timeout, config_timeout);
         // Create the sub-session context up front — the sub-session id is
         // the agent's identity, created before the delegation starts (same
         // unified path as the async `spawn_delegate_async`).
@@ -1652,8 +1684,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
     ) -> anyhow::Result<String> {
         let config = self.find_agent(agent_name);
         let config_timeout = config.as_ref().and_then(|a| a.config.timeout);
-        let config_max = config.as_ref().and_then(|a| a.config.max_timeout);
-        let timeout_secs = resolve_timeout(timeout, config_timeout, config_max);
+        let timeout_secs = resolve_timeout(timeout, config_timeout);
         self.spawn_delegate_async(
             agent_name,
             task,
@@ -1763,7 +1794,6 @@ mod tests {
             model: None,
             isolation: AgentIsolation::Shared,
             timeout: None,
-            max_timeout: None,
         }
     }
 
@@ -1776,6 +1806,7 @@ mod tests {
             PathBuf::new(),
             "test",
             max_depth,
+            Default::default(),
         );
         (dc, manager)
     }
@@ -1885,22 +1916,18 @@ mod tests {
     #[test]
     fn resolve_timeout_priority_fallback_and_clamp() {
         // default: system fallback 1200s
-        assert_eq!(resolve_timeout(None, None, None), 1200);
+        assert_eq!(resolve_timeout(None, None), 1200);
         // tool value wins over config regardless of ordering
-        assert_eq!(resolve_timeout(Some(100), Some(50), None), 100);
-        assert_eq!(resolve_timeout(Some(100), Some(200), None), 100);
+        assert_eq!(resolve_timeout(Some(100), Some(50)), 100);
+        assert_eq!(resolve_timeout(Some(100), Some(200)), 100);
         // config used when tool doesn't specify
-        assert_eq!(resolve_timeout(None, Some(300), None), 300);
-        // global hard ceiling 1800s when no per-agent max
-        assert_eq!(resolve_timeout(Some(5000), None, None), 1800);
-        assert_eq!(resolve_timeout(Some(5000), Some(9000), None), 1800);
-        // per-agent max_timeout overrides the global clamp
-        assert_eq!(resolve_timeout(Some(5000), None, Some(3600)), 3600);
-        assert_eq!(resolve_timeout(Some(5000), Some(9000), Some(7200)), 5000);
-        // per-agent max below requested value clamps down too
-        assert_eq!(resolve_timeout(Some(3000), None, Some(900)), 900);
+        assert_eq!(resolve_timeout(None, Some(300)), 300);
+        // global hard ceiling 1800s — no per-agent override anymore, the
+        // tool-call value is authoritative up to this ceiling
+        assert_eq!(resolve_timeout(Some(5000), None), 1800);
+        assert_eq!(resolve_timeout(Some(5000), Some(9000)), 1800);
         // 0 passes through (no lower clamp)
-        assert_eq!(resolve_timeout(Some(0), None, None), 0);
+        assert_eq!(resolve_timeout(Some(0), None), 0);
     }
 
     #[test]
@@ -1930,6 +1957,7 @@ mod tests {
             PathBuf::new(),
             "test",
             3,
+            Default::default(),
         );
         (dc, manager, dir)
     }
@@ -1999,8 +2027,8 @@ mod tests {
         let resumed = dc.resume_timed_out(&sub.id, Some(9999)).unwrap();
         assert_eq!(resumed, sub.id);
 
-        // Fresh budget clamped to the global 1800s ceiling (coder has no
-        // max_timeout configured) and checkpoint flipped back to running.
+        // Fresh budget clamped to the global 1800s ceiling and checkpoint
+        // flipped back to running.
         let cp = backend.load_delegation_checkpoint(&sub.id).unwrap();
         assert_eq!(cp.status, "running");
         assert_eq!(cp.timeout_secs, 1800);

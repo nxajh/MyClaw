@@ -1820,7 +1820,6 @@ mod tests {
             model: None,
             isolation: Default::default(),
             timeout: None,
-            max_timeout: None,
         }
     }
 

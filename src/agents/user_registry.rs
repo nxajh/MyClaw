@@ -27,8 +27,6 @@ use crate::ids::{bare_dir_name, Fqid, TYPE_USER};
 
 // ── 常量与规则 ───────────────────────────────────────────────────────────────
 
-/// 目录化存储的用户实体根目录名：`{base_dir}/users/`。
-pub const USERS_DIR: &str = "users";
 /// 每用户实体的元数据文件名：`{base_dir}/users/{uuid}/meta.json`。
 pub const USER_META_FILE: &str = "meta.json";
 /// 旧版单文件存储文件名（兼容兜底读，不再写）。
@@ -161,9 +159,11 @@ impl UserRegistry {
         reg
     }
 
-    /// 用户实体根目录（`{base_dir}/users/`）。
+    /// 用户实体根目录（`{base_dir}/users/`），与 `AppConfig::users_root()`
+    /// 同一逻辑（`crate::config::users_root`），因为这里只持有拷贝的
+    /// `base_dir` 而非完整 `AppConfig`。
     fn users_root(&self) -> PathBuf {
-        self.base_dir.join(USERS_DIR)
+        crate::config::users_root(&self.base_dir)
     }
 
     /// 单个用户的目录：`{base_dir}/users/{uuid}/`。

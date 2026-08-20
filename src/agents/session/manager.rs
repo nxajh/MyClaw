@@ -778,7 +778,6 @@ fn permissive_main_default(agent_name: &str) -> SubAgentConfig {
         max_tool_calls: None,
         isolation: Default::default(),
         timeout: None,
-        max_timeout: None,
     }
 }
 

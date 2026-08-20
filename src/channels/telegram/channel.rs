@@ -189,7 +189,7 @@ impl TelegramChannel {
 
     /// Path to the file that persists the Telegram update offset.
     fn offset_path(&self) -> std::path::PathBuf {
-        self.base_dir.join("telegram_offset")
+        crate::config::telegram_offset_path(&self.base_dir)
     }
 
     /// Load the persisted update offset from disk.

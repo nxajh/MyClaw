@@ -431,6 +431,58 @@ pub fn default_base_dir() -> PathBuf {
     PathBuf::from(shellexpand::tilde("~/.myclaw").to_string())
 }
 
+/// Runtime-state root: `{base_dir}/state`. Free function (not an `AppConfig`
+/// method) because a few callers — `OrchestratorParts`, `TelegramChannel`,
+/// `UserRegistry`, `migration.rs` — only carry their own copied `base_dir`,
+/// not the full `AppConfig`; this is the single source of truth both they
+/// and `AppConfig`'s own methods below delegate to.
+pub fn state_root(base_dir: &Path) -> PathBuf {
+    base_dir.join("state")
+}
+
+/// User entity root: `{base_dir}/users`. Free function for the same reason
+/// as `state_root` — `UserRegistry` also only carries a copied `base_dir`.
+pub fn users_root(base_dir: &Path) -> PathBuf {
+    base_dir.join("users")
+}
+
+/// Inbound message spool: `{base_dir}/state/inbound_spool`.
+pub fn inbound_spool_dir(base_dir: &Path) -> PathBuf {
+    state_root(base_dir).join("inbound_spool")
+}
+
+/// Delegation completion queue: `{base_dir}/state/completion_queue`.
+pub fn completion_queue_dir(base_dir: &Path) -> PathBuf {
+    state_root(base_dir).join("completion_queue")
+}
+
+/// Memory-tool audit log dir: `{base_dir}/state/memory/.audit`.
+pub fn memory_audit_dir(base_dir: &Path) -> PathBuf {
+    state_root(base_dir).join("memory").join(".audit")
+}
+
+/// Idle-time memory distillation state dir: `{base_dir}/state/memory`
+/// (sibling of the memory pool itself, not inside it — see
+/// `agents/orchestrator/scheduled.rs`).
+pub fn memory_distill_state_dir(base_dir: &Path) -> PathBuf {
+    state_root(base_dir).join("memory")
+}
+
+/// Telegram polling offset file: `{base_dir}/telegram_offset`.
+pub fn telegram_offset_path(base_dir: &Path) -> PathBuf {
+    base_dir.join("telegram_offset")
+}
+
+/// `UserResolver` persistence file: `{base_dir}/user_resolver.json`.
+pub fn user_resolver_path(base_dir: &Path) -> PathBuf {
+    base_dir.join("user_resolver.json")
+}
+
+/// `KnownUsersRegistry` persistence file: `{base_dir}/known_users.json`.
+pub fn known_users_path(base_dir: &Path) -> PathBuf {
+    base_dir.join("known_users.json")
+}
+
 impl AppConfig {
     /// Session storage root: `{base_dir}/sessions`.
     pub fn sessions_root(&self) -> PathBuf {
@@ -439,7 +491,7 @@ impl AppConfig {
 
     /// User entity root: `{base_dir}/users`.
     pub fn users_root(&self) -> PathBuf {
-        self.base_dir.join("users")
+        users_root(&self.base_dir)
     }
 
     /// Job (cron/webhook) entity root: `{base_dir}/jobs`.
@@ -465,6 +517,61 @@ impl AppConfig {
     /// Migration backups root: `{base_dir}/backups`.
     pub fn backups_root(&self) -> PathBuf {
         self.base_dir.join("backups")
+    }
+
+    /// Runtime-state root: `{base_dir}/state`.
+    pub fn state_root(&self) -> PathBuf {
+        state_root(&self.base_dir)
+    }
+
+    /// Inbound message spool: `{base_dir}/state/inbound_spool`.
+    pub fn inbound_spool_dir(&self) -> PathBuf {
+        inbound_spool_dir(&self.base_dir)
+    }
+
+    /// Delegation completion queue: `{base_dir}/state/completion_queue`.
+    pub fn completion_queue_dir(&self) -> PathBuf {
+        completion_queue_dir(&self.base_dir)
+    }
+
+    /// Memory-tool audit log dir: `{base_dir}/state/memory/.audit`.
+    pub fn memory_audit_dir(&self) -> PathBuf {
+        memory_audit_dir(&self.base_dir)
+    }
+
+    /// Telegram polling offset file: `{base_dir}/telegram_offset`.
+    pub fn telegram_offset_path(&self) -> PathBuf {
+        telegram_offset_path(&self.base_dir)
+    }
+
+    /// `UserResolver` persistence file: `{base_dir}/user_resolver.json`.
+    pub fn user_resolver_path(&self) -> PathBuf {
+        user_resolver_path(&self.base_dir)
+    }
+
+    /// `KnownUsersRegistry` persistence file: `{base_dir}/known_users.json`.
+    pub fn known_users_path(&self) -> PathBuf {
+        known_users_path(&self.base_dir)
+    }
+
+    /// Proactive-message target memory: `{workspace_dir}/.last_channel`.
+    pub fn last_channel_path(&self) -> PathBuf {
+        self.workspace_dir.join(".last_channel")
+    }
+
+    /// Proactive-message target memory: `{workspace_dir}/.last_recipient`.
+    pub fn last_recipient_path(&self) -> PathBuf {
+        self.workspace_dir.join(".last_recipient")
+    }
+
+    /// Delegation sandbox roots: `{workspace_dir}/worktrees`.
+    pub fn worktrees_root(&self) -> PathBuf {
+        self.workspace_dir.join("worktrees")
+    }
+
+    /// Inbound webhook payload dir: `{workspace_dir}/webhooks`.
+    pub fn webhooks_dir(&self) -> PathBuf {
+        self.workspace_dir.join("webhooks")
     }
 }
 

@@ -264,10 +264,12 @@ pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
     // Backoff: after 3 consecutive failures, pause for 2 hours.
     // P1-B2: distill state is runtime state — sibling of the memory root
     // ({base_dir}/state/memory/distill.json), not inside the memory pool.
-    let state_dir = std::path::Path::new(&memory_root)
-        .parent()
-        .map(|p| p.join("state").join("memory"))
-        .unwrap_or_else(|| std::path::PathBuf::from("state/memory"));
+    let base_dir = &orch.runtime.defaults.prompt.base_dir;
+    let state_dir = if base_dir.is_empty() {
+        std::path::PathBuf::from("state/memory")
+    } else {
+        crate::config::memory_distill_state_dir(std::path::Path::new(base_dir))
+    };
     let mut state = DistillState::load(&state_dir);
     if state.in_backoff() {
         tracing::warn!(
