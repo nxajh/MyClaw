@@ -1311,7 +1311,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // instead of reading `subagent_running_*.json` marker files (the marker
     // mechanism has been deleted along with the corresponding writes in
     // DelegationCoordinator).
-    let unfinished_subagents = crate::agents::recovery::scan_unfinished_subagents(&session_manager);
+    // P4 (§7): scan the session store ONCE at startup and share the result
+    // with sub-agent recovery and orchestrator run_startup below.
+    let all_sessions = session_manager.list_all_sessions();
+    let unfinished_subagents =
+        crate::agents::recovery::scan_unfinished_subagents(&session_manager, &all_sessions);
 
     // Load durable checkpoints from the previous run. Tasks with a checkpoint
     // status of "checkpointed" or "running" were interrupted by a clean
@@ -1732,7 +1736,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // orchestrator and aborts its listener tasks before returning.
     // On hot-switch path, turn drain is deferred until after fork (below).
     orchestrator
-        .run(shutdown_rx, unfinished_subagents)
+        .run(shutdown_rx, unfinished_subagents, all_sessions)
         .await
         .context("orchestrator run error")?;
 

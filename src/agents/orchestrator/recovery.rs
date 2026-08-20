@@ -167,7 +167,11 @@ fn terminal_checkpoint_ids(checkpoints: &[crate::storage::DelegationCheckpoint])
         .collect()
 }
 
-pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSubAgent]) {
+pub(super) fn run_startup(
+    ctx: &Arc<OrchestratorCtx>,
+    unfinished: &[UnfinishedSubAgent],
+    all_sessions: Vec<crate::storage::SessionInfo>,
+) {
     let sessions = Arc::clone(&ctx.sessions);
     let _runtime = ctx.runtime.clone();
     let channels = ctx.channels.clone();
@@ -191,9 +195,8 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
     // incomplete history — and recovered via `recover_suspension` instead.
     // Corrupt/unparseable suspension files are ignored here; the session's
     // own restore path warns about them.
-    let suspended_ids: std::collections::HashSet<String> = sessions
-        .list_all_sessions()
-        .into_iter()
+    let suspended_ids: std::collections::HashSet<String> = all_sessions
+        .iter()
         .filter(|info| {
             backend
                 .load_suspension(&info.id)
@@ -218,7 +221,7 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
     // Recover only the active session for each routing key. Inactive sessions
     // resume when the user switches back and sends a normal message.
     let mut seen_owners = std::collections::HashSet::new();
-    for info in sessions.list_all_sessions() {
+    for info in &all_sessions {
         let key = info.owner;
         if !seen_owners.insert(key.clone()) {
             continue;
@@ -380,7 +383,7 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
     // authoritative); otherwise load a temporary one (restores the state from
     // disk at construction). Each uncovered pending task is failed with a
     // "daemon restarted" note; the merged notice then routes one resume turn.
-    for info in sessions.list_all_sessions() {
+    for info in &all_sessions {
         if !suspended_ids.contains(&info.id) {
             continue;
         }
