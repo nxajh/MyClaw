@@ -523,10 +523,7 @@ pub(super) fn dispatch_turn_spawn(
     // process_turn where turn_lock is held, to avoid appending or overwriting
     // history while a previous turn is still running.
 
-    let channel = match ctx.channel(&key.account_key()) {
-        Some(c) => c,
-        None => return None,
-    };
+    let channel = ctx.channel(&key.account_key())?;
 
     // Dispatch via SessionContext.process_turn — the canonical RFC v2 per-turn
     // entry point. Spawn on a background task so the event loop is not blocked
