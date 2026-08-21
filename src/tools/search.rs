@@ -66,6 +66,7 @@ struct WalkStats {
     skipped_dirs: Vec<String>,
     skipped_large_files: usize,
     unreadable_files: usize,
+    skipped_protected_files: usize,
     truncated: bool,
 }
 
@@ -489,6 +490,21 @@ impl Tool for ContentSearchTool {
                     continue;
                 }
             }
+            // Same backstop as file_read: never surface the contents of a
+            // protected path (~/.ssh/**, **/.env, ...) through a recursive
+            // content search either — content_search reads file bytes just
+            // like file_read does, at the same auto-approved trust tier.
+            let abs_file_path = if file_path.is_absolute() {
+                file_path.clone()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(file_path)
+            };
+            if crate::config::is_path_protected(&abs_file_path) {
+                stats.skipped_protected_files += 1;
+                continue;
+            }
             if let Ok(meta) = std::fs::metadata(file_path) {
                 if meta.len() > 5_000_000 {
                     stats.skipped_large_files += 1;
@@ -532,7 +548,7 @@ impl Tool for ContentSearchTool {
             .count();
         let display_truncated = matched_lines >= max_results;
         let mut output = format!(
-            "content_search diagnostics: base={} base_exists=true regex={} include={} scanned_files={} candidate_files={} skipped_dirs={} skipped_large_files={} unreadable_files={} traversal_truncated={} result_truncated={} max_results={}\n",
+            "content_search diagnostics: base={} base_exists=true regex={} include={} scanned_files={} candidate_files={} skipped_dirs={} skipped_large_files={} unreadable_files={} skipped_protected_files={} traversal_truncated={} result_truncated={} max_results={}\n",
             base.display(),
             pattern,
             include.unwrap_or("<none>"),
@@ -541,6 +557,7 @@ impl Tool for ContentSearchTool {
             stats.skipped_dirs.len(),
             stats.skipped_large_files,
             stats.unreadable_files,
+            stats.skipped_protected_files,
             stats.truncated,
             display_truncated,
             max_results
@@ -564,5 +581,45 @@ impl Tool for ContentSearchTool {
             output,
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod protected_path_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn content_search_skips_protected_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // `**/.env` is a default protected pattern regardless of directory,
+        // so this doesn't depend on the real $HOME the way `~/.ssh/**` would.
+        std::fs::write(dir.path().join(".env"), "SECRET_KEY=do-not-leak").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "SECRET_KEY appears here too").unwrap();
+
+        let tool = ContentSearchTool::new();
+        let result = tool
+            .execute(
+                json!({"regex": "SECRET_KEY", "path": dir.path().to_str().unwrap()}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            !result.output.contains("do-not-leak"),
+            "protected .env contents leaked into search results: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("notes.txt"),
+            "unprotected file's match should still be found: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("skipped_protected_files=1"),
+            "diagnostics should report the skipped protected file: {}",
+            result.output
+        );
     }
 }

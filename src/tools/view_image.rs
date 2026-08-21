@@ -228,6 +228,13 @@ impl Tool for ViewImageTool {
         let abs = crate::tools::media_download::resolve_path_or_url(path, &self.data_dir)
             .await
             .map_err(|e| anyhow::anyhow!("cannot resolve path/URL '{path}': {e}"))?;
+        if crate::config::is_path_protected(&abs) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("path '{path}' is protected and cannot be read")),
+            });
+        }
         let meta = match std::fs::metadata(&abs) {
             Ok(meta) if meta.is_file() => meta,
             Ok(_) => {
@@ -356,5 +363,52 @@ mod tests {
         assert_eq!(infer_image_mime("x.JPG"), Some("image/jpeg"));
         assert_eq!(infer_image_mime("x.webp"), Some("image/webp"));
         assert_eq!(infer_image_mime("x.pdf"), None);
+    }
+
+    /// Errors on every call — proves `execute()` never reaches provider
+    /// dispatch when the protected-path check short-circuits first.
+    struct NullRegistry;
+    #[rustfmt::skip]
+    impl ProviderRegistry for NullRegistry {
+        fn get_chat_provider(&self, _c: crate::providers::Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_chat_provider_with_hint(&self, _c: crate::providers::Capability, _h: Option<&str>) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_chat_fallback_chain(&self, _c: crate::providers::Capability) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>> { anyhow::bail!("test stub") }
+        fn get_embedding_provider(&self) -> anyhow::Result<(Arc<dyn crate::providers::EmbeddingProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_image_provider(&self) -> anyhow::Result<(Arc<dyn crate::providers::ImageGenerationProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_tts_provider(&self) -> anyhow::Result<(Arc<dyn crate::providers::TtsProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn crate::providers::VideoGenerationProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn crate::providers::SearchProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<crate::providers::provider_registry::SearchFallbackEntry>> { anyhow::bail!("test stub") }
+        fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn crate::providers::SttProvider>, String)> { anyhow::bail!("test stub") }
+        fn get_chat_model_config(&self, _m: &str) -> anyhow::Result<&crate::providers::capability::ChatModelConfig> { anyhow::bail!("test stub") }
+        fn get_chat_provider_by_model(&self, _m: &str) -> Option<(Arc<dyn ChatProvider>, String)> { panic!("provider dispatch reached — protected-path check did not short-circuit") }
+        fn get_chat_provider_id_by_model(&self, _m: &str) -> Option<String> { None }
+        fn get_chat_media_policy(&self, _m: &str) -> Option<crate::providers::MediaPolicy> { None }
+        fn get_chat_routing_models(&self) -> Vec<String> { vec!["stub-model".to_string()] }
+        fn get_all_provider_summaries(&self) -> Vec<crate::providers::provider_registry::ProviderSummary> { Vec::new() }
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_protected_path_before_touching_providers() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/test".to_string());
+        let protected = format!("{home}/.ssh/id_rsa");
+        let tool = ViewImageTool::new(Arc::new(NullRegistry), std::path::PathBuf::from("/data"));
+        let result = tool
+            .execute(
+                json!({"path": protected, "question": "what is this?"}),
+                &Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("is protected and cannot be read"),
+            "got: {:?}",
+            result.error
+        );
     }
 }

@@ -122,6 +122,9 @@ impl Tool for FileReadTool {
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;
 
         let resolved = validate_path(path)?;
+        if crate::config::is_path_protected(&resolved) {
+            anyhow::bail!("path '{}' is protected and cannot be read", path);
+        }
         let path = resolved.to_str().unwrap_or(path);
 
         let outline = args["outline"].as_bool().unwrap_or(false);
@@ -773,4 +776,44 @@ fn replacement_context_diff(
     }
 
     out
+}
+
+#[cfg(test)]
+mod protected_path_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn file_read_rejects_protected_path() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/test".to_string());
+        let protected = format!("{home}/.ssh/id_rsa");
+        let tool = FileReadTool::new();
+        let err = tool
+            .execute(
+                json!({"path": protected}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("is protected and cannot be read"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_read_allows_unprotected_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "hello").unwrap();
+        let tool = FileReadTool::new();
+        let result = tool
+            .execute(
+                json!({"path": path.to_str().unwrap()}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("hello"));
+    }
 }
