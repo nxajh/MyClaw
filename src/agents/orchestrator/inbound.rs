@@ -482,11 +482,20 @@ pub(super) async fn dispatch_turn(
 /// (`dispatch_turn`'s body spawns the block that awaits the drain, and the
 /// drain awaits `dispatch_turn`) and the `Send` proof at `tokio::spawn`
 /// fails to close. A sync call keeps the graph acyclic.
+///
+/// Returns the spawned task's `JoinHandle` when a turn was actually spawned
+/// (`None` when the message was queued or dropped instead). Issue #106:
+/// `drain_delegation_notices` awaits this handle for each notice in turn —
+/// `tokio::spawn` already type-erases the future (breaking the cyclic-type
+/// concern above), so awaiting the returned handle costs nothing structurally
+/// but lets the drain loop enforce strict one-at-a-time delivery order
+/// instead of firing N independently-scheduled tasks that race the same
+/// `turn_lock` in whatever order the runtime happens to poll them.
 pub(super) fn dispatch_turn_spawn(
     ctx: &OrchestratorCtx,
     key: &SessionKey,
     msg: ChannelInboundMessage,
-) {
+) -> Option<tokio::task::JoinHandle<()>> {
     let sk = key.to_string();
 
     let session_ctx = ctx.sessions.get_or_create_context(&sk);
@@ -507,7 +516,7 @@ pub(super) fn dispatch_turn_spawn(
         && (session_ctx.has_pending_delegations() || session_ctx.has_notice_turns_in_flight())
     {
         session_ctx.enqueue_user_message(msg);
-        return;
+        return None;
     }
 
     // B12: store the full inbound message right before processing the turn inside
@@ -516,7 +525,7 @@ pub(super) fn dispatch_turn_spawn(
 
     let channel = match ctx.channel(&key.account_key()) {
         Some(c) => c,
-        None => return,
+        None => return None,
     };
 
     // Dispatch via SessionContext.process_turn — the canonical RFC v2 per-turn
@@ -542,7 +551,7 @@ pub(super) fn dispatch_turn_spawn(
     // `key` is a borrow and cannot move into the 'static spawn closure; the
     // drained message is re-dispatched against the same account pair.
     let account = key.account_key();
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let _guard = turn_tracker.track();
         // RFC §3.5/§4.3: render per-turn injections — user-level mailbox
         // (cross-user messages; drained = 注入即消费, shown once) and pending
@@ -645,7 +654,7 @@ pub(super) fn dispatch_turn_spawn(
             };
             let _ = channel.send_message(&message).await;
         }
-    });
+    }))
 }
 
 // ── spooled-message replay (RFC inbound-spool §6.4) ──────────────────────────

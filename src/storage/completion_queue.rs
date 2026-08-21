@@ -153,7 +153,17 @@ impl CompletionNoticeStore {
         {
             let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
             if !seen.insert(entry.id.clone()) {
-                tracing::warn!(notice_id = %entry.id, "completion queue: duplicate id; skipping persist");
+                // Issue #106: this is NOT a dropped notification — a notice
+                // with this id was already appended (and its in-memory
+                // delivery already queued/in flight, e.g. a resume's second
+                // terminal event reusing the same synthetic id); only the
+                // *on-disk persistence* is skipped, since re-writing it would
+                // be a redundant duplicate entry on top of one already
+                // tracked. The notice still gets delivered normally.
+                tracing::warn!(
+                    notice_id = %entry.id,
+                    "completion queue: duplicate id, skipping on-disk persist only (delivery already in flight, not dropped)"
+                );
                 return Ok(None);
             }
         }
