@@ -91,8 +91,10 @@ pub async fn run(_cli: &Cli, fix: bool) -> Result<()> {
 
         // 5b. Draft skills (issue #89 — auto-extracted skills hidden from
         // normal loading until reviewed; surface the backlog so it doesn't
-        // silently accumulate).
-        let skills_dir = ws.join("skills");
+        // silently accumulate). Drafts are written to skills_root() (=
+        // {base_dir}/skills), not workspace_dir/skills (issue #102) — this
+        // used to always read an empty/nonexistent directory.
+        let skills_dir = cfg.skills_root();
         let drafts = myclaw::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
         if drafts.is_empty() {
             println!("✅ Draft skills: none pending");
