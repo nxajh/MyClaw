@@ -152,7 +152,7 @@ impl ChatProvider for OpenAiChatCompletionsClient {
             let mut recent_sse_data: std::collections::VecDeque<String> =
                 std::collections::VecDeque::with_capacity(RECENT_SSE_CAP + 1);
             let mut buffer = String::new();
-            let mut utf8_buf = Vec::new();
+            let mut utf8_decoder = crate::providers::shared::Utf8StreamDecoder::new();
             let mut stream = resp.bytes_stream();
 
             while let Some(item) = stream.next().await {
@@ -164,24 +164,15 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                         return;
                     }
                 };
-                utf8_buf.extend_from_slice(&bytes);
-                let try_decode = std::str::from_utf8(&utf8_buf);
-                let text = match try_decode {
-                    Ok(s) => {
-                        let owned = s.to_string();
-                        utf8_buf.clear();
-                        owned
-                    }
-                    Err(e) => {
-                        let valid = e.valid_up_to();
-                        if valid == 0 && utf8_buf.len() < 4 {
-                            continue;
-                        }
-                        let t = String::from_utf8_lossy(&utf8_buf[..valid]).into_owned();
-                        utf8_buf.clear();
-                        t
-                    }
-                };
+                let (text, invalid) = utf8_decoder.push(&bytes);
+                for diag in invalid {
+                    tracing::warn!(
+                        url = %url,
+                        valid_up_to = diag.valid_up_to,
+                        bad_len = diag.bad_len,
+                        "invalid UTF-8 byte sequence in SSE stream, skipping"
+                    );
+                }
                 if text.is_empty() {
                     continue;
                 }
@@ -359,12 +350,12 @@ fn resolve_stream_outcome(sse_stop_reason: Option<StopReason>, saw_tool_call: bo
     };
 
     if matches!(final_reason, StopReason::ToolUse) && !saw_tool_call {
-        StreamEvent::Error(
-            "provider reported finish_reason=tool_calls but no tool call \
+        StreamEvent::Error(format!(
+            "{}: provider reported finish_reason=tool_calls but no tool call \
              could be parsed from the stream (SSE chunk parse failure — \
-             see the preceding WARN for the raw chunk dump)"
-                .to_string(),
-        )
+             see the preceding WARN for the raw chunk dump)",
+            crate::providers::error_class::TOOL_CALL_PARSE_LOSS_TAG
+        ))
     } else {
         StreamEvent::Done {
             reason: final_reason,

@@ -134,6 +134,9 @@ fn message_for_classified(c: &crate::providers::ClassifiedError) -> String {
                 "⚠️ 请求无法处理（格式错误）。".to_string()
             }
         }
+        ErrorCategory::ToolCallLost => {
+            "⚠️ 模型决定执行的操作在传输中丢失，未被执行。请重新说明需要做什么。".to_string()
+        }
     }
 }
 

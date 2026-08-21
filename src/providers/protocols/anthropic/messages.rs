@@ -153,7 +153,7 @@ impl AnthropicMessagesClient {
             // stream ends without one, the connection was closed mid-response.
             let mut saw_terminal = false;
             let mut buffer = String::new();
-            let mut utf8_buf = Vec::new();
+            let mut utf8_decoder = crate::providers::shared::Utf8StreamDecoder::new();
             let mut stream = resp.bytes_stream();
 
             while let Some(item) = stream.next().await {
@@ -165,23 +165,15 @@ impl AnthropicMessagesClient {
                         return;
                     }
                 };
-                utf8_buf.extend_from_slice(&bytes);
-                let text = match std::str::from_utf8(&utf8_buf) {
-                    Ok(s) => {
-                        let owned = s.to_string();
-                        utf8_buf.clear();
-                        owned
-                    }
-                    Err(e) => {
-                        let valid = e.valid_up_to();
-                        if valid == 0 && utf8_buf.len() < 4 {
-                            continue;
-                        }
-                        let t = String::from_utf8_lossy(&utf8_buf[..valid]).into_owned();
-                        utf8_buf.clear();
-                        t
-                    }
-                };
+                let (text, invalid) = utf8_decoder.push(&bytes);
+                for diag in invalid {
+                    tracing::warn!(
+                        url = %url,
+                        valid_up_to = diag.valid_up_to,
+                        bad_len = diag.bad_len,
+                        "invalid UTF-8 byte sequence in SSE stream, skipping"
+                    );
+                }
                 if text.is_empty() {
                     continue;
                 }

@@ -15,6 +15,16 @@
 use std::fmt;
 use std::time::Duration;
 
+/// Embedded in a `StreamEvent::Error` message (see
+/// `providers::protocols::openai::chat_completions::resolve_stream_outcome`)
+/// when a stream reported `finish_reason=tool_calls` but no tool-call event
+/// was ever parsed from it. `classify()` checks for this tag before falling
+/// back to the generic status-0 → Timeout classification, so this specific
+/// failure is never treated as a transient/fallback-eligible error (issue
+/// #91 — that misclassification is what let `FallbackChatProvider` silently
+/// retry on a different model, discarding the original model's decision).
+pub const TOOL_CALL_PARSE_LOSS_TAG: &str = "tool_call_parse_loss";
+
 // ── ProviderHttpError ─────────────────────────────────────────────────────
 
 /// Typed carrier for an HTTP error from a provider stream.
@@ -57,6 +67,13 @@ pub enum ErrorCategory {
     PayloadTooLarge,
     /// Request format error (400 — invalid schema, tool format, etc.).
     FormatError,
+    /// A stream reported `finish_reason=tool_calls` but no tool-call event
+    /// could be parsed from it (issue #91: an SSE chunk carrying tool-call
+    /// deltas failed JSON parsing). Deliberately **not** fallback-eligible:
+    /// switching to another model would silently discard the original
+    /// model's actual decision rather than recover it, and blindly retrying
+    /// risks duplicating narrative text already forwarded to the session.
+    ToolCallLost,
 }
 
 impl fmt::Display for ErrorCategory {
@@ -73,6 +90,7 @@ impl fmt::Display for ErrorCategory {
             Self::ContextOverflow => write!(f, "ContextOverflow"),
             Self::PayloadTooLarge => write!(f, "PayloadTooLarge"),
             Self::FormatError => write!(f, "FormatError"),
+            Self::ToolCallLost => write!(f, "ToolCallLost"),
         }
     }
 }
@@ -106,6 +124,9 @@ pub enum FailoverReason {
     ModelNotFound,
     /// Bad request (400) — abort or strip + retry.
     FormatError,
+    /// Stream reported a tool call but none could be parsed — abort, don't
+    /// fallback or retry (see [`ErrorCategory::ToolCallLost`]).
+    ToolCallLost,
     /// Unclassifiable — retry with backoff.
     Unknown,
 }
@@ -124,6 +145,7 @@ impl From<ErrorCategory> for FailoverReason {
             ErrorCategory::PayloadTooLarge => Self::PayloadTooLarge,
             ErrorCategory::ModelNotFound => Self::ModelNotFound,
             ErrorCategory::FormatError => Self::FormatError,
+            ErrorCategory::ToolCallLost => Self::ToolCallLost,
         }
     }
 }
@@ -187,11 +209,18 @@ impl ClassifiedError {
 
     /// Classify an error through the three-layer pipeline.
     ///
+    /// - **Layer 0** — internal tag in the message body (e.g.
+    ///   [`TOOL_CALL_PARSE_LOSS_TAG`]) → dedicated category, bypassing the
+    ///   generic status-0 → Timeout default that would otherwise make it
+    ///   fallback-eligible.
     /// - **Layer 1** — HTTP status code → broad category.
     /// - **Layer 2** — Provider-specific business codes → fine-grained category.
     /// - **Layer 3** — Fallback: `Timeout` when `status == 0`; otherwise
     ///   `FormatError` for 400 or `RateLimit` for everything else.
     pub fn classify(provider: &str, status: u16, body: &str) -> Self {
+        if status == 0 && body.contains(TOOL_CALL_PARSE_LOSS_TAG) {
+            return Self::from_parts(ErrorCategory::ToolCallLost, status, provider, body.to_string(), None);
+        }
         let category = match classify_http(status) {
             Some(cat) => cat,
             None => {
@@ -235,6 +264,7 @@ impl ClassifiedError {
             FailoverReason::PayloadTooLarge => ErrorCategory::PayloadTooLarge,
             FailoverReason::ModelNotFound => ErrorCategory::ModelNotFound,
             FailoverReason::FormatError => ErrorCategory::FormatError,
+            FailoverReason::ToolCallLost => ErrorCategory::ToolCallLost,
             FailoverReason::Unknown => ErrorCategory::ServerError,
         };
         Self::from_parts(category, 0, "", message.into(), None)
@@ -418,6 +448,11 @@ fn recovery_hints_for(category: &ErrorCategory, retry_after: Option<Duration>) -
             report: false,
         },
         ErrorCategory::FormatError => RecoveryHints {
+            retry: false,
+            cooldown: None,
+            report: true,
+        },
+        ErrorCategory::ToolCallLost => RecoveryHints {
             retry: false,
             cooldown: None,
             report: true,
@@ -787,6 +822,32 @@ mod tests {
         assert_eq!(err.category, ErrorCategory::Timeout);
         assert_eq!(err.reason, FailoverReason::Timeout);
         assert!(err.retryable);
+    }
+
+    // ── #91: tool-call-lost tag (Layer 0) ──
+
+    #[test]
+    fn tool_call_parse_loss_tag_bypasses_timeout_default() {
+        let msg = format!(
+            "{TOOL_CALL_PARSE_LOSS_TAG}: provider reported finish_reason=tool_calls \
+             but no tool call could be parsed from the stream"
+        );
+        let err = ClassifiedError::classify("openai", 0, &msg);
+        assert_eq!(err.category, ErrorCategory::ToolCallLost);
+        // The three properties that matter for #91: never retried, never
+        // failed over to another model, never same-model retried — a lost
+        // tool call must surface as a terminal error, not a masked retry.
+        assert!(!err.retryable);
+        assert!(!err.should_fallback);
+        assert!(!err.should_same_model_retry());
+    }
+
+    #[test]
+    fn from_message_without_tag_is_still_timeout() {
+        // Sanity check the tag-check doesn't accidentally widen what counts
+        // as ToolCallLost — an unrelated status-0 error stays Timeout.
+        let err = ClassifiedError::from_message("connection reset by peer");
+        assert_eq!(err.category, ErrorCategory::Timeout);
     }
 
     // ── Recovery hints tests ──
