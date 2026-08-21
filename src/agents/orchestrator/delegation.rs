@@ -485,6 +485,15 @@ pub(super) async fn route_notice(
 /// next pass). `bump_notice_turn` happens here, synchronously before each
 /// notice-turn spawn (`dispatch_turn_spawn`) — the same sync section the
 /// pre-P1 code used.
+///
+/// Issue #106: each notice's turn is now awaited to completion (via the
+/// `JoinHandle` `dispatch_turn_spawn` returns) before the loop moves to the
+/// next notice, so a multi-notice pass delivers in the queue's own FIFO
+/// order — previously all notices in a pass were fired as independent
+/// `tokio::spawn`ed tasks with nothing serializing *which order they'd
+/// actually reach* the shared `turn_lock`, so a pass accumulated while the
+/// session was busy for a while (several completions queued up, then
+/// released together on turn-end) could deliver out of event order.
 pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: &str) {
     let session = match ctx.sessions.get_by_id(session_id) {
         Some(s) => s,
@@ -521,11 +530,6 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
             return;
         }
     };
-    let is_active = ctx
-        .sessions
-        .active_session_id(routing_key)
-        .is_some_and(|id| id == session_id);
-
     let mut seen = std::collections::HashSet::new();
     for notice in notices {
         if !seen.insert(notice.id.clone()) {
@@ -534,6 +538,15 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
         }
         let silenced_override = notice.silenced_override;
 
+        // Issue #106: re-checked per notice, not once before the loop —
+        // now that each notice's turn is awaited to completion in order
+        // (below), a multi-notice pass can genuinely straddle a session
+        // switch by the time a later notice's turn is about to start.
+        let is_active = ctx
+            .sessions
+            .active_session_id(routing_key)
+            .is_some_and(|id| id == session_id);
+
         if is_active && ctx.channel(&key.account_key()).is_some() {
             // 单 preview (2026-08-12): count this notice turn in-flight
             // synchronously (same sync section as `record_terminal`, no
@@ -541,6 +554,7 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
             // decrements on exit.
             sctx.bump_notice_turn();
 
+            let notice_id_for_log = notice.id.clone();
             let synthetic = ChannelInboundMessage {
                 id: notice.id,
                 sender: crate::channels::MessageSender::new(key.sender.clone()),
@@ -558,10 +572,24 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
                 // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
                 run_mode: Default::default(),
             };
-            // Sync spawn (no await): awaiting `dispatch_turn` here would
-            // create a cyclic Send-proving graph (the block `dispatch_turn`
-            // spawns awaits this drain). `dispatch_turn_spawn` has no awaits.
-            super::inbound::dispatch_turn_spawn(ctx, &key, synthetic);
+            // Issue #106: await this notice's turn to completion before
+            // moving to the next one in the loop. `dispatch_turn_spawn`
+            // still runs the turn on its own `tokio::spawn`ed task — that's
+            // what keeps the Future graph acyclic (see its doc comment) —
+            // but awaiting the `JoinHandle` it returns turns what used to be
+            // N independently-scheduled tasks racing the same `turn_lock`
+            // (arrival order then depended on runtime poll order, not
+            // event order — the root cause of out-of-order delivery) into a
+            // strict FIFO sequence matching the queue's own order.
+            if let Some(handle) = super::inbound::dispatch_turn_spawn(ctx, &key, synthetic) {
+                if let Err(e) = handle.await {
+                    tracing::warn!(
+                        notice_id = %notice_id_for_log,
+                        err = %e,
+                        "delegation notice turn task panicked"
+                    );
+                }
+            }
         } else {
             // Session went inactive (or channel disappeared) — fall back to
             // the non-active path so the notice still lands in history.
@@ -1082,8 +1110,13 @@ mod tests {
             silenced_override: Some(false),
         });
         drain_delegation_notices(&ctx, &sctx.session_id).await;
-        // drain only awaits take+spawn; the notice turns run in background.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Issue #106: no sleep needed here (unlike the sibling tests that go
+        // through `wake`'s outer fire-and-forget spawn) — `drain_delegation_notices`
+        // now awaits each notice's dispatch `JoinHandle` in turn before
+        // returning, so by the time this `.await` resolves both notice turns
+        // have genuinely finished, not just been scheduled — the structural
+        // guarantee behind the fix: a `for` loop awaiting inside its body
+        // cannot start iteration N+1 before iteration N's await resolves.
         assert!(!sctx.has_queued_delegation_notices());
         assert_eq!(sctx.notice_turns_in_flight.load(Ordering::SeqCst), 0);
         // Each notice spawned a turn; each failed on NullRegistry and sent
