@@ -852,6 +852,7 @@ impl Agent {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         output: result_content,
+                        is_error,
                     },
                 )
                 .await;
