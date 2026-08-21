@@ -2728,14 +2728,13 @@ impl TurnStream for TelegramTurnStream {
                         self.flush_preview().await;
                     }
                 }
-                TurnEvent::ToolResult { name, output, .. } => {
-                    // Detect failure from output and annotate the matching
-                    // tool line with `_failed_` (OpenClaw-style).
-                    let failed = output.starts_with("error")
-                        || output.starts_with("Error")
-                        || output.contains("failed:")
-                        || output.contains("panicked");
-                    if failed {
+                TurnEvent::ToolResult { name, is_error, .. } => {
+                    // Annotate the matching tool line with `_failed_`
+                    // (OpenClaw-style) using the tool layer's own
+                    // success/error signal — not text-sniffed from output,
+                    // which false-positives on content merely mentioning
+                    // words like "failed:" (issue #103).
+                    if is_error {
                         // Find the last line for this tool name.
                         let label = resolve_tool_display(&name, &serde_json::Value::Null).1;
                         if let Some(line) = self
@@ -3076,6 +3075,64 @@ mod tests {
             delivery: StreamDelivery::Pending,
             finished: false,
         }
+    }
+
+    /// issue #103: a successful tool result whose *output text* happens to
+    /// contain a failure-sniff trigger word ("failed:") must NOT be marked
+    /// `_failed_` — the structured `is_error` flag decides, not text sniffing.
+    #[tokio::test]
+    async fn tool_result_success_is_not_marked_failed_despite_output_text() {
+        let mut s = make_stream();
+        s.mode = crate::config::channel::StreamingMode::Progress;
+        s.push(TurnEvent::ToolCall {
+            id: "1".into(),
+            name: "skill_view".into(),
+            args: serde_json::json!({"name": "github"}),
+        })
+        .await
+        .unwrap();
+        s.push(TurnEvent::ToolResult {
+            id: "1".into(),
+            name: "skill_view".into(),
+            output: "View a run and see which steps failed:\n...".into(),
+            is_error: false,
+        })
+        .await
+        .unwrap();
+        assert!(
+            s.tool_lines.iter().all(|l| !l.contains("_failed_")),
+            "successful tool result was falsely annotated as failed: {:?}",
+            s.tool_lines
+        );
+    }
+
+    /// issue #103: a genuinely failed tool result must still be annotated,
+    /// even when its output text doesn't start with "error"/"Error" or
+    /// contain any of the old sniff-rule substrings.
+    #[tokio::test]
+    async fn tool_result_error_is_marked_failed_via_flag() {
+        let mut s = make_stream();
+        s.mode = crate::config::channel::StreamingMode::Progress;
+        s.push(TurnEvent::ToolCall {
+            id: "1".into(),
+            name: "skill_view".into(),
+            args: serde_json::json!({"name": "github"}),
+        })
+        .await
+        .unwrap();
+        s.push(TurnEvent::ToolResult {
+            id: "1".into(),
+            name: "skill_view".into(),
+            output: "skill not found".into(),
+            is_error: true,
+        })
+        .await
+        .unwrap();
+        assert!(
+            s.tool_lines.iter().any(|l| l.contains("_failed_")),
+            "genuinely failed tool result was not annotated: {:?}",
+            s.tool_lines
+        );
     }
 
     /// 单 preview (2026-08-12): the inherited origin body is kept VERBATIM

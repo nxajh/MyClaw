@@ -105,6 +105,9 @@ pub enum TurnEvent {
         id: String,
         name: String,
         output: String,
+        /// Whether the tool call failed, from the tool layer's own
+        /// success/error signal — not inferred from `output` text.
+        is_error: bool,
     },
 
     /// Turn 被用户取消
