@@ -32,17 +32,14 @@ fn today(timezone_offset: i32) -> String {
     local.format("%Y-%m-%d").to_string()
 }
 
-/// If the draft backlog under `{workspace_dir}/skills` is at or above
-/// [`THRESHOLD`] and no reminder has fired yet today, returns the draft
-/// names and persists today's date so it won't fire again until tomorrow.
-/// Returns `None` otherwise — including on any I/O error, since this is a
-/// best-effort nudge that must never block or fail a turn.
-pub fn check_and_arm(
-    base_dir: &Path,
-    workspace_dir: &Path,
-    timezone_offset: i32,
-) -> Option<Vec<String>> {
-    let skills_dir = workspace_dir.join("skills");
+/// If the draft backlog under `{base_dir}/skills` (= `AppConfig::skills_root()`
+/// — where `skill_manage` actually writes drafts, issue #102) is at or
+/// above [`THRESHOLD`] and no reminder has fired yet today, returns the
+/// draft names and persists today's date so it won't fire again until
+/// tomorrow. Returns `None` otherwise — including on any I/O error, since
+/// this is a best-effort nudge that must never block or fail a turn.
+pub fn check_and_arm(base_dir: &Path, timezone_offset: i32) -> Option<Vec<String>> {
+    let skills_dir = base_dir.join("skills");
     let drafts = crate::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
     if drafts.len() < THRESHOLD {
         return None;
@@ -88,36 +85,33 @@ mod tests {
     #[test]
     fn below_threshold_never_fires() {
         let base = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let skills_dir = workspace.path().join("skills");
+        let skills_dir = base.path().join("skills");
         for i in 0..THRESHOLD - 1 {
             write_draft_skill(&skills_dir, &format!("draft-{i}"));
         }
-        assert!(check_and_arm(base.path(), workspace.path(), 0).is_none());
+        assert!(check_and_arm(base.path(), 0).is_none());
     }
 
     #[test]
     fn at_threshold_fires_once_then_throttles_same_day() {
         let base = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let skills_dir = workspace.path().join("skills");
+        let skills_dir = base.path().join("skills");
         for i in 0..THRESHOLD {
             write_draft_skill(&skills_dir, &format!("draft-{i}"));
         }
-        let first = check_and_arm(base.path(), workspace.path(), 0);
+        let first = check_and_arm(base.path(), 0);
         assert_eq!(first.map(|v| v.len()), Some(THRESHOLD));
 
         // Second call same day: throttled even though the backlog is
         // still (more than) big enough.
-        let second = check_and_arm(base.path(), workspace.path(), 0);
+        let second = check_and_arm(base.path(), 0);
         assert!(second.is_none());
     }
 
     #[test]
     fn fires_again_on_a_new_day() {
         let base = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let skills_dir = workspace.path().join("skills");
+        let skills_dir = base.path().join("skills");
         for i in 0..THRESHOLD {
             write_draft_skill(&skills_dir, &format!("draft-{i}"));
         }
@@ -129,7 +123,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let result = check_and_arm(base.path(), workspace.path(), 0);
+        let result = check_and_arm(base.path(), 0);
         assert!(result.is_some(), "a new day must re-arm the reminder");
     }
 }

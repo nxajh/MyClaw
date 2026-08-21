@@ -38,8 +38,12 @@ pub struct SkillExtractInput {
     pub tool_registry: Arc<ToolRegistry>,
     /// Real session ID for provenance.
     pub session_id: String,
-    /// Workspace root (skills live in `{workspace_dir}/skills/`).
-    pub workspace_dir: String,
+    /// Data dir root — skills actually live in `{base_dir}/skills/` (=
+    /// `AppConfig::skills_root()`, where `skill_manage` writes), not under
+    /// the agent workspace (issue #102: this field used to hold
+    /// `workspace_dir`, so the dedup index below was always built from a
+    /// directory nothing writes to).
+    pub base_dir: String,
     /// Channel to notify on the session that just hosted this turn, so a
     /// newly-written draft doesn't accumulate silently (issue #89). `None`
     /// for headless/cron sessions or when no channel is wired.
@@ -168,7 +172,7 @@ async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<Vec<String>
     session_shell.id = input.session_id.clone();
 
     // Build existing skills index for dedup.
-    let existing_index = build_existing_skills_index(&input.workspace_dir);
+    let existing_index = build_existing_skills_index(&input.base_dir);
 
     // Assemble messages: conversation context + extraction prompt.
     let mut messages = input.messages;
@@ -302,8 +306,8 @@ async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<Vec<String>
 }
 
 /// Build a compact index of existing skills for the prompt.
-fn build_existing_skills_index(workspace_dir: &str) -> String {
-    let skills_dir = std::path::Path::new(workspace_dir).join("skills");
+fn build_existing_skills_index(base_dir: &str) -> String {
+    let skills_dir = std::path::Path::new(base_dir).join("skills");
     let definitions =
         crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
     if definitions.is_empty() {

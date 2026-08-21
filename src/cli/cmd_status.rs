@@ -89,9 +89,17 @@ fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
             println!("  Sub-agents: {}", agents.len());
             println!("  MCP servers: {}", cfg.mcp_servers.len());
 
-            let skills_dir = cfg.workspace_dir.join("skills");
-            let loaded = myclaw::agents::workspace::skill_loader::load_skills_from_dir(&skills_dir)
-                .len();
+            // Issue #102: drafts are written to skills_root() (= {base_dir}
+            // /skills), not workspace_dir/skills — read from where the
+            // daemon actually serves skills from (skills_root() layered
+            // with the shared ~/.agents/skills dir) so this count matches
+            // reality instead of always reporting zero.
+            let skills_dir = cfg.skills_root();
+            let loaded = myclaw::agents::workspace::skill_loader::load_skills_layered(
+                &skills_dir,
+                cfg.agents_skills_dir_opt().as_deref(),
+            )
+            .len();
             let drafts =
                 myclaw::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
             println!(
@@ -136,9 +144,13 @@ fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
         status["sub_agents"] = serde_json::json!(agents.len());
         status["mcp_servers"] = serde_json::json!(c.mcp_servers.len());
 
-        let skills_dir = c.workspace_dir.join("skills");
-        let loaded =
-            myclaw::agents::workspace::skill_loader::load_skills_from_dir(&skills_dir).len();
+        // Issue #102: see the matching comment in print_text_status.
+        let skills_dir = c.skills_root();
+        let loaded = myclaw::agents::workspace::skill_loader::load_skills_layered(
+            &skills_dir,
+            c.agents_skills_dir_opt().as_deref(),
+        )
+        .len();
         let drafts = myclaw::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
         status["skills"] = serde_json::json!({
             "loaded": loaded,

@@ -815,7 +815,6 @@ impl SessionContext {
             // layer ②) — best-effort, never blocks the turn.
             if let Some(names) = crate::agents::skill_draft_reminder::check_and_arm(
                 std::path::Path::new(&runtime.defaults.prompt.base_dir),
-                std::path::Path::new(&runtime.defaults.prompt.workspace_dir),
                 runtime.context_engine.timezone_offset(),
             ) {
                 session.attachments.push_skill_draft_reminder(names);
