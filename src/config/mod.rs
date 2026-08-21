@@ -180,11 +180,12 @@ pub struct LoggingConfig {
 
 // ── SafetyConfig ──────────────────────────────────────────────────────────────
 
-/// Safety configuration for protecting critical paths from agent modification.
+/// Safety configuration for protecting critical paths from agent access.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafetyConfig {
-    /// Glob patterns for paths the agent cannot modify (write/edit/delete).
-    /// Supports `~` expansion. Default includes critical system paths.
+    /// Glob patterns for paths the agent may neither read nor modify
+    /// (write/edit/delete). Supports `~` expansion. Default includes
+    /// critical system paths.
     #[serde(default = "default_protected_paths")]
     pub protected_paths: Vec<String>,
 }
@@ -576,7 +577,11 @@ pub fn init_safety_config(config: SafetyConfig) {
     let _ = SAFETY_CONFIG.set(config);
 }
 
-/// Check if a path is protected against agent modification (write/edit/delete).
+/// Check if a path is protected: agents may neither read nor modify
+/// (write/edit/delete) it, regardless of how the path was reached
+/// (workspace-relative, session-media marker, absolute, etc.) — this is the
+/// one location-independent backstop, distinct from and in addition to any
+/// per-tool path-resolution rules.
 /// Returns `true` when the global safety config has not been initialized
 /// **and** the path is within the default protected set, or when the path
 /// matches any pattern in the configured `protected_paths`.
