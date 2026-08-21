@@ -38,8 +38,14 @@ pub struct WorkspaceWatcher {
 
 impl WorkspaceWatcher {
     /// P1 variant: hot-reload roots supplied directly (base-dir derived).
+    ///
+    /// `agents_skills_dir` is the cross-agent shared skills library
+    /// (`~/.agents/skills`, issue #83) — `None` when `[skills]
+    /// include_agents_dir = false`. Changes under either skills directory
+    /// set `skills_changed`.
     pub fn new(
         skills_dir: PathBuf,
+        agents_skills_dir: Option<PathBuf>,
         agents_dir: PathBuf,
         memory_dir: &Path,
     ) -> Result<Self> {
@@ -48,6 +54,7 @@ impl WorkspaceWatcher {
         let memory_dir = memory_dir.to_path_buf();
 
         let skills_dir_c = skills_dir.clone();
+        let agents_skills_dir_c = agents_skills_dir.clone();
         let agents_dir_c = agents_dir.clone();
         let memory_dir_c = memory_dir.clone();
 
@@ -72,6 +79,11 @@ impl WorkspaceWatcher {
                     if path.starts_with(&skills_dir_c) {
                         changes.skills_changed = true;
                     }
+                    if let Some(ref dir) = agents_skills_dir_c {
+                        if path.starts_with(dir) {
+                            changes.skills_changed = true;
+                        }
+                    }
                     if path.starts_with(&agents_dir_c) {
                         changes.agents_changed = true;
                     }
@@ -91,6 +103,11 @@ impl WorkspaceWatcher {
 
         if skills_dir.exists() {
             watcher.watch(&skills_dir, RecursiveMode::Recursive)?;
+        }
+        if let Some(ref dir) = agents_skills_dir {
+            if dir.exists() {
+                watcher.watch(dir, RecursiveMode::Recursive)?;
+            }
         }
         if agents_dir.exists() {
             watcher.watch(&agents_dir, RecursiveMode::Recursive)?;
@@ -114,6 +131,7 @@ impl WorkspaceWatcher {
     /// authoritative reloader. Returns a guard whose Drop terminates the task.
     pub fn spawn_managed(
         skills_dir: PathBuf,
+        agents_skills_dir: Option<PathBuf>,
         agents_dir: PathBuf,
         memory_root: &Path,
         agent_registry: crate::agents::AgentRegistry,
@@ -121,6 +139,7 @@ impl WorkspaceWatcher {
     ) -> Result<ManagedWatcherGuard> {
         let watcher = Self::new(
             skills_dir.clone(),
+            agents_skills_dir.clone(),
             agents_dir.clone(),
             memory_root,
         )?;
@@ -145,7 +164,14 @@ impl WorkspaceWatcher {
                             tracing::info!(agent_count = n, "agents hot-reloaded by watcher");
                         }
                         if changes.skills_changed {
-                            let defs = super::skill_loader::load_skills_from_dir(&skills_dir);
+                            // Merge both layers into one `reload()` call —
+                            // `reload()` clears and replaces everything, so
+                            // calling it once per dir would wipe out the
+                            // other layer's skills (issue #83).
+                            let defs = super::skill_loader::load_skills_layered(
+                                &skills_dir,
+                                agents_skills_dir.as_deref(),
+                            );
                             let skills: Vec<crate::agents::Skill> =
                                 defs.iter().map(crate::agents::Skill::from_definition).collect();
                             let count = skills.len();

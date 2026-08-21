@@ -14,6 +14,7 @@ pub async fn run(
 ) -> Result<()> {
     let cfg = super::load_config(cli)?;
     super::init_tracing(&cfg);
+    myclaw::tools::shell_env::init(cfg.shell.clone());
 
     let registry = myclaw::registry::Registry::from_config(cfg.providers.clone(), &cfg.routing)
         .map_err(|e| anyhow::anyhow!("failed to build registry: {}", e))?;
@@ -39,6 +40,7 @@ pub async fn run(
     tools.register(Arc::new(myclaw::tools::SkillManageTool::new(
         Arc::clone(&skills_arc),
         cfg.skills_root(),
+        cfg.agents_skills_dir_opt(),
     )));
     // Memory tools — P1-B2 flat memory root, ownership via frontmatter.
     let resolver = Arc::new(myclaw::UserResolver::new());

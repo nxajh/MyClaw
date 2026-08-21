@@ -497,6 +497,11 @@ impl ShellTool {
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command).stdin(Stdio::null());
+        // Issue #84: the daemon (systemd user unit, no login shell in its
+        // ancestry) inherits a PATH that's missing user-installed CLIs
+        // (npm global, nvm, pyenv, Homebrew, …). Layer in a fix-up before
+        // spawning — see `tools::shell_env` for the three-layer strategy.
+        super::shell_env::apply(&mut cmd);
         if let Some(dir) = workdir {
             cmd.current_dir(dir);
         }

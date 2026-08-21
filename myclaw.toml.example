@@ -249,3 +249,31 @@ consolidation_age_days = 30
 
 [delegation]
 max_depth = 3
+
+# ── Skills（跨 agent 通用 skill 目录，issue #83） ────────────────────
+#
+# include_agents_dir: 除 `~/.myclaw/skills`（本地定制，唯一可写区）外
+#   是否额外加载 `~/.agents/skills`（vercel-labs `skills` CLI 等跨 agent
+#   工具的通用分发目录）。同名冲突时本地目录覆盖，并打一条 warn 日志。
+#   默认 true；不想被共享库隐式影响时设为 false。
+
+[skills]
+include_agents_dir = true
+
+# ── Shell 环境修补（issue #84） ─────────────────────────────────────
+#
+# 工具 shell 默认继承 daemon 进程环境；daemon 由 systemd user unit 启动时
+# 不经过任何登录/交互 shell，`.bashrc` 里追加的用户 PATH（npm-global、
+# nvm、pyenv、Homebrew 等）对它不可见。
+#
+# login_env_probe: 启动时探测一次 `$SHELL -l -c 'env -0'`，把结果并入
+#   工具 shell 的 PATH（只填缺口，不覆盖已有 key）。要求 `$SHELL` 是
+#   `/etc/shells` 里的绝对路径，探测带超时与输出上限，失败只 warn 一次
+#   并降级为仅用系统标准目录兜底。默认 true。
+# path_extra / env: 兜底 ①②都覆盖不到时的最终逃生口，优先级最高。
+
+[shell]
+login_env_probe = true
+# path_extra = ["/opt/custom/bin"]
+# [shell.env]
+# FOO = "bar"

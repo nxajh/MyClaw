@@ -100,6 +100,11 @@ pub struct AgentRuntime {
     /// `@u/uid` fallback (render_refs accepts `Option`-less registry; callers
     /// skip rendering entirely when this is `None`).
     pub user_registry: Option<Arc<UserRegistry>>,
+    /// Cross-agent shared skills dir (`~/.agents/skills`), when `[skills]
+    /// include_agents_dir` is enabled (issue #83). `None` when disabled or
+    /// in tests/CLI mode that don't set it — reload paths then fall back
+    /// to the local skills root only.
+    pub agents_skills_dir: Option<PathBuf>,
 }
 
 impl AgentRuntime {
@@ -128,6 +133,7 @@ impl AgentRuntime {
             task_boards: None,
             sessions_dir: None,
             user_registry: None,
+            agents_skills_dir: None,
         }
     }
 
@@ -160,6 +166,13 @@ impl AgentRuntime {
     /// `<ref id="…"/>` → `@昵称(u/uid)` on streaming/Done/fallback paths.
     pub fn with_user_registry(mut self, registry: Arc<UserRegistry>) -> Self {
         self.user_registry = Some(registry);
+        self
+    }
+
+    /// Install the shared skills dir so `/reload` re-layers it in instead
+    /// of dropping it (issue #83).
+    pub fn with_agents_skills_dir(mut self, dir: PathBuf) -> Self {
+        self.agents_skills_dir = Some(dir);
         self
     }
 

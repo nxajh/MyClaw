@@ -21,13 +21,23 @@ pub struct SkillManageTool {
     skills: Arc<RwLock<SkillManager>>,
     /// P1: skills root (`{base_dir}/skills`) — passed directly by the daemon.
     skills_root: PathBuf,
+    /// Cross-agent shared skills dir (`~/.agents/skills`, issue #83),
+    /// read-only here — `skill_manage` never writes to it. Carried so
+    /// `refresh_skills` re-layers it in after a local create/edit/delete
+    /// instead of silently dropping it from the live SkillManager.
+    agents_skills_dir: Option<PathBuf>,
 }
 
 impl SkillManageTool {
-    pub fn new(skills: Arc<RwLock<SkillManager>>, skills_root: PathBuf) -> Self {
+    pub fn new(
+        skills: Arc<RwLock<SkillManager>>,
+        skills_root: PathBuf,
+        agents_skills_dir: Option<PathBuf>,
+    ) -> Self {
         Self {
             skills,
             skills_root,
+            agents_skills_dir,
         }
     }
 }
@@ -365,7 +375,10 @@ impl SkillManageTool {
 
     fn refresh_skills(&self) {
         let skills_dir = self.skills_root.clone();
-        let definitions = skill_loader::load_skills_from_dir(&skills_dir);
+        let definitions = skill_loader::load_skills_layered(
+            &skills_dir,
+            self.agents_skills_dir.as_deref(),
+        );
         let new_skills: Vec<Skill> = definitions.iter().map(Skill::from_definition).collect();
         self.skills.write().reload(new_skills);
     }
@@ -553,7 +566,7 @@ mod tests {
     async fn test_create_and_refresh() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(RwLock::new(SkillManager::new()));
-        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
+        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
 
         let result = tool.execute(json!({
             "action": "create", "name": "mys",
@@ -569,6 +582,7 @@ mod tests {
         let tool = SkillManageTool::new(
             Arc::new(RwLock::new(SkillManager::new())),
             dir.path().to_path_buf(),
+            None,
         );
         let result = tool
             .execute(
@@ -587,7 +601,7 @@ mod tests {
     async fn test_create_duplicate() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "existing");
-        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
+        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
         let result = tool.execute(json!({
             "action": "create", "name": "existing",
             "content": "---\nname: existing\ndescription: \"Exists\"\n---\n# Exists\n\nAlready here."
@@ -602,6 +616,7 @@ mod tests {
         let tool = SkillManageTool::new(
             Arc::new(RwLock::new(SkillManager::new())),
             dir.path().to_path_buf(),
+            None,
         );
         let result = tool
             .execute(
@@ -621,7 +636,7 @@ mod tests {
     async fn test_patch_success() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "myskill");
-        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
+        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
         let result = tool
             .execute(
                 json!({
@@ -641,7 +656,7 @@ mod tests {
     async fn test_patch_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "myskill");
-        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
+        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
         let result = tool
             .execute(
                 json!({
@@ -660,7 +675,7 @@ mod tests {
     async fn test_delete() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "myskill");
-        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
+        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
         let result = tool
             .execute(
                 json!({"action": "delete", "name": "myskill"}),
@@ -678,6 +693,7 @@ mod tests {
         let tool = SkillManageTool::new(
             Arc::new(RwLock::new(SkillManager::new())),
             dir.path().to_path_buf(),
+            None,
         );
         let result = tool
             .execute(
@@ -693,7 +709,7 @@ mod tests {
     async fn test_write_and_remove_file() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "myskill");
-        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
+        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
 
         let wr = tool
             .execute(
@@ -725,7 +741,7 @@ mod tests {
     async fn test_path_traversal_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "myskill");
-        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
+        let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
         let result = tool
             .execute(
                 json!({
