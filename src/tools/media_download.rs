@@ -1,34 +1,18 @@
 //! Shared helper for multimedia tools: resolve a path that might be a URL.
 //!
 //! If the input starts with `http://` or `https://`, download the file to a
-//! temp directory and return the local path. Otherwise, resolve the relative
-//! path against the workspace cwd — except session-media marker paths
-//! (`sessions/<id>/files/...`, as emitted by `[image: ...]` / `[video: ...]` /
-//! `[audio: ...]` markers), which live under the data dir and are resolved
-//! there instead (see `write_session_file`, which writes under
-//! `AppConfig::sessions_root()` = `{base_dir}/sessions`).
+//! temp directory and return the local path. Otherwise, delegate to
+//! `providers::media::resolve_path_with_dir` — the single resolution point
+//! shared with provider-layer media rendering, so tools and the code that
+//! actually ships file bytes to a model agree on where `sessions/<id>/files/...`
+//! marker paths (see `write_session_file`, which writes under
+//! `AppConfig::sessions_root()` = `{base_dir}/sessions`) live on disk.
 
 use std::path::{Path, PathBuf};
 
 /// Check if `s` looks like a URL.
 pub fn is_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
-}
-
-/// True if `input` has the exact `sessions/<id>/files/<name>` shape produced
-/// by `write_session_file` / the `[image: ...]` family of markers. Requires
-/// a non-empty id segment and a literal `files` segment rather than just a
-/// `sessions/` prefix, so an unrelated workspace directory that happens to
-/// be named `sessions/` (e.g. a PHP/Express session store) isn't hijacked
-/// into resolving against the data dir instead of cwd.
-fn is_session_media_path(input: &str) -> bool {
-    let mut segments = input.replace('\\', "/");
-    segments = segments.trim_start_matches("./").to_string();
-    let mut parts = segments.split('/');
-    parts.next() == Some("sessions")
-        && parts.next().is_some_and(|id| !id.is_empty())
-        && parts.next() == Some("files")
-        && parts.next().is_some_and(|name| !name.is_empty())
 }
 
 /// Resolve a path-or-URL to a local file path.
@@ -41,16 +25,9 @@ pub async fn resolve_path_or_url(input: &str, data_dir: &Path) -> anyhow::Result
     if is_url(input) {
         download_to_temp(input).await
     } else {
-        let p = PathBuf::from(input);
-        if p.is_absolute() {
-            Ok(p)
-        } else if is_session_media_path(input) {
-            Ok(data_dir.join(p))
-        } else {
-            Ok(std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(p))
-        }
+        Ok(crate::providers::media::resolve_path_with_dir(
+            input, data_dir,
+        ))
     }
 }
 
@@ -175,21 +152,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_media_path_requires_full_shape() {
-        assert!(is_session_media_path("sessions/abc123/files/photo.png"));
-        assert!(is_session_media_path("sessions\\abc123\\files\\photo.png"));
-        assert!(is_session_media_path("./sessions/abc123/files/photo.png"));
+    fn is_url_detects_http_and_https() {
+        assert!(is_url("http://example.com/a.png"));
+        assert!(is_url("https://example.com/a.png"));
+        assert!(!is_url("sessions/s/files/a.png"));
     }
 
-    #[test]
-    fn plain_sessions_prefix_is_not_hijacked() {
-        // A workspace's own `sessions/` directory (e.g. a PHP/Express session
-        // store) must not be misrouted to the data dir just because it starts
-        // with "sessions/".
-        assert!(!is_session_media_path("sessions/config.php"));
-        assert!(!is_session_media_path("sessions/abc123/photo.png"));
-        assert!(!is_session_media_path("sessions//files/photo.png"));
-        assert!(!is_session_media_path("sessions/abc123/files/"));
-        assert!(!is_session_media_path("sessionsfoo/abc123/files/photo.png"));
+    #[tokio::test]
+    async fn resolve_path_or_url_delegates_local_paths_to_shared_resolver() {
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        let result = resolve_path_or_url("sessions/s/files/a.png", &data_dir)
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            crate::providers::media::resolve_path_with_dir("sessions/s/files/a.png", &data_dir)
+        );
     }
 }

@@ -71,7 +71,15 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
                         let abs = crate::providers::media::resolve_path(path);
                         let bytes = match std::fs::read(&abs) {
                             Ok(bytes) => bytes,
-                            Err(e) => return Some(serde_json::json!({"type": "text", "text": format!("{}（读取失败: {e}）", crate::providers::media::image_marker_path(path))})),
+                            Err(e) => {
+                                tracing::warn!(
+                                    path = %path,
+                                    resolved = %abs.display(),
+                                    err = %e,
+                                    "anthropic rendering: failed to read image file, falling back to marker text"
+                                );
+                                return Some(serde_json::json!({"type": "text", "text": format!("{}（读取失败: {e}）", crate::providers::media::image_marker_path(path))}));
+                            }
                         };
                         let data = base64::engine::general_purpose::STANDARD.encode(bytes);
                         let mime = mime_type.as_deref()

@@ -297,7 +297,13 @@ impl Tool for ViewVideoTool {
             role: "user".into(),
             parts: vec![
                 ContentPart::File {
-                    path: path.to_string(),
+                    // Pass the already-resolved absolute path, not the raw
+                    // marker path: provider rendering re-resolves whatever
+                    // path lands here (see `providers::media::resolve_path`),
+                    // so passing `abs` avoids a redundant second resolve and
+                    // stays correct even if the global data dir was never
+                    // initialized (see issue #82).
+                    path: abs.display().to_string(),
                     mime_type: infer_video_mime(path).map(str::to_string),
                     name: Path::new(path)
                         .file_name()

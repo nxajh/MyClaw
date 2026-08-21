@@ -164,6 +164,12 @@ fn render_content_parts(msg: &ChatMessage, text_type: &str) -> Vec<serde_json::V
                 let bytes = match std::fs::read(&abs) {
                     Ok(b) => b,
                     Err(e) => {
+                        tracing::warn!(
+                            path = %path,
+                            resolved = %abs.display(),
+                            err = %e,
+                            "openai responses rendering: failed to read media file, falling back to marker text"
+                        );
                         return Some(json!({
                             "type": text_type,
                             "text": format!(

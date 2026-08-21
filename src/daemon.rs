@@ -873,6 +873,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Initialize global safety config from the loaded config.
     crate::config::init_safety_config(config.safety.clone());
 
+    // Initialize the global data dir so provider-layer media rendering
+    // (which has no Session/AppConfig in scope) can resolve
+    // `sessions/<id>/files/...` marker paths without going through cwd.
+    crate::providers::media::init_data_dir(config.base_dir.clone());
+
     // Issue #84: tool-shell PATH fix-ups (static fallback always on; the
     // login-shell probe below is non-blocking — it's a spawned background
     // task, not awaited here).
