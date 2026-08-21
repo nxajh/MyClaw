@@ -266,10 +266,15 @@ include_agents_dir = true
 # 不经过任何登录/交互 shell，`.bashrc` 里追加的用户 PATH（npm-global、
 # nvm、pyenv、Homebrew 等）对它不可见。
 #
-# login_env_probe: 启动时探测一次 `$SHELL -l -c 'env -0'`，把结果并入
-#   工具 shell 的 PATH（只填缺口，不覆盖已有 key）。要求 `$SHELL` 是
-#   `/etc/shells` 里的绝对路径，探测带超时与输出上限，失败只 warn 一次
-#   并降级为仅用系统标准目录兜底。默认 true。
+# login_env_probe: 启动时探测一次 `$SHELL -lic 'env -0'`（`-i` 让 rc 文件
+#   里的交互区代码块也执行——大多数发行版 `.bashrc` 开头就是非交互早退，
+#   缺 `-i` 会漏掉 npm-global/nvm/pyenv 这类恰好写在交互区的 PATH 追加），
+#   把结果并入工具 shell 的 PATH（只填缺口——daemon 自身已有的同名变量
+#   永远优先，不会被探测结果覆盖）。要求 `$SHELL` 是 `/etc/shells` 里的
+#   绝对路径，探测带超时与输出上限，失败只 warn 一次并降级为仅用系统
+#   标准目录兜底。默认 true。
+#   注：探测到的目录追加在系统标准目录*之后*，无法用来 shadow 同名的
+#   `/usr/bin` 命令；需要这种优先级时用下面的 path_extra。
 # path_extra / env: 兜底 ①②都覆盖不到时的最终逃生口，优先级最高。
 
 [shell]

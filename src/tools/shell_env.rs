@@ -17,11 +17,15 @@
 //!    daemon already has. Zero cost, no configuration, catches the "PATH
 //!    is nearly empty because systemd gave us a minimal one" case.
 //! 2. **Login-shell probe** (`[shell] login_env_probe`, default on): runs
-//!    `$SHELL -l -c 'env -0'` once, so nvm/pyenv/npm-global/Homebrew paths
-//!    set in the user's rc files show up too. Guarded the way OpenClaw
-//!    does it: `$SHELL` must be an absolute path listed in `/etc/shells`,
-//!    the probe has a hard timeout and output cap, and any failure just
-//!    degrades to layer 1 (a warning is logged once, nothing blocks).
+//!    `$SHELL -lic 'env -0'` once (interactive, not just login — see
+//!    `probe_login_shell_env` for why plain `-l -c` misses the exact
+//!    rc-file PATH exports this exists to find), so nvm/pyenv/npm-global/
+//!    Homebrew paths set in the user's rc files show up too. Guarded the
+//!    way OpenClaw does it: `$SHELL` must be an absolute path listed in
+//!    `/etc/shells`, the probe has a hard timeout and output cap, and any
+//!    failure just degrades to layer 1 (a warning is logged once, nothing
+//!    blocks). Gap-only: a key the daemon's own environment already has
+//!    is never overwritten by whatever the probe found.
 //! 3. **Config escape hatch** (`[shell] path_extra` / `env`): applied
 //!    last, so it's the true final word — including overriding `PATH`
 //!    outright if the user sets one explicitly.
@@ -53,6 +57,10 @@ const SANE_PATH_DIRS: &[&str] = &[
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const PROBE_OUTPUT_CAP: usize = 2 * 1024 * 1024; // 2 MiB
+
+/// Shell-internal bookkeeping vars that come back from `env -0` but are
+/// never useful (or safe) to layer onto a spawned command's env.
+const PROBE_NOISE_KEYS: &[&str] = &["_", "SHLVL", "OLDPWD", "PWD"];
 
 static SHELL_CONFIG: OnceLock<ShellConfig> = OnceLock::new();
 /// Set once the login-shell probe finishes (success or not). `None` means
@@ -91,7 +99,10 @@ pub fn apply(cmd: &mut Command) {
             path = merge_path_dirs(&path, probed_path);
         }
         for (k, v) in probed {
-            if k != "PATH" {
+            // Gap-only, as documented above: an explicit systemd-unit env
+            // var (API key, HTTPS_PROXY, …) always outranks whatever the
+            // probed login shell happened to also set for that key.
+            if k != "PATH" && !PROBE_NOISE_KEYS.contains(&k.as_str()) && std::env::var_os(k).is_none() {
                 cmd.env(k, v);
             }
         }
@@ -170,12 +181,27 @@ fn merge_path_dirs(primary: &str, secondary: &str) -> String {
     dirs.join(":")
 }
 
-/// Layer ② — `$SHELL -l -c 'env -0'`, NUL-separated parse, sanitized.
+/// Layer ② — `$SHELL -lic 'env -0'`, NUL-separated parse, sanitized.
 /// Returns `None` on any failure (missing/untrusted `$SHELL`, spawn
 /// error, timeout, non-zero exit, oversized output) — callers keep
 /// layer ① only, with one `warn!` explaining why.
+///
+/// Deliberately `-lic`, not `-lc`: a plain `-l -c` login shell is
+/// non-interactive, and Debian/Ubuntu's default `.bashrc` opens with an
+/// early-return guard for exactly that case —
+/// `case $- in *i*) ;; *) return;; esac` — so the interactive-only PATH
+/// exports this probe exists to find (npm global prefix, nvm, pyenv, …)
+/// never run. `-i` makes the shell interactive so `.bashrc` executes in
+/// full; `HISTFILE=/dev/null` stops that interactive shell from writing
+/// a history entry for the probe command itself.
 async fn probe_login_shell_env() -> Option<HashMap<String, String>> {
-    let shell = std::env::var("SHELL").ok()?;
+    let shell = match std::env::var("SHELL") {
+        Ok(s) => s,
+        Err(_) => {
+            warn!("shell_env: $SHELL is not set, skipping login-shell probe");
+            return None;
+        }
+    };
     if !shell_is_allowed(&shell, Path::new("/etc/shells")) {
         warn!(
             shell = %shell,
@@ -185,14 +211,19 @@ async fn probe_login_shell_env() -> Option<HashMap<String, String>> {
     }
 
     let mut cmd = Command::new(&shell);
-    cmd.arg("-l").arg("-c").arg("env -0");
+    cmd.arg("-lic").arg("env -0");
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // Reaped on timeout instead of orphaned — see the timeout branch below.
+    cmd.kill_on_drop(true);
     // Sanitize the probe's own environment: a stray ZDOTDIR would redirect
     // which rc files the probed shell reads; force HOME so it reads the
     // real user's rc files regardless of what the daemon's own HOME is.
+    // HISTFILE=/dev/null keeps this synthetic interactive session out of
+    // the user's real shell history.
     cmd.env_remove("ZDOTDIR");
+    cmd.env("HISTFILE", "/dev/null");
     if let Ok(home) = std::env::var("HOME") {
         cmd.env("HOME", home);
     }
