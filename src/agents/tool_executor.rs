@@ -10,6 +10,15 @@ use crate::config::agent::PermissionMode;
 use crate::providers::ToolCall;
 use crate::providers::capability_tool::ToolResult;
 
+/// Headroom added to the watchdog timeout over a tool's own
+/// `preferred_timeout_secs()` when that preference is the binding
+/// constraint (issue #90). Without it, a tool with its own graceful
+/// internal deadline (e.g. shell's `state=running` handoff at up to 300s)
+/// races this outer watchdog when both land on the exact same instant —
+/// which one "wins" is then a coin flip instead of the graceful path
+/// always winning.
+const WATCHDOG_HEADROOM_SECS: u64 = 30;
+
 /// Executes tool calls on behalf of `Agent::run`.
 ///
 /// Per the RFC v2 target shape, the executor is a global singleton —
@@ -283,6 +292,22 @@ impl ToolExecutor {
         })
     }
 
+    /// Compute the outer watchdog timeout given a tool's own preferred
+    /// timeout (if any) and the configured default.
+    ///
+    /// When `preferred` is the binding constraint (`>= configured`), it
+    /// represents the longest a tool's own internal graceful-timeout logic
+    /// can run before returning on its own — so the watchdog must fire
+    /// strictly *after* that, never at the same instant (issue #90).
+    /// When `configured` is larger, it already provides that margin on
+    /// its own and no extra headroom is needed.
+    fn effective_timeout_secs(preferred: Option<u64>, configured: u64) -> u64 {
+        match preferred {
+            Some(p) if p >= configured => p + WATCHDOG_HEADROOM_SECS,
+            _ => configured,
+        }
+    }
+
     /// Execute a tool with timeout and framework-level output truncation.
     async fn run_tool(
         &self,
@@ -292,10 +317,10 @@ impl ToolExecutor {
         session: &Session,
     ) -> anyhow::Result<ToolResult> {
         let raw = if self.timeout_secs > 0 && !tool.blocks_on_human() {
-            let effective_secs = tool
-                .preferred_timeout_secs()
-                .map(|p| p.max(self.timeout_secs))
-                .unwrap_or(self.timeout_secs);
+            let effective_secs = Self::effective_timeout_secs(
+                tool.preferred_timeout_secs(),
+                self.timeout_secs,
+            );
             let timeout = Duration::from_secs(effective_secs);
             tokio::time::timeout(timeout, tool.execute(args, session))
                 .await
@@ -553,5 +578,42 @@ mod heavy_build_tests {
         assert!(!shell_has_heavy_build("ls -la"));
         assert!(!shell_has_heavy_build("echo cargo"));
         assert!(!shell_has_heavy_build("git commit -m 'cargo'"));
+    }
+}
+
+#[cfg(test)]
+mod effective_timeout_tests {
+    use super::{ToolExecutor, WATCHDOG_HEADROOM_SECS};
+
+    #[test]
+    fn preferred_binding_gets_headroom() {
+        // Shell's real-world case (issue #90): preferred=300, configured=180
+        // — preferred is the binding constraint, so it must get headroom or
+        // the outer watchdog and the tool's own internal deadline (which
+        // can run up to `preferred` seconds) land on the same instant.
+        let effective = ToolExecutor::effective_timeout_secs(Some(300), 180);
+        assert_eq!(effective, 300 + WATCHDOG_HEADROOM_SECS);
+        assert!(effective > 300, "watchdog must fire strictly after the tool's own max internal deadline");
+    }
+
+    #[test]
+    fn preferred_equal_to_configured_still_gets_headroom() {
+        // The exact-equality edge case that caused the original coin-flip.
+        let effective = ToolExecutor::effective_timeout_secs(Some(300), 300);
+        assert_eq!(effective, 300 + WATCHDOG_HEADROOM_SECS);
+    }
+
+    #[test]
+    fn configured_binding_needs_no_headroom() {
+        // configured (400) already exceeds preferred (300) — no race,
+        // since the tool's own deadline can never reach the outer one.
+        let effective = ToolExecutor::effective_timeout_secs(Some(300), 400);
+        assert_eq!(effective, 400);
+    }
+
+    #[test]
+    fn no_preferred_falls_back_to_configured() {
+        let effective = ToolExecutor::effective_timeout_secs(None, 180);
+        assert_eq!(effective, 180);
     }
 }
