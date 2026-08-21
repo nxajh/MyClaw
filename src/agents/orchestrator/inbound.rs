@@ -610,9 +610,13 @@ pub(super) fn dispatch_turn_spawn(
         // BEFORE the queued-user-message drain below: `drain_delegation_notices`
         // bumps `notice_turns_in_flight` synchronously before spawning each
         // notice turn, so the user-message check sees the counter and keeps
-        // queueing until the suspension sequence truly ends. The drain only
-        // awaits take+spawn (microseconds), not the notice turns themselves —
-        // those serialize on `turn_lock` like any turn.
+        // queueing until the suspension sequence truly ends. Issue #106: this
+        // `.await` now blocks until every drained notice's turn has fully
+        // finished (`drain_delegation_notices` awaits each notice's dispatch
+        // `JoinHandle` in turn, one at a time) — no longer "just take+spawn,
+        // the turns run in the background"; that's what makes delivery FIFO
+        // instead of racing on `turn_lock` in whatever order the runtime
+        // happens to schedule them.
         if session_ctx.has_queued_delegation_notices() {
             super::delegation::drain_delegation_notices(&ctx, &session_ctx.session_id).await;
         }
