@@ -5,9 +5,22 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::providers::{Tool, ToolResult};
+
+/// Resolve `p` to an absolute path before an `is_path_protected` check —
+/// the protected-path patterns are tilde/absolute, so a relative `path`
+/// arg needs resolving against cwd first to be checked correctly.
+fn to_abs(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p)
+    }
+}
 
 pub struct ListDirTool;
 
@@ -23,6 +36,7 @@ impl Default for ListDirTool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_dir_recursive(
     dir: &Path,
     entries: &mut Vec<Value>,
@@ -30,6 +44,7 @@ fn walk_dir_recursive(
     current_depth: u32,
     max_depth: u32,
     max_entries: usize,
+    protected_skipped: &mut usize,
 ) -> std::io::Result<()> {
     if entries.len() >= max_entries {
         return Ok(());
@@ -43,9 +58,18 @@ fn walk_dir_recursive(
             continue;
         }
 
+        let rel_path = entry.path();
+
+        // A matched name under a protected path (~/.ssh/**, **/.env, ...)
+        // still discloses its existence, so drop it — and never recurse
+        // into a protected directory (everything under it matches too).
+        if crate::config::is_path_protected(&to_abs(&rel_path)) {
+            *protected_skipped += 1;
+            continue;
+        }
+
         let file_type = entry.file_type()?;
         let metadata = entry.metadata().ok();
-        let rel_path = entry.path();
 
         entries.push(json!({
             "name": name,
@@ -62,12 +86,13 @@ fn walk_dir_recursive(
         // Recurse into subdirectories if we haven't reached max depth
         if file_type.is_dir() && current_depth < max_depth {
             walk_dir_recursive(
-                &entry.path(),
+                &rel_path,
                 entries,
                 show_hidden,
                 current_depth + 1,
                 max_depth,
                 max_entries,
+                protected_skipped,
             )?;
         }
     }
@@ -136,6 +161,7 @@ impl Tool for ListDirTool {
         }
 
         let mut entries: Vec<Value> = Vec::new();
+        let mut protected_skipped = 0usize;
         if max_depth <= 1 {
             // Single-level: use the original flat listing
             for entry in std::fs::read_dir(path)? {
@@ -144,6 +170,14 @@ impl Tool for ListDirTool {
 
                 // Skip hidden files
                 if !show_hidden && name.starts_with('.') {
+                    continue;
+                }
+
+                // A matched name under a protected path (~/.ssh/**,
+                // **/.env, ...) still discloses its existence, so drop it
+                // rather than erroring the whole listing out.
+                if crate::config::is_path_protected(&to_abs(&entry.path())) {
+                    protected_skipped += 1;
                     continue;
                 }
 
@@ -157,7 +191,15 @@ impl Tool for ListDirTool {
                 }));
             }
         } else {
-            walk_dir_recursive(path, &mut entries, show_hidden, 0, max_depth, 500)?;
+            walk_dir_recursive(
+                path,
+                &mut entries,
+                show_hidden,
+                0,
+                max_depth,
+                500,
+                &mut protected_skipped,
+            )?;
         }
 
         // Sort: directories first, then files, alphabetically
@@ -179,9 +221,71 @@ impl Tool for ListDirTool {
                 "path": path_str,
                 "max_depth": max_depth,
                 "entries": entries,
-                "total": entries.len()
+                "total": entries.len(),
+                "skipped_protected_files": protected_skipped
             }))?,
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod protected_path_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn list_dir_skips_protected_files_even_with_show_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        // `**/.env` is a default protected pattern regardless of directory,
+        // so this doesn't depend on the real $HOME the way `~/.ssh/**`
+        // would. `show_hidden: true` isolates this from the pre-existing
+        // dotfile filter — both `.env` and `notes.txt` would otherwise be
+        // listed, so a leak here is specifically the protected-path gap.
+        std::fs::write(dir.path().join(".env"), "SECRET_KEY=do-not-leak").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "ok").unwrap();
+
+        let tool = ListDirTool::new();
+        let result = tool
+            .execute(
+                json!({"path": dir.path().to_str().unwrap(), "show_hidden": true}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            !result.output.contains(".env"),
+            "protected .env filename leaked into list_dir results: {}",
+            result.output
+        );
+        assert!(result.output.contains("notes.txt"));
+        assert!(result.output.contains("\"skipped_protected_files\":1"));
+    }
+
+    #[tokio::test]
+    async fn list_dir_recursive_skips_protected_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join(".env"), "SECRET_KEY=do-not-leak").unwrap();
+        std::fs::write(dir.path().join("sub").join("readme.md"), "ok").unwrap();
+
+        let tool = ListDirTool::new();
+        let result = tool
+            .execute(
+                json!({"path": dir.path().to_str().unwrap(), "show_hidden": true, "max_depth": 3}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            !result.output.contains(".env"),
+            "protected nested .env filename leaked into recursive list_dir results: {}",
+            result.output
+        );
+        assert!(result.output.contains("readme.md"));
+        assert!(result.output.contains("\"skipped_protected_files\":1"));
     }
 }

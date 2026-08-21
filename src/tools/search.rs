@@ -51,6 +51,20 @@ fn glob_to_regex(pattern: &str) -> String {
     regex
 }
 
+/// Resolve `p` to an absolute path before an `is_path_protected` check —
+/// the protected-path patterns are tilde/absolute, so a relative match
+/// (walked from a relative `path` arg) needs resolving against cwd first
+/// to be checked correctly.
+fn to_abs(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p)
+    }
+}
+
 fn resolve_search_base(path: Option<&str>) -> PathBuf {
     let raw = path.unwrap_or(".").trim();
     if raw.is_empty() || raw == "." {
@@ -172,21 +186,29 @@ impl Tool for GlobSearchTool {
             .filter_map(|f| {
                 let rel = f.strip_prefix(&base).unwrap_or(f);
                 let rel_str = rel.to_string_lossy();
-                if re.is_match(&rel_str) {
-                    Some(f.clone())
-                } else {
-                    None
+                if !re.is_match(&rel_str) {
+                    return None;
                 }
+                // Same backstop as file_read/content_search: a matched
+                // filename under a protected path (~/.ssh/**, **/.env, ...)
+                // is still disclosure of its existence, so drop it from the
+                // result set rather than erroring the whole search out.
+                if crate::config::is_path_protected(&to_abs(f)) {
+                    stats.skipped_protected_files += 1;
+                    return None;
+                }
+                Some(f.clone())
             })
             .collect();
 
         let mut output = format!(
-            "glob_search diagnostics: base={} base_exists=true pattern={} regex={} scanned_files={} skipped_dirs={} traversal_truncated={} include_metadata={}\n",
+            "glob_search diagnostics: base={} base_exists=true pattern={} regex={} scanned_files={} skipped_dirs={} skipped_protected_files={} traversal_truncated={} include_metadata={}\n",
             base.display(),
             pattern,
             regex_str,
             stats.scanned_files,
             stats.skipped_dirs.len(),
+            stats.skipped_protected_files,
             stats.truncated,
             include_metadata
         );
@@ -494,14 +516,7 @@ impl Tool for ContentSearchTool {
             // protected path (~/.ssh/**, **/.env, ...) through a recursive
             // content search either — content_search reads file bytes just
             // like file_read does, at the same auto-approved trust tier.
-            let abs_file_path = if file_path.is_absolute() {
-                file_path.clone()
-            } else {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(file_path)
-            };
-            if crate::config::is_path_protected(&abs_file_path) {
+            if crate::config::is_path_protected(&to_abs(file_path)) {
                 stats.skipped_protected_files += 1;
                 continue;
             }
@@ -587,6 +602,41 @@ impl Tool for ContentSearchTool {
 #[cfg(test)]
 mod protected_path_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn glob_search_skips_protected_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // `**/.env` is a default protected pattern regardless of directory,
+        // so this doesn't depend on the real $HOME the way `~/.ssh/**` would.
+        std::fs::write(dir.path().join(".env"), "SECRET_KEY=do-not-leak").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "ok").unwrap();
+
+        let tool = GlobSearchTool::new();
+        let result = tool
+            .execute(
+                json!({"pattern": "*", "path": dir.path().to_str().unwrap()}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            !result.output.contains(".env"),
+            "protected .env filename leaked into glob_search results: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("notes.txt"),
+            "unprotected file's match should still be found: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("skipped_protected_files=1"),
+            "diagnostics should report the skipped protected file: {}",
+            result.output
+        );
+    }
 
     #[tokio::test]
     async fn content_search_skips_protected_files() {
