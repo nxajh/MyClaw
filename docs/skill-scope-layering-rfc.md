@@ -2,7 +2,7 @@
 
 - **状态**: 已定稿待实施
 - **日期**: 2026-08-21
-- **关联**: issue #89（draft 积压可见性，PR #100）、#83/#85（共享库）、#93/#99（共享库写保护）、PR #100 评审备注（draft 名单跨用户暴露）
+- **关联**: issue #89（draft 积压可见性，PR #100）、#83/#85（共享库）、#93/#99（共享库写保护）、PR #100 评审备注（draft 名单跨用户暴露）、`docs/rfc-two-tier-memory.md`（记忆两层既有 frontmatter 语义，§6 将其存储同构化）
 - **决策人**: 用户（nxajh），2026-08-21 会话定稿
 
 ## 0. 问题陈述
@@ -96,6 +96,7 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 | P1 | 存储布局 + loader 三层合成 + 迁移脚本 | #100 合并（backlog 分账基于其提醒机制） |
 | P2 | extract 落 user 层 + backlog 按层分账 | P1 |
 | P3 | `promote` action + 去标识化检查 + watcher user 层监听 | P1 |
+| P4 | 记忆存储分拆（§6）+ 迁移脚本 | P1（复用 `users/{uuid}/` 布局与迁移脚本模式，可与 P2/P3 并行） |
 
 ## 5. 测试清单
 
@@ -106,3 +107,79 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 - [ ] skill_manage：user 层本人五操作可写；其他用户对 user 层得到 not-found（不可见性）
 - [ ] 迁移脚本：21 个计数守恒、draft/active 状态守恒、幂等、回滚
 - [ ] watcher：user 层技能增删热载
+
+## 6. 记忆存储分拆（同构延伸，已定稿）
+
+记忆两层目前仅靠 frontmatter 判定（`scope`+`user_id`），物理仍是单池
+`{base_dir}/memory/`。技能层定型后，记忆存储同构分拆为目录分层。本节规则与
+§2 惯例对齐；uuid 与条目身份问题经三轮讨论定稿（2026-08-21，决策人 nxajh）。
+
+### 6.1 存储布局与身份
+
+```
+{base_dir}/memory/                          # agent 层
+{base_dir}/users/{uuid}/memory/             # user 层
+```
+
+- **目录权威，frontmatter 冗余校验**：迁移后 `scan_merged` 按目录定层，不再靠
+  解析 frontmatter 过滤；文件内 `user_id` 与目录归属不一致 → lint 告警。
+- **user 层写入门槛**：`scope=user` 要求 user_id 为注册实体 FQID
+  （`UserRegistry::find_by_uid` 命中）。`UserResolver` 无 override 时的
+  routing_key fallback 身份（未 /link 的渠道来客）**拒写并引导 /register**——
+  user 层数据必挂注册实体，不留半身份目录。fork（user 层主写入路径）对未注册
+  owner 同样跳过 user 层写入，不阻断主流程。
+- **条目身份 = `name`，不引入条目级 uuid**：name 承载语义与检索（前缀已是
+  事实命名空间）；uuid 对 LLM 是不透明噪音，且 name+uuid 双身份体系是永久维护
+  成本。uuid 的独有价值（rename/移动不断链）当前无触发场景——系统没有 rename
+  操作，改名走 add-new + remove-old。将来 rename/promote 高频时再加 `id:` 字段
+  增量迁移，工具接口不动（链接语法预留扩展位，见 6.3）。
+
+### 6.2 同名与读写语义（name 按层分 namespace）
+
+分拆后同名条目跨层合法共存（如 root 与 nxajh 各有 `travel_preferences`，
+两层各有 `agent_github_identity`），工具面（memory_view / memory_manage /
+memory_search）仍按 name 寻址，规则如下：
+
+- **读**（list/view/search）：合并视图，同名 **user 遮蔽 agent**（同 §2.2
+  "local overrides shared" 惯例）。
+- **写**（replace/remove）：默认目标 = 会话 owner 的 user 层；name 仅存在于
+  agent 层时须**显式 scope** 才可改，防误改共享层。
+- **add**：目标层已有同名报错；user 层新增条目与 agent 层同名 = 合法遮蔽，
+  但须提示、不得静默。
+- **promote**（user→agent 去标识化提升）：目标层已有同名须先改名或合并。
+
+### 6.3 链接（See Also）
+
+实测 443 条目、1097 条有效链接，其中 **226 条（21%）跨未来层边界**（如
+`agent:myclaw_three_track_scheduler → user:myclaw_overview`）——跨层链接是
+主流现象，一等支持（"先禁止跨层引用"已否决）：
+
+- 同层保持裸名：`[Related: x](x.md)`（现有语法不变）。
+- 跨层用层限定语法：`[Related: x](agent:x.md)` / `[Related: x](user:x.md)`；
+  解析器同时接受 uuid 形态 `@<uuid>` 作为预留扩展位（为将来 `id:` 字段铺路，
+  现不启用）。
+- 链接只在层内解析 + 层限定跨层解析；`memory_manage` 的裸目标 lint 扩展到
+  层限定形态。
+
+### 6.4 迁移
+
+- 范围（2026-08-21 实测）：443 个文件（user 层 195 个，全部属 operator
+  01a0151d；nxajh 0 个；agent 层 248 个）。
+- 方式：停机脚本（镜像 §3 模式）：
+  1. frontmatter `user_id` → `UserRegistry` 查表 → `git mv` 语义搬移到
+     `users/{uuid}/memory/`；
+  2. 226 条跨层链接改写为层限定语法；
+  3. 查不到注册实体的（防未来出现）进 `users/.pending/` 隔离人工审，不猜；
+  4. 校验：443 计数守恒、195/248 分层守恒、1083 条活链（1097−14 死链）改写后
+     全部可解析；幂等 + `--rollback`。
+- 现存 14 条死链（add+remove 式改名残留）迁移时一并清理或修复。
+
+### 6.5 测试清单增补
+
+- [ ] scope=user 写入：注册 FQID 通过；routing_key fallback 身份拒写并提示
+      /register；fork 未注册 owner 跳过 user 层不阻断
+- [ ] 同名遮蔽：读合并视图 user>agent；写默认 owner 层；agent 层同名须显式
+      scope；user 层新增遮蔽 agent 层同名有提示
+- [ ] 跨层链接：层限定语法解析；同层裸名不受影响；`@<uuid>` 预留位可解析
+- [ ] 迁移：计数/分层/链接解析三项守恒；frontmatter-目录不一致 lint 告警；
+      隔离目录不静默丢弃
