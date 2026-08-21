@@ -21,11 +21,15 @@ const VIDEO_TIMEOUT_SECS: u64 = 300;
 
 pub struct ViewVideoTool {
     providers: Arc<dyn ProviderRegistry>,
+    data_dir: std::path::PathBuf,
 }
 
 impl ViewVideoTool {
-    pub fn new(providers: Arc<dyn ProviderRegistry>) -> Self {
-        Self { providers }
+    pub fn new(providers: Arc<dyn ProviderRegistry>, data_dir: std::path::PathBuf) -> Self {
+        Self {
+            providers,
+            data_dir,
+        }
     }
 }
 
@@ -187,14 +191,14 @@ impl Tool for ViewVideoTool {
     }
 
     fn description(&self) -> &str {
-        "View video file content. When the conversation contains a `[视频: sessions/.../files/xxx]` or `[video: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Only use it for video files; do not use it for image or audio. Path can be workspace-relative, absolute, or a URL (http/https)."
+        "View video file content. When the conversation contains a `[video: sessions/.../files/xxx]` marker, call this tool with the path exactly as it appears in the marker and a specific question. Only use it for video files; do not use it for image or audio. Path can be a `sessions/...` marker path, workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Video file path or URL. Relative paths are interpreted as workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
+                "path": { "type": "string", "description": "Video file path or URL. A `sessions/<id>/files/...` marker path (copy it verbatim from the `[video: ...]` marker) resolves against the data directory; other relative paths are workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
                 "question": { "type": "string", "description": "The specific question you want answered about this video, e.g. 'summarize the video', 'what happened?', 'identify text in the video'." }
             },
             "required": ["path", "question"]
@@ -228,7 +232,7 @@ impl Tool for ViewVideoTool {
             .unwrap_or("Describe the video content in detail, including main events, people, scenes, text, and audio.")
             .to_string();
 
-        let abs = crate::tools::media_download::resolve_path_or_url(path)
+        let abs = crate::tools::media_download::resolve_path_or_url(path, &self.data_dir)
             .await
             .map_err(|e| anyhow::anyhow!("cannot resolve path/URL '{path}': {e}"))?;
         let meta = match std::fs::metadata(&abs) {
@@ -244,7 +248,10 @@ impl Tool for ViewVideoTool {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("cannot access video file {path}: {e}")),
+                    error: Some(format!(
+                        "cannot access video file {path} (resolved to {}): {e}",
+                        abs.display()
+                    )),
                 });
             }
         };
@@ -324,12 +331,25 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn resolves_relative_path_against_current_dir() {
+    async fn resolves_session_media_marker_against_data_dir() {
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        let result = crate::tools::media_download::resolve_path_or_url(
+            "sessions/s/files/clip.mp4",
+            &data_dir,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, data_dir.join("sessions/s/files/clip.mp4"));
+    }
+
+    #[tokio::test]
+    async fn resolves_non_session_relative_path_against_current_dir() {
         let cwd = std::env::current_dir().unwrap();
-        let result = crate::tools::media_download::resolve_path_or_url("sessions/s/files/clip.mp4")
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        let result = crate::tools::media_download::resolve_path_or_url("clip.mp4", &data_dir)
             .await
             .unwrap();
-        assert_eq!(result, cwd.join("sessions/s/files/clip.mp4"));
+        assert_eq!(result, cwd.join("clip.mp4"));
     }
 
     #[test]

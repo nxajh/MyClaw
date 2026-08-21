@@ -2,26 +2,50 @@
 //!
 //! If the input starts with `http://` or `https://`, download the file to a
 //! temp directory and return the local path. Otherwise, resolve the relative
-//! path against the workspace cwd.
+//! path against the workspace cwd — except session-media marker paths
+//! (`sessions/<id>/files/...`, as emitted by `[image: ...]` / `[video: ...]` /
+//! `[audio: ...]` markers), which live under the data dir and are resolved
+//! there instead (see `write_session_file`, which writes under
+//! `AppConfig::sessions_root()` = `{base_dir}/sessions`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Check if `s` looks like a URL.
 pub fn is_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+/// True if `input` has the exact `sessions/<id>/files/<name>` shape produced
+/// by `write_session_file` / the `[image: ...]` family of markers. Requires
+/// a non-empty id segment and a literal `files` segment rather than just a
+/// `sessions/` prefix, so an unrelated workspace directory that happens to
+/// be named `sessions/` (e.g. a PHP/Express session store) isn't hijacked
+/// into resolving against the data dir instead of cwd.
+fn is_session_media_path(input: &str) -> bool {
+    let mut segments = input.replace('\\', "/");
+    segments = segments.trim_start_matches("./").to_string();
+    let mut parts = segments.split('/');
+    parts.next() == Some("sessions")
+        && parts.next().is_some_and(|id| !id.is_empty())
+        && parts.next() == Some("files")
+        && parts.next().is_some_and(|name| !name.is_empty())
+}
+
 /// Resolve a path-or-URL to a local file path.
 ///
 /// For URLs: downloads the content to a temp file and returns the path.
-/// For local paths: resolves relative to cwd.
-pub async fn resolve_path_or_url(input: &str) -> anyhow::Result<PathBuf> {
+/// For local paths: absolute paths are used as-is; `sessions/<id>/files/...`
+/// marker paths resolve against `data_dir`; other relative paths resolve
+/// against cwd (workspace-relative).
+pub async fn resolve_path_or_url(input: &str, data_dir: &Path) -> anyhow::Result<PathBuf> {
     if is_url(input) {
         download_to_temp(input).await
     } else {
         let p = PathBuf::from(input);
         if p.is_absolute() {
             Ok(p)
+        } else if is_session_media_path(input) {
+            Ok(data_dir.join(p))
         } else {
             Ok(std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
@@ -143,5 +167,29 @@ fn infer_extension_from_url(url: &str, content_type: &str) -> &'static str {
         }
     } else {
         "bin"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_media_path_requires_full_shape() {
+        assert!(is_session_media_path("sessions/abc123/files/photo.png"));
+        assert!(is_session_media_path("sessions\\abc123\\files\\photo.png"));
+        assert!(is_session_media_path("./sessions/abc123/files/photo.png"));
+    }
+
+    #[test]
+    fn plain_sessions_prefix_is_not_hijacked() {
+        // A workspace's own `sessions/` directory (e.g. a PHP/Express session
+        // store) must not be misrouted to the data dir just because it starts
+        // with "sessions/".
+        assert!(!is_session_media_path("sessions/config.php"));
+        assert!(!is_session_media_path("sessions/abc123/photo.png"));
+        assert!(!is_session_media_path("sessions//files/photo.png"));
+        assert!(!is_session_media_path("sessions/abc123/files/"));
+        assert!(!is_session_media_path("sessionsfoo/abc123/files/photo.png"));
     }
 }
