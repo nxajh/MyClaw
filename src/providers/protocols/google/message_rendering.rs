@@ -344,7 +344,18 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
 /// Returns `None` if the file cannot be read.
 fn inline_file_as_part(path: &str, mime_type: Option<&str>) -> Option<serde_json::Value> {
     let abs = crate::providers::media::resolve_path(path);
-    let bytes = std::fs::read(&abs).ok()?;
+    let bytes = match std::fs::read(&abs) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                path = %path,
+                resolved = %abs.display(),
+                err = %e,
+                "google rendering: failed to read media file"
+            );
+            return None;
+        }
+    };
     let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let mime = mime_type
         .map(|s| s.to_string())
