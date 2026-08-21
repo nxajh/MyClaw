@@ -28,9 +28,21 @@ pub fn init_data_dir(data_dir: std::path::PathBuf) {
 /// Requires a non-empty id segment and a literal `files` segment (not just a
 /// `sessions/` prefix) so an unrelated workspace directory that happens to be
 /// named `sessions/` (e.g. a PHP/Express session store) isn't hijacked.
+///
+/// Also rejects any `.`/`..` path-traversal segment anywhere in `path`. A
+/// legitimate `write_session_file()` name is always a flat, sanitized
+/// filename with no such segments, so a marker path carrying one (e.g.
+/// `sessions/x/files/../../secret`) is never legitimate — and without this
+/// check it would resolve (via `data_dir.join`) to a location outside the
+/// session's `files/` dir, or outside the data dir entirely (see #87). A
+/// path that fails this check simply isn't treated as session-media and
+/// falls through to ordinary cwd-relative resolution instead.
 pub fn is_session_media_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let normalized = normalized.trim_start_matches("./");
+    if normalized.split('/').any(|seg| seg == ".." || seg == ".") {
+        return false;
+    }
     let mut parts = normalized.split('/');
     parts.next() == Some("sessions")
         && parts.next().is_some_and(|id| !id.is_empty())
@@ -878,6 +890,31 @@ mod tests {
     }
 
     #[test]
+    fn path_traversal_segments_are_rejected() {
+        // #87: a shape-only check let `..`/`.` segments through, so a
+        // crafted marker path could resolve outside the session's files/
+        // dir, or outside the data dir entirely.
+        assert!(!is_session_media_path("sessions/x/files/../../secret"));
+        assert!(!is_session_media_path(
+            "sessions/x/files/../../../../home/ubuntu/.ssh/id_rsa"
+        ));
+        assert!(!is_session_media_path("sessions/../files/x"));
+        assert!(!is_session_media_path("sessions/x/files/./secret"));
+        assert!(!is_session_media_path(
+            "sessions\\x\\files\\..\\..\\secret"
+        ));
+        assert!(!is_session_media_path(
+            "./sessions/x/files/../../secret"
+        ));
+        // A legitimate nested-looking name that merely contains ".." as a
+        // substring (not a full path segment) is not traversal and stays
+        // valid — only exact `.`/`..` segments are rejected.
+        assert!(is_session_media_path(
+            "sessions/x/files/report..final.pdf"
+        ));
+    }
+
+    #[test]
     fn resolve_path_with_dir_routes_session_marker_to_data_dir() {
         let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
         assert_eq!(
@@ -894,6 +931,24 @@ mod tests {
             resolve_path_with_dir("photo.png", &data_dir),
             cwd.join("photo.png")
         );
+    }
+
+    #[test]
+    fn resolve_path_with_dir_does_not_escape_data_dir_via_traversal() {
+        // #87: a `sessions/<id>/files/../../secret` marker must not resolve
+        // under `data_dir` at all — it's rejected by `is_session_media_path`
+        // and falls through to plain cwd-relative resolution instead, same
+        // as any other non-session relative path.
+        let cwd = std::env::current_dir().unwrap();
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        let malicious = "sessions/x/files/../../../../home/ubuntu/.ssh/id_rsa";
+        let result = resolve_path_with_dir(malicious, &data_dir);
+        assert!(
+            !result.starts_with(&data_dir),
+            "traversal path must not resolve under data_dir, got {}",
+            result.display()
+        );
+        assert_eq!(result, cwd.join(malicious));
     }
 
     #[test]
