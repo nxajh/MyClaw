@@ -365,12 +365,37 @@ impl SkillManageTool {
         }))
     }
 
+    /// Resolve `name` to its on-disk skill directory for a write operation
+    /// (edit/patch/delete/write_file/remove_file — the only callers of this
+    /// method). Rejects a skill sourced from `agents_skills_dir` (issue #83's
+    /// cross-agent shared library, `~/.agents/skills`): that library is
+    /// read-only by design (`skill_manage` only ever writes under
+    /// `skills_root`), but before this check `get_skill_dir` returned the
+    /// shared path anyway and every caller happily wrote/deleted through it
+    /// (issue #93 — filing this as "should say read-only instead of 'not
+    /// found'" undersold it: nothing ever produced "not found" for a
+    /// shared-only skill, the writes/deletes silently succeeded against the
+    /// shared library).
     fn get_skill_dir(&self, name: &str) -> Result<PathBuf, String> {
-        self.skills
+        let dir = self
+            .skills
             .read()
             .skill_dir(name)
             .map(|p| p.to_path_buf())
-            .ok_or_else(|| format!("Skill '{}' not found.", name))
+            .ok_or_else(|| format!("Skill '{}' not found.", name))?;
+
+        if let Some(shared) = &self.agents_skills_dir {
+            if dir.starts_with(shared) {
+                return Err(format!(
+                    "Skill '{name}' comes from the shared library ({}) and is read-only \
+                     here — it can't be edited, patched, deleted, or have files added/removed \
+                     via skill_manage.",
+                    shared.display()
+                ));
+            }
+        }
+
+        Ok(dir)
     }
 
     fn refresh_skills(&self) {
@@ -685,6 +710,106 @@ mod tests {
             .unwrap();
         assert!(result.success, "{}", result.output);
         assert!(mgr.read().get("myskill").is_none());
+    }
+
+    /// Like `setup`, but the skill lives only in a separate shared-library
+    /// dir (`~/.agents/skills` in production), not under `local_workspace`'s
+    /// `skills_root` — the scenario issue #93 is about. Returns
+    /// `(manager, shared_skills_dir)`.
+    fn setup_shared_only(
+        local_workspace: &Path,
+        shared_workspace: &Path,
+        skill_name: &str,
+    ) -> (Arc<RwLock<SkillManager>>, PathBuf) {
+        let shared_skills_dir = shared_workspace.join("skills");
+        std::fs::create_dir_all(local_workspace.join("skills")).unwrap();
+        let mgr = setup(shared_workspace, skill_name);
+        (mgr, shared_skills_dir)
+    }
+
+    #[tokio::test]
+    async fn test_delete_rejects_shared_library_skill() {
+        let local = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
+        let tool = SkillManageTool::new(
+            Arc::clone(&mgr),
+            local.path().join("skills"),
+            Some(shared_skills_dir),
+        );
+        let result = tool
+            .execute(
+                json!({"action": "delete", "name": "sharedskill"}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("shared library"), "{}", result.output);
+        assert!(result.output.contains("read-only"), "{}", result.output);
+        assert!(
+            shared.path().join("skills/sharedskill/SKILL.md").exists(),
+            "shared skill file must survive a rejected delete"
+        );
+        assert!(mgr.read().get("sharedskill").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_patch_rejects_shared_library_skill() {
+        let local = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
+        let tool = SkillManageTool::new(
+            Arc::clone(&mgr),
+            local.path().join("skills"),
+            Some(shared_skills_dir),
+        );
+        let result = tool
+            .execute(
+                json!({
+                    "action": "patch", "name": "sharedskill",
+                    "old_string": "Do stuff.", "new_string": "Do something else."
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("read-only"), "{}", result.output);
+        let content =
+            std::fs::read_to_string(shared.path().join("skills/sharedskill/SKILL.md")).unwrap();
+        assert!(
+            content.contains("Do stuff."),
+            "shared skill content must be unchanged, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_file_rejects_shared_library_skill() {
+        let local = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
+        let tool = SkillManageTool::new(
+            Arc::clone(&mgr),
+            local.path().join("skills"),
+            Some(shared_skills_dir),
+        );
+        let result = tool
+            .execute(
+                json!({
+                    "action": "write_file", "name": "sharedskill",
+                    "file_path": "references/notes.md", "file_content": "hi"
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("read-only"), "{}", result.output);
+        assert!(!shared
+            .path()
+            .join("skills/sharedskill/references/notes.md")
+            .exists());
     }
 
     #[tokio::test]
