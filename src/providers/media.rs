@@ -3,12 +3,40 @@
 
 use async_trait::async_trait;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::providers::capability_chat::{
     BoxStream, ChatMessage, ChatProvider, ChatRequest, ContentPart, StreamEvent,
 };
 use crate::providers::provider_id::{ProviderId, well_known};
+
+/// Process-wide data dir, set once at daemon startup (`AppConfig::base_dir`).
+/// Lets `resolve_path` — called deep in provider rendering code that has no
+/// `Session`/`AppConfig` in scope — resolve `sessions/<id>/files/...` marker
+/// paths to their real on-disk location instead of joining them against cwd.
+static DATA_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// Initialize the global data dir used by `resolve_path`. Called once at
+/// daemon startup; subsequent calls are no-ops (the first value wins).
+pub fn init_data_dir(data_dir: std::path::PathBuf) {
+    let _ = DATA_DIR.set(data_dir);
+}
+
+/// True if `path` has the exact `sessions/<id>/files/<name>` shape produced
+/// by `write_session_file` / the `[image: ...]` family of markers — the only
+/// relative-path shape that resolves against the data dir instead of cwd.
+/// Requires a non-empty id segment and a literal `files` segment (not just a
+/// `sessions/` prefix) so an unrelated workspace directory that happens to be
+/// named `sessions/` (e.g. a PHP/Express session store) isn't hijacked.
+pub fn is_session_media_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let normalized = normalized.trim_start_matches("./");
+    let mut parts = normalized.split('/');
+    parts.next() == Some("sessions")
+        && parts.next().is_some_and(|id| !id.is_empty())
+        && parts.next() == Some("files")
+        && parts.next().is_some_and(|name| !name.is_empty())
+}
 
 pub fn image_marker_path(path: &str) -> String {
     format!("[image: {path}]")
@@ -420,15 +448,44 @@ fn is_file(p: &ContentPart) -> bool {
     matches!(p, ContentPart::File { .. })
 }
 
+/// Resolve a possibly-relative local path to an absolute one.
+///
+/// Absolute paths pass through unchanged. `sessions/<id>/files/...` marker
+/// paths resolve against the global data dir set via [`init_data_dir`] (falls
+/// back to cwd if never initialized — e.g. bare CLI/test contexts that never
+/// produce session-media markers in the first place). Every other relative
+/// path resolves against the process cwd (workspace-relative), same as
+/// before.
 pub fn resolve_path(path: &str) -> std::path::PathBuf {
     let p = std::path::PathBuf::from(path);
     if p.is_absolute() {
-        p
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(p)
+        return p;
     }
+    if is_session_media_path(path) {
+        if let Some(data_dir) = DATA_DIR.get() {
+            return data_dir.join(p);
+        }
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(p)
+}
+
+/// Same resolution rules as [`resolve_path`], but takes an explicit data dir
+/// instead of reading the process-global one. Used by call sites that already
+/// have a data dir at hand (tool implementations), so their behavior doesn't
+/// depend on global init order and stays easy to unit test.
+pub fn resolve_path_with_dir(path: &str, data_dir: &Path) -> std::path::PathBuf {
+    let p = std::path::PathBuf::from(path);
+    if p.is_absolute() {
+        return p;
+    }
+    if is_session_media_path(path) {
+        return data_dir.join(p);
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(p)
 }
 
 fn lower_file_part(
@@ -799,5 +856,50 @@ mod tests {
             sniff_modality_from_bytes(&[0x01, 0x02]),
             FileModality::Other
         );
+    }
+
+    #[test]
+    fn session_media_path_requires_full_shape() {
+        assert!(is_session_media_path("sessions/abc123/files/photo.png"));
+        assert!(is_session_media_path("sessions\\abc123\\files\\photo.png"));
+        assert!(is_session_media_path("./sessions/abc123/files/photo.png"));
+    }
+
+    #[test]
+    fn plain_sessions_prefix_is_not_hijacked() {
+        // A workspace's own `sessions/` directory (e.g. a PHP/Express session
+        // store) must not be misrouted to the data dir just because it starts
+        // with "sessions/".
+        assert!(!is_session_media_path("sessions/config.php"));
+        assert!(!is_session_media_path("sessions/abc123/photo.png"));
+        assert!(!is_session_media_path("sessions//files/photo.png"));
+        assert!(!is_session_media_path("sessions/abc123/files/"));
+        assert!(!is_session_media_path("sessionsfoo/abc123/files/photo.png"));
+    }
+
+    #[test]
+    fn resolve_path_with_dir_routes_session_marker_to_data_dir() {
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        assert_eq!(
+            resolve_path_with_dir("sessions/s/files/photo.png", &data_dir),
+            data_dir.join("sessions/s/files/photo.png")
+        );
+    }
+
+    #[test]
+    fn resolve_path_with_dir_routes_other_relative_paths_to_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        assert_eq!(
+            resolve_path_with_dir("photo.png", &data_dir),
+            cwd.join("photo.png")
+        );
+    }
+
+    #[test]
+    fn resolve_path_with_dir_passes_through_absolute_paths() {
+        let abs = std::path::PathBuf::from("/tmp/photo.png");
+        let data_dir = std::path::PathBuf::from("/home/user/.myclaw");
+        assert_eq!(resolve_path_with_dir(abs.to_str().unwrap(), &data_dir), abs);
     }
 }

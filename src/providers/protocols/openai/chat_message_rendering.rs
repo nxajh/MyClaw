@@ -75,7 +75,15 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     let abs = crate::providers::media::resolve_path(path);
                     let bytes = match std::fs::read(&abs) {
                         Ok(bytes) => bytes,
-                        Err(e) => return Some(json!({"type": "text", "text": format!("{}（读取失败: {e}）", crate::providers::media::marker_for_file(path, mime_type.as_deref()))})),
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path,
+                                resolved = %abs.display(),
+                                err = %e,
+                                "openai chat rendering: failed to read media file, falling back to marker text"
+                            );
+                            return Some(json!({"type": "text", "text": format!("{}（读取失败: {e}）", crate::providers::media::marker_for_file(path, mime_type.as_deref()))}));
+                        }
                     };
                     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
                     match modality {
