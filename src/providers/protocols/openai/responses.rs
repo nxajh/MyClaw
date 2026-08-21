@@ -157,7 +157,7 @@ impl ChatProvider for OpenAiResponsesClient {
             // message, function_call), not just function calls.
             let mut index_to_tool_idx: HashMap<u64, u32> = HashMap::new();
             let mut buffer = String::new();
-            let mut utf8_buf = Vec::new();
+            let mut utf8_decoder = crate::providers::shared::Utf8StreamDecoder::new();
             let mut current_event_type: Option<String> = None;
             let mut stream = resp.bytes_stream();
 
@@ -170,24 +170,15 @@ impl ChatProvider for OpenAiResponsesClient {
                         return;
                     }
                 };
-                utf8_buf.extend_from_slice(&bytes);
-                let try_decode = std::str::from_utf8(&utf8_buf);
-                let text = match try_decode {
-                    Ok(s) => {
-                        let owned = s.to_string();
-                        utf8_buf.clear();
-                        owned
-                    }
-                    Err(e) => {
-                        let valid = e.valid_up_to();
-                        if valid == 0 && utf8_buf.len() < 4 {
-                            continue;
-                        }
-                        let t = String::from_utf8_lossy(&utf8_buf[..valid]).into_owned();
-                        utf8_buf.clear();
-                        t
-                    }
-                };
+                let (text, invalid) = utf8_decoder.push(&bytes);
+                for diag in invalid {
+                    tracing::warn!(
+                        url = %url,
+                        valid_up_to = diag.valid_up_to,
+                        bad_len = diag.bad_len,
+                        "invalid UTF-8 byte sequence in responses SSE stream, skipping"
+                    );
+                }
                 if text.is_empty() {
                     continue;
                 }
@@ -318,7 +309,23 @@ fn parse_responses_sse(
 
     let value: serde_json::Value = match serde_json::from_str(data) {
         Ok(v) => v,
-        Err(_) => return vec![],
+        Err(e) => {
+            // Was silent before #91: a malformed chunk here can drop part of
+            // a function_call_arguments delta the same way a Chat Completions
+            // chunk parse failure can drop a whole tool call. `response.completed`
+            // still reports StopReason::ToolUse correctly (it's a full snapshot,
+            // not reconstructed from these deltas), but the tool call's
+            // *arguments* reassembled from deltas may be truncated/corrupted —
+            // this WARN at least makes that visible instead of silently eating
+            // the chunk.
+            tracing::warn!(
+                event_type = %event_type,
+                error = %e,
+                data_len = data.len(),
+                "responses SSE chunk JSON parse failed (event dropped)"
+            );
+            return vec![];
+        }
     };
 
     match event_type {

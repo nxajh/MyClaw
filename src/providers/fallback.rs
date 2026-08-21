@@ -641,4 +641,49 @@ mod tests {
             "expected an Error event"
         );
     }
+
+    /// #91: a stream-level error tagged with `TOOL_CALL_PARSE_LOSS_TAG` (the
+    /// model claimed a tool call but the SSE chunk carrying it failed to
+    /// parse) must propagate immediately, never trigger failover to the next
+    /// chain entry — switching models here would silently discard the
+    /// original model's decision instead of recovering it.
+    #[tokio::test]
+    async fn tool_call_lost_error_does_not_failover() {
+        use crate::providers::error_class::TOOL_CALL_PARSE_LOSS_TAG;
+
+        let fb = FallbackChatProvider::new(vec![
+            entry(
+                "glm-5.3",
+                "glm",
+                MockResult::Ok(vec![StreamEvent::Error(format!(
+                    "{TOOL_CALL_PARSE_LOSS_TAG}: provider reported finish_reason=tool_calls \
+                     but no tool call could be parsed from the stream"
+                ))]),
+            ),
+            entry(
+                "glm-5.2",
+                "glm",
+                MockResult::Ok(vec![
+                    StreamEvent::Delta { text: "hi".into() },
+                    StreamEvent::Done {
+                        reason: crate::providers::StopReason::EndTurn,
+                    },
+                ]),
+            ),
+        ]);
+
+        let stream = fb.chat(request("glm-5.3")).unwrap();
+        let events: Vec<StreamEvent> = stream.collect().await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, StreamEvent::ModelUsed { .. })),
+            "must not fail over to (or announce) the second chain entry, got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Error(msg) if msg.contains(TOOL_CALL_PARSE_LOSS_TAG))),
+            "the original tool-call-lost error must propagate unchanged, got {events:?}"
+        );
+    }
 }
