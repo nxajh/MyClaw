@@ -88,6 +88,18 @@ fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
             );
             println!("  Sub-agents: {}", agents.len());
             println!("  MCP servers: {}", cfg.mcp_servers.len());
+
+            let skills_dir = cfg.workspace_dir.join("skills");
+            let loaded = myclaw::agents::workspace::skill_loader::load_skills_from_dir(&skills_dir)
+                .len();
+            let drafts =
+                myclaw::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
+            println!(
+                "  Skills: {} loaded / {} draft{} pending",
+                loaded,
+                drafts.len(),
+                if drafts.len() == 1 { "" } else { "s" }
+            );
         }
         None => {
             println!("  Config: ⚠️  not found");
@@ -123,6 +135,16 @@ fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
             myclaw::agents::agent_loader::load_agents_from_dir(&c.agents_root());
         status["sub_agents"] = serde_json::json!(agents.len());
         status["mcp_servers"] = serde_json::json!(c.mcp_servers.len());
+
+        let skills_dir = c.workspace_dir.join("skills");
+        let loaded =
+            myclaw::agents::workspace::skill_loader::load_skills_from_dir(&skills_dir).len();
+        let drafts = myclaw::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
+        status["skills"] = serde_json::json!({
+            "loaded": loaded,
+            "drafts_pending": drafts.len(),
+            "draft_names": drafts,
+        });
     }
     if let Ok(Some(u)) = myclaw::update_state::UpdateState::load() {
         status["last_update"] = serde_json::json!({

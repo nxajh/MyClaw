@@ -811,6 +811,15 @@ impl SessionContext {
             // (sourced from the shared ResourceProvider via ContextEngine).
             session.attachments.diff_date(runtime.context_engine.timezone_offset(), &history_clone);
             session.attachments.diff_autonomy(&prompt_config.permission_mode, &history_clone);
+            // Daily throttled draft-skill backlog reminder (issue #89,
+            // layer ②) — best-effort, never blocks the turn.
+            if let Some(names) = crate::agents::skill_draft_reminder::check_and_arm(
+                std::path::Path::new(&runtime.defaults.prompt.base_dir),
+                std::path::Path::new(&runtime.defaults.prompt.workspace_dir),
+                runtime.context_engine.timezone_offset(),
+            ) {
+                session.attachments.push_skill_draft_reminder(names);
+            }
             // Inject user/feedback memory index as system-reminder.
             let memory_root = &runtime.defaults.prompt.memory_root;
             let memory_entries: Vec<crate::memory::IndexEntry> = if !memory_root.is_empty() {

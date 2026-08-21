@@ -18,6 +18,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::agents::session::Session;
 use crate::agents::tool_registry::ToolRegistry;
+use crate::channels::{Channel, ChannelOutboundMessage};
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ToolSpec};
 use crate::providers::capability_tool::ToolResult;
 use crate::providers::{BoxStream, ChatUsage, StreamEvent, ToolCall};
@@ -39,6 +40,12 @@ pub struct SkillExtractInput {
     pub session_id: String,
     /// Workspace root (skills live in `{workspace_dir}/skills/`).
     pub workspace_dir: String,
+    /// Channel to notify on the session that just hosted this turn, so a
+    /// newly-written draft doesn't accumulate silently (issue #89). `None`
+    /// for headless/cron sessions or when no channel is wired.
+    pub channel: Option<Arc<dyn Channel>>,
+    /// Routing target for the notification (same as `Session::reply_target()`).
+    pub reply_target: Option<String>,
 }
 
 /// Tools the skill extraction fork is permitted to call.
@@ -89,14 +96,25 @@ pub async fn run_skill_extract(input: SkillExtractInput) {
         "skill_extract: starting"
     );
 
+    // Captured before `input` moves into `run_skill_extract_inner` below —
+    // needed afterward to notify the session's channel about any drafts
+    // written (issue #89).
+    let channel = input.channel.clone();
+    let reply_target = input.reply_target.clone();
+
     let result =
         tokio::time::timeout(OVERALL_TIMEOUT, run_skill_extract_inner(input)).await;
     drop(permit);
 
     match result {
         Ok(Ok(written)) => {
-            if written > 0 {
-                tracing::info!(skills_written = written, "skill_extract: skills created");
+            if !written.is_empty() {
+                tracing::info!(
+                    skills_written = written.len(),
+                    names = ?written,
+                    "skill_extract: skills created"
+                );
+                notify_drafts_written(channel, reply_target, &written).await;
             } else {
                 tracing::debug!("skill_extract: no skills extracted");
             }
@@ -113,7 +131,37 @@ pub async fn run_skill_extract(input: SkillExtractInput) {
     }
 }
 
-async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<usize> {
+/// Tell the session's channel about newly-written drafts, so they don't
+/// accumulate silently (issue #89, layer ①). Best-effort: no channel wired
+/// (headless/cron session) or a send failure just gets logged.
+async fn notify_drafts_written(
+    channel: Option<Arc<dyn Channel>>,
+    reply_target: Option<String>,
+    names: &[String],
+) {
+    let (Some(channel), Some(target)) = (channel, reply_target) else {
+        tracing::debug!("skill_extract: no channel to notify about drafts written");
+        return;
+    };
+    let quoted = names
+        .iter()
+        .map(|n| format!("「{n}」"))
+        .collect::<Vec<_>>()
+        .join("、");
+    let text = format!(
+        "本次会话沉淀了 {} 个 draft skill:{}，待审核。可以让我查看内容并提议保留/合并/删除。",
+        names.len(),
+        quoted
+    );
+    if let Err(e) = channel
+        .send_message(&ChannelOutboundMessage::text(target, text))
+        .await
+    {
+        tracing::warn!(err = %e, "skill_extract: failed to send draft-skill notification");
+    }
+}
+
+async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<Vec<String>> {
     // Build a minimal Session shell.
     let mut session_shell = Session::new("skill_extract".to_string());
     session_shell.owner = "skill_extract".to_string();
@@ -131,7 +179,7 @@ async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<usize> {
     let model_id = &input.model_id;
     let tool_specs = &input.tool_specs;
     let tool_registry = &input.tool_registry;
-    let mut skills_written = 0usize;
+    let mut skills_written: Vec<String> = Vec::new();
 
     for round in 1..=MAX_ROUNDS {
         let req = ChatRequest {
@@ -222,12 +270,15 @@ async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<usize> {
                 continue;
             }
 
+            let created_name = args["name"].as_str().map(str::to_string);
             let raw = tool.execute(args, &session_shell).await;
             let result: anyhow::Result<ToolResult> = raw;
             let (result_content, is_error) = match &result {
                 Ok(r) => {
                     if r.success && call.name == "skill_manage" {
-                        skills_written += 1;
+                        if let Some(name) = created_name {
+                            skills_written.push(name);
+                        }
                     }
                     let mut out = r.output.clone();
                     if let Some(ref err) = r.error {
@@ -419,4 +470,65 @@ async fn collect_extract_stream(mut stream: BoxStream<StreamEvent>) -> Result<Ex
         tool_calls,
         usage,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct MockChannel {
+        sent: Mutex<Vec<crate::channels::ChannelOutboundMessage>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Channel for MockChannel {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn send_message(
+            &self,
+            msg: &ChannelOutboundMessage,
+        ) -> anyhow::Result<crate::channels::OutboundSendResult> {
+            self.sent.lock().unwrap().push(msg.clone());
+            Ok(crate::channels::OutboundSendResult::empty())
+        }
+        async fn listen(
+            &self,
+        ) -> anyhow::Result<tokio::sync::mpsc::Receiver<crate::channels::ChannelInboundMessage>>
+        {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+        async fn health_check(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn notify_drafts_written_is_noop_without_channel() {
+        // Headless/cron session: no channel wired, no reply target. Must not
+        // panic and must not attempt to send anything.
+        notify_drafts_written(None, None, &["my-skill".to_string()]).await;
+    }
+
+    #[tokio::test]
+    async fn notify_drafts_written_sends_one_message_naming_all_drafts() {
+        let mock = Arc::new(MockChannel {
+            sent: Mutex::new(Vec::new()),
+        });
+        let channel: Arc<dyn Channel> = mock.clone();
+        notify_drafts_written(
+            Some(channel),
+            Some("chat:123".to_string()),
+            &["skill-one".to_string(), "skill-two".to_string()],
+        )
+        .await;
+
+        let sent = mock.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "expected exactly one notification sent");
+        assert_eq!(sent[0].receiver.id, "chat:123");
+        assert!(sent[0].content.text.contains("skill-one"));
+        assert!(sent[0].content.text.contains("skill-two"));
+    }
 }

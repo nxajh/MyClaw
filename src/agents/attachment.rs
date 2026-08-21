@@ -22,6 +22,7 @@ enum AttachmentKind {
     MemoryListing,
     DateInjection,
     AutonomyNotice,
+    SkillDraftBacklog,
 }
 
 /// 单类增量。
@@ -425,6 +426,9 @@ impl AttachmentManager {
         if let Some(delta) = self.pending.get(&AttachmentKind::MemoryListing) {
             sections.push(Self::render_memory(delta));
         }
+        if let Some(delta) = self.pending.get(&AttachmentKind::SkillDraftBacklog) {
+            sections.push(Self::render_skill_draft_backlog(delta));
+        }
 
         if sections.is_empty() {
             return None;
@@ -483,6 +487,20 @@ impl AttachmentManager {
         self.pending.clear();
     }
 
+    /// Queue a one-shot system-reminder about an accumulating draft-skill
+    /// backlog. The caller (`skill_draft_reminder::check_and_arm`) already
+    /// decided this should fire now (threshold + once-per-day throttle) —
+    /// this method just renders it into the turn like any other attachment.
+    pub fn push_skill_draft_reminder(&mut self, draft_names: Vec<String>) {
+        self.pending.insert(
+            AttachmentKind::SkillDraftBacklog,
+            Delta {
+                added: draft_names,
+                removed: vec![],
+            },
+        );
+    }
+
     /// Debug helper: pending delta keys.
     pub fn pending_keys(&self) -> Vec<&'static str> {
         self.pending
@@ -494,6 +512,7 @@ impl AttachmentManager {
                 AttachmentKind::MemoryListing => "memory",
                 AttachmentKind::DateInjection => "date",
                 AttachmentKind::AutonomyNotice => "autonomy",
+                AttachmentKind::SkillDraftBacklog => "skill_draft_backlog",
             })
             .collect()
     }
@@ -570,6 +589,19 @@ impl AttachmentManager {
         for entry in &delta.added {
             lines.push(entry.clone());
         }
+        lines.join("\n")
+    }
+
+    fn render_skill_draft_backlog(delta: &Delta) -> String {
+        let mut lines = vec!["## Draft Skills Pending Review".to_string()];
+        lines.push(format!(
+            "{} draft skill(s) have accumulated, hidden from normal loading until reviewed: {}. \
+             Mention this backlog to the user and offer to triage it — view each with \
+             `skill_view`, propose promote (drop `status: draft`) / merge into an existing \
+             skill / delete, and apply only after the user confirms.",
+            delta.added.len(),
+            delta.added.join(", ")
+        ));
         lines.join("\n")
     }
 
@@ -914,5 +946,23 @@ mod tests {
         am.diff_autonomy(&crate::config::agent::PermissionMode::Default, &compacted);
         let msg2 = am.build_message(&SkillManager::new()).unwrap();
         assert!(msg2.text_content().contains("## Autonomy Level Changed"));
+    }
+
+    #[test]
+    fn skill_draft_backlog_reminder_names_every_draft() {
+        let mut am = AttachmentManager::new();
+        am.push_skill_draft_reminder(vec!["draft-one".to_string(), "draft-two".to_string()]);
+        let msg = am.build_message(&SkillManager::new()).unwrap();
+        let text = msg.text_content();
+        assert!(text.contains("## Draft Skills Pending Review"));
+        assert!(text.contains("draft-one"));
+        assert!(text.contains("draft-two"));
+        assert!(text.contains("2 draft skill"));
+    }
+
+    #[test]
+    fn no_skill_draft_reminder_means_no_section() {
+        let am = AttachmentManager::new();
+        assert!(am.build_message(&SkillManager::new()).is_none());
     }
 }
