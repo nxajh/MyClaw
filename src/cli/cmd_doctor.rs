@@ -89,6 +89,27 @@ pub async fn run(_cli: &Cli, fix: bool) -> Result<()> {
             ok_count += 1;
         }
 
+        // 5b. Draft skills (issue #89 — auto-extracted skills hidden from
+        // normal loading until reviewed; surface the backlog so it doesn't
+        // silently accumulate).
+        let skills_dir = ws.join("skills");
+        let drafts = myclaw::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
+        if drafts.is_empty() {
+            println!("✅ Draft skills: none pending");
+            ok_count += 1;
+        } else {
+            println!(
+                "⚠️  Draft skills: {} pending review: {}",
+                drafts.len(),
+                drafts.join(", ")
+            );
+            issues.push(format!(
+                "Review {} pending draft skill(s) (ask the agent to triage, or inspect {})",
+                drafts.len(),
+                skills_dir.display()
+            ));
+        }
+
         // 6. Session DB
         let db_path = ws.join("sessions.db");
         if db_path.exists() {

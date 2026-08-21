@@ -131,6 +131,34 @@ pub fn load_skills_from_dir(skills_dir: &Path) -> Vec<SkillDefinition> {
     skills
 }
 
+/// Scan `skills_dir` and return the names of skills with `status: draft` —
+/// the ones `load_skills_from_dir` filters out of normal loading. Used by
+/// `myclaw status`/`myclaw doctor` and the daily backlog reminder (issue
+/// #89) to surface drafts that would otherwise be invisible.
+pub fn list_draft_skill_names(skills_dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(entries) = std::fs::read_dir(skills_dir) else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let skill_md = path.join("SKILL.md");
+        if !skill_md.exists() {
+            continue;
+        }
+        if let Ok(skill) = parse_skill_file(&skill_md) {
+            if skill.status.as_deref() == Some("draft") {
+                names.push(skill.name);
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
 /// Load skills across two layers: the local skills root and — when
 /// present — the cross-agent shared library `~/.agents/skills` (issue
 /// #83). Local skills always win a same-`name` conflict (front-matter
@@ -346,5 +374,37 @@ Search flights."#;
 
         let merged = load_skills_layered(&local, Some(Path::new("/nonexistent")));
         assert_eq!(merged.len(), 1);
+    }
+
+    #[test]
+    fn test_list_draft_skill_names_finds_only_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        std::fs::create_dir_all(skills_dir.join("active-skill")).unwrap();
+        std::fs::write(
+            skills_dir.join("active-skill/SKILL.md"),
+            "---\nname: active-skill\ndescription: \"x\"\n---\nbody",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skills_dir.join("draft-skill")).unwrap();
+        std::fs::write(
+            skills_dir.join("draft-skill/SKILL.md"),
+            "---\nname: draft-skill\ndescription: \"x\"\nstatus: draft\n---\nbody",
+        )
+        .unwrap();
+
+        let drafts = list_draft_skill_names(&skills_dir);
+        assert_eq!(drafts, vec!["draft-skill".to_string()]);
+
+        // Active skill still loads normally and drafts stay excluded from it.
+        let loaded = load_skills_from_dir(&skills_dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "active-skill");
+    }
+
+    #[test]
+    fn test_list_draft_skill_names_empty_dir_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(list_draft_skill_names(&dir.path().join("nonexistent")).is_empty());
     }
 }

@@ -19,6 +19,7 @@ mod mcp_manager;
 mod media_e2e_test;
 pub mod memory_distill;
 pub mod memory_fork;
+pub mod skill_draft_reminder;
 pub mod skill_extract;
 mod orchestrator;
 mod prompt;

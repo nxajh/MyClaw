@@ -284,6 +284,15 @@ impl Agent {
                         &history_clone,
                     );
                     session.attachments.diff_autonomy(&permission_mode, &history_clone);
+                    // Daily throttled draft-skill backlog reminder (issue #89,
+                    // layer ②) — best-effort, never blocks the turn.
+                    if let Some(names) = crate::agents::skill_draft_reminder::check_and_arm(
+                        std::path::Path::new(&runtime.defaults.prompt.base_dir),
+                        std::path::Path::new(&runtime.defaults.prompt.workspace_dir),
+                        runtime.context_engine.timezone_offset(),
+                    ) {
+                        session.attachments.push_skill_draft_reminder(names);
+                    }
                     let memory_root = &runtime.defaults.prompt.memory_root;
                     let memory_entries: Vec<crate::memory::IndexEntry> =
                         if !memory_root.is_empty() {
@@ -658,6 +667,8 @@ impl Agent {
                         tool_registry: Arc::clone(&runtime.tools),
                         session_id: session.id.clone(),
                         workspace_dir: runtime.defaults.prompt.workspace_dir.clone(),
+                        channel: session.resolve_channel(),
+                        reply_target: session.reply_target().map(str::to_string),
                     };
                     tokio::spawn(async move {
                         crate::agents::skill_extract::run_skill_extract(skill_input).await;
