@@ -162,6 +162,14 @@ struct RawConfig {
     /// Delegation configuration (`[delegation]` — recursive nesting limit).
     #[serde(default)]
     delegation: DelegationConfig,
+
+    /// Skills configuration (`[skills]` — `~/.agents/skills` inclusion).
+    #[serde(default)]
+    skills: SkillsConfig,
+
+    /// Tool-shell environment configuration (`[shell]` — PATH fix-ups).
+    #[serde(default)]
+    shell: ShellConfig,
 }
 
 // ── LoggingConfig ─────────────────────────────────────────────────────────────
@@ -300,6 +308,88 @@ fn default_delegation_max_depth() -> u32 {
     3
 }
 
+// ── SkillsConfig（[skills] — 跨 agent 通用 skill 目录） ──────────────────────
+
+/// Skills configuration (`[skills]`).
+///
+/// Issue #83: skill CLIs like `npx skills add` distribute skills into a
+/// cross-agent shared library (`~/.agents/skills`), symlinking them into
+/// the agents they know about. MyClaw isn't in that registry, so without
+/// this it never sees skills installed that way. `load_skills_layered`
+/// (see `agents::workspace::skill_loader`) merges that directory in, with
+/// `~/.myclaw/skills` (local customization) always winning name conflicts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsConfig {
+    /// Also load `~/.agents/skills` alongside the local skills root.
+    /// Default on; set `false` to opt a deployment out of the shared
+    /// library entirely.
+    #[serde(default = "default_true")]
+    pub include_agents_dir: bool,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            include_agents_dir: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Cross-agent shared skills directory: `~/.agents/skills`. Read-only from
+/// MyClaw's perspective — `skill_manage` never writes here, only to the
+/// local `skills_root()`.
+pub fn agents_skills_dir() -> PathBuf {
+    PathBuf::from(shellexpand::tilde("~/.agents/skills").to_string())
+}
+
+// ── ShellConfig（[shell] — 工具 shell 环境修补） ─────────────────────────────
+
+/// Tool-shell environment configuration (`[shell]`).
+///
+/// Issue #84: the tool shell (`spawn_tracked` in `tools/shell.rs`) inherits
+/// the daemon's own process environment, and the daemon is typically
+/// started by a systemd user unit with no login/interactive shell in its
+/// ancestry — so PATH extensions a user's `.bashrc` appends (npm global
+/// prefix, nvm, pyenv, Homebrew, …) are invisible to it. `tools::shell_env`
+/// fixes this in three layers: a static system-directory fallback (always
+/// on), an optional one-time login-shell probe (`login_env_probe`), and
+/// this escape hatch for anything the first two still miss.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellConfig {
+    /// Probe `$SHELL -l -c 'env -0'` once at startup and merge the result
+    /// into the tool-shell PATH (gaps only — existing keys are never
+    /// clobbered). Default on; disable if the probe is unwanted or
+    /// `$SHELL` isn't trustworthy in this deployment.
+    #[serde(default = "default_true")]
+    pub login_env_probe: bool,
+
+    /// Directories appended to PATH ahead of everything else — the final
+    /// escape hatch when the static fallback and login-shell probe both
+    /// miss a directory a tool command needs.
+    #[serde(default)]
+    pub path_extra: Vec<String>,
+
+    /// Extra environment variables injected into every tool-shell command,
+    /// applied last (highest priority — including overriding `PATH`
+    /// outright if set here).
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            login_env_probe: true,
+            path_extra: Vec::new(),
+            env: HashMap::new(),
+        }
+    }
+}
+
 /// Simple glob matching supporting `*` (any chars except `/`) and `**` (any chars including `/`).
 fn glob_match(pattern: &str, path: &str) -> bool {
     let pattern_parts: Vec<&str> = pattern.split('/').collect();
@@ -415,6 +505,10 @@ pub struct AppConfig {
     pub messaging: MessagingConfig,
     /// Delegation configuration (`[delegation]` — recursive nesting limit).
     pub delegation: DelegationConfig,
+    /// Skills configuration (`[skills]` — `~/.agents/skills` inclusion).
+    pub skills: SkillsConfig,
+    /// Tool-shell environment configuration (`[shell]` — PATH fix-ups).
+    pub shell: ShellConfig,
 }
 
 use std::sync::OnceLock;
@@ -507,6 +601,12 @@ impl AppConfig {
     /// Skills root: `{base_dir}/skills`.
     pub fn skills_root(&self) -> PathBuf {
         self.base_dir.join("skills")
+    }
+
+    /// Cross-agent shared skills dir (`~/.agents/skills`), or `None` when
+    /// `[skills] include_agents_dir = false`. See `SkillsConfig` (issue #83).
+    pub fn agents_skills_dir_opt(&self) -> Option<PathBuf> {
+        self.skills.include_agents_dir.then(agents_skills_dir)
     }
 
     /// Sub-agent definitions root: `{base_dir}/agents`.
@@ -657,6 +757,8 @@ impl ConfigLoader {
             system: raw.system,
             messaging: raw.messaging,
             delegation: raw.delegation,
+            skills: raw.skills,
+            shell: raw.shell,
         })
     }
 
@@ -1035,5 +1137,54 @@ from = "noreply@example.com"
         unsafe {
             std::env::remove_var("TEST_SMTP_PASSWORD");
         }
+    }
+
+    #[test]
+    fn test_skills_config_defaults_to_including_agents_dir() {
+        let config = ConfigLoader::from_toml("").unwrap();
+        assert!(config.skills.include_agents_dir);
+        assert_eq!(
+            config.agents_skills_dir_opt(),
+            Some(agents_skills_dir())
+        );
+    }
+
+    #[test]
+    fn test_skills_config_can_disable_agents_dir() {
+        let config = ConfigLoader::from_toml(
+            r#"
+[skills]
+include_agents_dir = false
+"#,
+        )
+        .unwrap();
+        assert!(!config.skills.include_agents_dir);
+        assert_eq!(config.agents_skills_dir_opt(), None);
+    }
+
+    #[test]
+    fn test_shell_config_defaults() {
+        let config = ConfigLoader::from_toml("").unwrap();
+        assert!(config.shell.login_env_probe);
+        assert!(config.shell.path_extra.is_empty());
+        assert!(config.shell.env.is_empty());
+    }
+
+    #[test]
+    fn test_shell_config_parse() {
+        let config = ConfigLoader::from_toml(
+            r#"
+[shell]
+login_env_probe = false
+path_extra = ["/opt/custom/bin"]
+
+[shell.env]
+FOO = "bar"
+"#,
+        )
+        .unwrap();
+        assert!(!config.shell.login_env_probe);
+        assert_eq!(config.shell.path_extra, vec!["/opt/custom/bin".to_string()]);
+        assert_eq!(config.shell.env.get("FOO"), Some(&"bar".to_string()));
     }
 }

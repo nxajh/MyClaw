@@ -20,9 +20,14 @@ pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
     // Reloading requires base_dir for skills and agents
     let base_dir = std::path::PathBuf::from(&ctx.runtime.defaults.prompt.base_dir);
 
-    // 1. Re-scan skills
+    // 1. Re-scan skills — layered with the shared `~/.agents/skills`
+    // library when enabled (issue #83), so a manual `/reload` doesn't drop
+    // it from the live SkillManager.
     let skills_dir = base_dir.join("skills");
-    let new_defs = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
+    let new_defs = crate::agents::skill_loader::load_skills_layered(
+        &skills_dir,
+        ctx.runtime.agents_skills_dir.as_deref(),
+    );
     let new_skills: Vec<crate::agents::Skill> = new_defs
         .iter()
         .map(crate::agents::Skill::from_definition)

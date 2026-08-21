@@ -131,6 +131,52 @@ pub fn load_skills_from_dir(skills_dir: &Path) -> Vec<SkillDefinition> {
     skills
 }
 
+/// Load skills across two layers: the local skills root and — when
+/// present — the cross-agent shared library `~/.agents/skills` (issue
+/// #83). Local skills always win a same-`name` conflict (front-matter
+/// `name`, not directory name); a conflict is logged once so users can
+/// tell why an installed shared-library skill didn't take effect.
+///
+/// `agents_dir: None` (config opted out, or the caller doesn't want the
+/// shared layer at all) behaves exactly like `load_skills_from_dir(local_dir)`.
+pub fn load_skills_layered(
+    local_dir: &Path,
+    agents_dir: Option<&Path>,
+) -> Vec<SkillDefinition> {
+    let local_defs = load_skills_from_dir(local_dir);
+
+    let agents_defs = match agents_dir {
+        Some(dir) => load_skills_from_dir(dir),
+        None => Vec::new(),
+    };
+    if agents_defs.is_empty() {
+        return local_defs;
+    }
+
+    let local_names: std::collections::HashSet<&str> =
+        local_defs.iter().map(|d| d.name.as_str()).collect();
+
+    let mut merged: Vec<SkillDefinition> = agents_defs
+        .into_iter()
+        .filter(|d| {
+            if local_names.contains(d.name.as_str()) {
+                warn!(
+                    name = %d.name,
+                    local_path = %local_dir.display(),
+                    agents_path = %d.source_path.display(),
+                    "skill name conflict: local skills root overrides ~/.agents/skills"
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    merged.extend(local_defs);
+    merged.sort_by(|a, b| a.name.cmp(&b.name));
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +288,63 @@ Search flights."#;
     fn test_load_skills_missing_dir() {
         let skills = load_skills_from_dir(Path::new("/nonexistent"));
         assert!(skills.is_empty());
+    }
+
+    fn write_skill(dir: &Path, folder: &str, name: &str, body: &str) {
+        let skill_dir = dir.join(folder);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\n---\n{body}"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_load_skills_layered_merges_both_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        let agents = dir.path().join("agents");
+        write_skill(&local, "skill-a", "skill-a", "# A (local)");
+        write_skill(&agents, "skill-b", "skill-b", "# B (shared)");
+
+        let merged = load_skills_layered(&local, Some(&agents));
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].name, "skill-a");
+        assert_eq!(merged[1].name, "skill-b");
+    }
+
+    #[test]
+    fn test_load_skills_layered_local_wins_name_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        let agents = dir.path().join("agents");
+        write_skill(&local, "skill-a", "skill-a", "# local version");
+        write_skill(&agents, "skill-a", "skill-a", "# shared version");
+
+        let merged = load_skills_layered(&local, Some(&agents));
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].prompt_body, "# local version");
+    }
+
+    #[test]
+    fn test_load_skills_layered_none_agents_dir_is_local_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        write_skill(&local, "skill-a", "skill-a", "# A");
+
+        let merged = load_skills_layered(&local, None);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].name, "skill-a");
+    }
+
+    #[test]
+    fn test_load_skills_layered_missing_agents_dir_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        write_skill(&local, "skill-a", "skill-a", "# A");
+
+        let merged = load_skills_layered(&local, Some(Path::new("/nonexistent")));
+        assert_eq!(merged.len(), 1);
     }
 }

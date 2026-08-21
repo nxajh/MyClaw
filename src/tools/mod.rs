@@ -29,6 +29,7 @@ mod search;
 mod search_cooldown;
 mod send_message;
 pub mod shell;
+pub mod shell_env;
 mod session_query;
 mod sessions_yield;
 mod skill_manage_tool;

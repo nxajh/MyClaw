@@ -562,10 +562,14 @@ async fn build_tools(
         skills,
     ))));
 
-    // SkillManageTool — CRUD for skills.
+    // SkillManageTool — CRUD for skills. Writes always go to the local
+    // skills root only; `agents_skills_dir_opt()` (issue #83) is passed
+    // just so a post-write refresh doesn't drop the shared-library skills
+    // from the live SkillManager.
     tools.register(Arc::new(crate::tools::SkillManageTool::new(
         Arc::clone(skills),
         config.skills_root(),
+        config.agents_skills_dir_opt(),
     )));
 
     // CronJobTool — manage scheduled cron jobs.
@@ -638,11 +642,17 @@ async fn build_tools(
     (tools, task_boards, send_message_tool, friend_ctx, shell_registry)
 }
 
-/// Build SkillManager from SKILL.md files in the base dir (P1: `{base_dir}/skills`).
+/// Build SkillManager from SKILL.md files in the base dir (P1: `{base_dir}/skills`)
+/// layered with the cross-agent shared library `~/.agents/skills` when
+/// enabled (`[skills] include_agents_dir`, default on — issue #83).
 fn build_skill_manager(config: &crate::config::AppConfig) -> SkillManager {
     let mut manager = SkillManager::new();
     let skills_dir = config.skills_root();
-    let definitions = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
+    let agents_dir = config.agents_skills_dir_opt();
+    let definitions = crate::agents::skill_loader::load_skills_layered(
+        &skills_dir,
+        agents_dir.as_deref(),
+    );
     for def in definitions {
         tracing::debug!(name = %def.name, "skill registered");
         manager.register(Skill::from_definition(&def));
@@ -867,6 +877,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // (which has no Session/AppConfig in scope) can resolve
     // `sessions/<id>/files/...` marker paths without going through cwd.
     crate::providers::media::init_data_dir(config.base_dir.clone());
+
+    // Issue #84: tool-shell PATH fix-ups (static fallback always on; the
+    // login-shell probe below is non-blocking — it's a spawned background
+    // task, not awaited here).
+    crate::tools::shell_env::init(config.shell.clone());
 
     // 让进程 cwd 与 workspace_dir 一致，保证 file_read 等工具的相对路径解析
     // 和 system prompt 告诉 LLM 的 "Working directory" 一致
@@ -1201,8 +1216,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // `AgentRegistry::reload_from_dir` / `SkillManager::reload` — no daemon
     // restart needed.
     // P1: agents/skills 热加载目录随 base dir（系统配置面）。
+    // Issue #83: also watches `~/.agents/skills` (shared skill library)
+    // when enabled — a symlink `skills update` refreshes there takes
+    // effect here without a daemon restart.
+    let agents_skills_dir = config.agents_skills_dir_opt();
     let _watcher = crate::agents::WorkspaceWatcher::spawn_managed(
         config.skills_root(),
+        agents_skills_dir.clone(),
         config.agents_root(),
         &config.memory_root(),
         sub_agent_registry.as_ref().clone(),
@@ -1516,6 +1536,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         .with_sessions_dir(config.sessions_root())
         // P4 第二波：注册表供输出渲染（`<ref>` → `@昵称(u/uid)`，流式/Done/fallback）。
         .with_user_registry(Arc::clone(&user_registry))
+    };
+    // Issue #83: so `/reload` (agents/commands/reload.rs) can layer in the
+    // shared skill library too, instead of dropping it on manual reload.
+    let agent_runtime = match agents_skills_dir.clone() {
+        Some(dir) => agent_runtime.with_agents_skills_dir(dir),
+        None => agent_runtime,
     };
 
     // DelegationCoordinator was constructed before the runtime existed
