@@ -659,7 +659,6 @@ mod tests {
             mgr.register(Skill {
                 name: name.to_string(),
                 description: format!("{} description", name),
-                summary: None,
                 keywords: vec![],
                 prompt_body: String::new(),
                 version: None,
@@ -678,17 +677,16 @@ mod tests {
         vec![]
     }
 
-    /// issue #112: the injected `## Skills` listing uses the bounded
-    /// `injected_summary` (short `summary` field, or truncated
-    /// `description`) — never the full, possibly trigger-word-stuffed
-    /// `description` verbatim.
+    /// issue #123: with the `summary` field reverted, the injected
+    /// `## Skills` listing carries the full `description` verbatim — per
+    /// the Agent Skills standard, `description` IS the injection/trigger
+    /// surface, there is no separate short field.
     #[test]
-    fn skill_listing_injects_summary_not_full_description() {
+    fn skill_listing_injects_full_description() {
         let mut mgr = SkillManager::new();
         mgr.register(Skill {
             name: "cron-diag".to_string(),
-            description: "a".repeat(200),
-            summary: Some("Diagnose cron issues.".to_string()),
+            description: "Diagnose cron issues.".to_string(),
             keywords: vec![],
             prompt_body: String::new(),
             version: None,
@@ -706,7 +704,6 @@ mod tests {
         let text = msg.text_content();
 
         assert!(text.contains("Diagnose cron issues."));
-        assert!(!text.contains(&"a".repeat(200)));
     }
 
     #[test]

@@ -148,7 +148,6 @@ mod tests {
         Skill {
             name: name.to_string(),
             description: desc.to_string(),
-            summary: None,
             keywords: vec![],
             prompt_body: String::new(),
             version: None,
