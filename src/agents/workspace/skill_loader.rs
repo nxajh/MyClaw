@@ -108,12 +108,16 @@ fn dual_bool(
 }
 
 /// issue #127: a deprecation-WARN storm recurred *after* every SKILL.md on
-/// disk had already been migrated — the leading theory is a caller re-
-/// parsing a stale copy (a divergent path resolution, or otherwise). This
-/// WARN now carries the exact `path` parsed and that file's on-disk mtime
-/// (best-effort — a stat failure just omits it, never fails the parse), so
-/// the next recurrence identifies the parsed object directly instead of
-/// requiring another round of production forensics.
+/// disk had already been migrated. Root cause (confirmed with production
+/// evidence, not the stale-copy theory originally suspected): the
+/// top-level scan trims each line before matching, so it also matched the
+/// same field indented under `metadata:` — see `parse_skill_file`'s
+/// `strip_yaml_block` use for the actual fix. This WARN still carries the
+/// exact `path` parsed and that file's on-disk mtime (best-effort — a stat
+/// failure just omits it, never fails the parse), so any future
+/// recurrence — for a genuinely different reason — identifies the parsed
+/// object directly instead of requiring another round of production
+/// forensics.
 fn warn_deprecated_top_level(skill_name: &str, field: &str, path: &Path) {
     let mtime = std::fs::metadata(path)
         .and_then(|m| m.modified())
