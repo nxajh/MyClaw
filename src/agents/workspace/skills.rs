@@ -8,12 +8,19 @@ use std::path::{Path, PathBuf};
 
 use super::skill_loader::SkillDefinition;
 
+/// Injection safety valve (issue #123): the Agent Skills standard's own
+/// `description` length ceiling (agentskills.io). This is a backstop
+/// against a runaway author-written description, not a design knob —
+/// well-written skills (compact, third person, what + when + a handful of
+/// trigger phrases; long-tail trigger words belong in the skill body
+/// instead) never come close to it.
+const MAX_INJECTED_DESCRIPTION_CHARS: usize = 1024;
+
 /// A skill definition (loaded from SKILL.md).
 #[derive(Clone)]
 pub struct Skill {
     pub name: String,
     pub description: String,
-    pub summary: Option<String>,
     pub keywords: Vec<String>,
     pub prompt_body: String,
     pub version: Option<String>,
@@ -31,7 +38,6 @@ impl Skill {
         Self {
             name: def.name.clone(),
             description: def.description.clone(),
-            summary: def.summary.clone(),
             keywords: def.keywords.clone(),
             prompt_body: def.prompt_body.clone(),
             version: def.version.clone(),
@@ -44,18 +50,31 @@ impl Skill {
         }
     }
 
-    /// The short text injected into the system prompt every time this
-    /// skill is announced (issue #112) — the author's `summary` field if
-    /// present, else a truncated `description` so unmigrated SKILL.md
-    /// files keep working. Bounded either way: per-turn injection cost no
-    /// longer grows with however many trigger-word-stuffed sentences an
-    /// author packs into `description`, which stays available in full via
-    /// `skill_view` and the `/skills` listing.
+    /// The text injected into the system prompt every time this skill is
+    /// announced (issue #123: reverts #119's non-standard `summary` field
+    /// split — the Agent Skills standard injects `description` in full,
+    /// with no separate local-only field, so skills stay portable across
+    /// agent implementations sharing `~/.agents/skills`, issue #83).
+    /// Capped at `MAX_INJECTED_DESCRIPTION_CHARS` as a safety valve; logs a
+    /// warning on the rare description that actually hits it.
     pub fn injected_summary(&self) -> String {
-        match &self.summary {
-            Some(s) if !s.trim().is_empty() => crate::str_utils::truncate_line(s, 80),
-            _ => crate::str_utils::truncate_line(&self.description, 60),
+        let char_count = self.description.chars().count();
+        if char_count <= MAX_INJECTED_DESCRIPTION_CHARS {
+            return self.description.clone();
         }
+        tracing::warn!(
+            skill = %self.name,
+            len = char_count,
+            cap = MAX_INJECTED_DESCRIPTION_CHARS,
+            "skill description exceeds the injection safety cap; truncating"
+        );
+        format!(
+            "{}...",
+            crate::str_utils::truncate_chars(
+                &self.description,
+                MAX_INJECTED_DESCRIPTION_CHARS.saturating_sub(3)
+            )
+        )
     }
 }
 
@@ -132,11 +151,10 @@ impl SkillManager {
 mod tests {
     use super::*;
 
-    fn skill(description: &str, summary: Option<&str>) -> Skill {
+    fn skill(description: &str) -> Skill {
         Skill {
             name: "x".to_string(),
             description: description.to_string(),
-            summary: summary.map(str::to_string),
             keywords: vec![],
             prompt_body: String::new(),
             version: None,
@@ -149,46 +167,40 @@ mod tests {
         }
     }
 
-    /// issue #112: an explicit `summary` is what gets injected, verbatim
-    /// when short enough — not the (possibly much longer) `description`.
+    /// issue #123: with the `summary` field reverted, `injected_summary()`
+    /// is just the full `description` — the Agent Skills standard has no
+    /// separate injected-vs-full-text split.
     #[test]
-    fn injected_summary_prefers_explicit_summary() {
-        let s = skill(
-            "Long description with lots of trigger words: foo, bar, baz, qux, quux.",
-            Some("Get the weather."),
+    fn injected_summary_is_full_description_when_under_cap() {
+        let s = skill("Get current weather conditions and forecasts.");
+        assert_eq!(
+            s.injected_summary(),
+            "Get current weather conditions and forecasts."
         );
-        assert_eq!(s.injected_summary(), "Get the weather.");
     }
 
     #[test]
-    fn injected_summary_falls_back_to_description_when_absent() {
-        let s = skill("Short desc", None);
-        assert_eq!(s.injected_summary(), "Short desc");
+    fn injected_summary_preserves_multiple_lines_under_cap() {
+        // Regression guard: the old implementation used a helper that
+        // collapsed to the first line, which would have silently dropped
+        // this second line even though the whole description is tiny.
+        let s = skill("What it does.\nWhen to use it.");
+        assert_eq!(s.injected_summary(), "What it does.\nWhen to use it.");
     }
 
     #[test]
-    fn injected_summary_truncates_long_fallback_description() {
-        let long = "a".repeat(200);
-        let s = skill(&long, None);
+    fn injected_summary_truncates_only_past_the_safety_cap() {
+        // A description right at the standard's own 1024-char ceiling is
+        // untouched...
+        let at_cap = "a".repeat(MAX_INJECTED_DESCRIPTION_CHARS);
+        let s = skill(&at_cap);
+        assert_eq!(s.injected_summary(), at_cap);
+
+        // ...one character past it triggers truncation.
+        let over_cap = "a".repeat(MAX_INJECTED_DESCRIPTION_CHARS + 1);
+        let s = skill(&over_cap);
         let injected = s.injected_summary();
-        assert!(injected.chars().count() <= 63, "got len {}", injected.chars().count()); // 60 + "..."
+        assert_eq!(injected.chars().count(), MAX_INJECTED_DESCRIPTION_CHARS);
         assert!(injected.ends_with("..."));
-    }
-
-    #[test]
-    fn injected_summary_truncates_oversized_explicit_summary() {
-        // A misused summary field is still bounded — the whole point is a
-        // predictable per-turn injection cost regardless of author input.
-        let long_summary = "b".repeat(200);
-        let s = skill("short", Some(&long_summary));
-        let injected = s.injected_summary();
-        assert!(injected.chars().count() <= 83, "got len {}", injected.chars().count()); // 80 + "..."
-        assert!(injected.ends_with("..."));
-    }
-
-    #[test]
-    fn injected_summary_treats_blank_summary_as_absent() {
-        let s = skill("fallback desc", Some("   "));
-        assert_eq!(s.injected_summary(), "fallback desc");
     }
 }
