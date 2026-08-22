@@ -67,19 +67,26 @@ fn dual_string(
     metadata: Option<&str>,
     key: &str,
     skill_name: &str,
+    path: &Path,
 ) -> Option<String> {
     if let Some(v) = extract_yaml_string(front_matter, key) {
-        warn_deprecated_top_level(skill_name, key);
+        warn_deprecated_top_level(skill_name, key, path);
         return Some(v);
     }
     metadata.and_then(|m| extract_yaml_string(m, key))
 }
 
 /// List-field counterpart of [`dual_string`].
-fn dual_list(front_matter: &str, metadata: Option<&str>, key: &str, skill_name: &str) -> Vec<String> {
+fn dual_list(
+    front_matter: &str,
+    metadata: Option<&str>,
+    key: &str,
+    skill_name: &str,
+    path: &Path,
+) -> Vec<String> {
     let v = extract_yaml_list(front_matter, key);
     if !v.is_empty() {
-        warn_deprecated_top_level(skill_name, key);
+        warn_deprecated_top_level(skill_name, key, path);
         return v;
     }
     metadata.map(|m| extract_yaml_list(m, key)).unwrap_or_default()
@@ -91,18 +98,32 @@ fn dual_bool(
     metadata: Option<&str>,
     key: &str,
     skill_name: &str,
+    path: &Path,
 ) -> Option<bool> {
     if let Some(v) = extract_yaml_bool(front_matter, key) {
-        warn_deprecated_top_level(skill_name, key);
+        warn_deprecated_top_level(skill_name, key, path);
         return Some(v);
     }
     metadata.and_then(|m| extract_yaml_bool(m, key))
 }
 
-fn warn_deprecated_top_level(skill_name: &str, field: &str) {
+/// issue #127: a deprecation-WARN storm recurred *after* every SKILL.md on
+/// disk had already been migrated — the leading theory is a caller re-
+/// parsing a stale copy (a divergent path resolution, or otherwise). This
+/// WARN now carries the exact `path` parsed and that file's on-disk mtime
+/// (best-effort — a stat failure just omits it, never fails the parse), so
+/// the next recurrence identifies the parsed object directly instead of
+/// requiring another round of production forensics.
+fn warn_deprecated_top_level(skill_name: &str, field: &str, path: &Path) {
+    let mtime = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
+        .ok();
     warn!(
         skill = %skill_name,
         field,
+        path = %path.display(),
+        mtime,
         "skill frontmatter: top-level `{field}` is deprecated, move it under `metadata:` \
          (issue #125) — run scripts/migrate_skill_frontmatter.py to migrate in place"
     );
@@ -187,14 +208,16 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
     let metadata = extract_yaml_block(&front_matter, "metadata");
     let metadata = metadata.as_deref();
 
-    let keywords = dual_list(&front_matter, metadata, "keywords", &name);
-    let version = dual_string(&front_matter, metadata, "version", &name);
-    let when_to_use = dual_string(&front_matter, metadata, "when_to_use", &name);
-    let argument_hint = dual_string(&front_matter, metadata, "argument_hint", &name);
-    let arguments = dual_list(&front_matter, metadata, "arguments", &name);
-    let user_invocable = dual_bool(&front_matter, metadata, "user_invocable", &name).unwrap_or(true);
-    let agent_invocable = dual_bool(&front_matter, metadata, "agent_invocable", &name).unwrap_or(true);
-    let status = dual_string(&front_matter, metadata, "status", &name);
+    let keywords = dual_list(&front_matter, metadata, "keywords", &name, path);
+    let version = dual_string(&front_matter, metadata, "version", &name, path);
+    let when_to_use = dual_string(&front_matter, metadata, "when_to_use", &name, path);
+    let argument_hint = dual_string(&front_matter, metadata, "argument_hint", &name, path);
+    let arguments = dual_list(&front_matter, metadata, "arguments", &name, path);
+    let user_invocable =
+        dual_bool(&front_matter, metadata, "user_invocable", &name, path).unwrap_or(true);
+    let agent_invocable =
+        dual_bool(&front_matter, metadata, "agent_invocable", &name, path).unwrap_or(true);
+    let status = dual_string(&front_matter, metadata, "status", &name, path);
 
     Ok(SkillDefinition {
         name,
