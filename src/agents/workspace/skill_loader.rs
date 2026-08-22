@@ -5,7 +5,8 @@
 //! ---
 //! name: weather
 //! description: "Get current weather conditions and forecasts."
-//! keywords: [weather, forecast, temperature, rain]
+//! metadata:
+//!   keywords: [weather, forecast, temperature, rain]
 //! ---
 //!
 //! # Weather Skill
@@ -24,14 +25,132 @@
 //! `skill_view`, not injected on every turn). `injected_summary()` applies
 //! a hard length cap regardless of author input, so a runaway description
 //! has a bounded worst case.
+//!
+//! Only `name`/`description`/`metadata` are standard top-level frontmatter
+//! keys. Everything else this loader reads (`keywords`, `version`,
+//! `when_to_use`, `argument_hint`, `arguments`, `user_invocable`,
+//! `agent_invocable`, `status`) belongs under `metadata:` (issue #125 —
+//! #123 established the "no local top-level fields" principle for
+//! `summary`; this converges the remaining 7 pre-existing non-standard
+//! top-level fields the same way, plus fixes the one field among them that
+//! was a real *behavioral* divergence, not just a portability smell: a
+//! standard-compliant reader has no idea `status: draft` means "don't
+//! inject this", so a shared draft skill silently behaved differently per
+//! agent implementation). For a transitional period the loader still reads
+//! these fields at the top level too (with a deprecation WARN identifying
+//! the skill and field) so existing unmigrated SKILL.md files keep
+//! working; `scripts/migrate_skill_frontmatter.py` moves them into
+//! `metadata` in place.
+//!
+//! `name` is also validated against the standard's constraints (1-64
+//! chars, lowercase letters/digits/hyphens, no leading/trailing/double
+//! hyphen, and must equal the parent directory name) — violations are
+//! logged, not rejected (the loader stays permissive), except a
+//! name/directory mismatch, where the directory name wins as the
+//! authoritative value (matching how every other loader function already
+//! keys skills by directory).
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::str_utils::{
-    extract_yaml_bool, extract_yaml_list, extract_yaml_string, parse_front_matter,
+    extract_yaml_block, extract_yaml_bool, extract_yaml_list, extract_yaml_string,
+    parse_front_matter,
 };
+
+/// Read a string field, preferring the top-level occurrence (with a
+/// deprecation WARN) over the `metadata:` block — issue #125's transitional
+/// dual-read.
+fn dual_string(
+    front_matter: &str,
+    metadata: Option<&str>,
+    key: &str,
+    skill_name: &str,
+) -> Option<String> {
+    if let Some(v) = extract_yaml_string(front_matter, key) {
+        warn_deprecated_top_level(skill_name, key);
+        return Some(v);
+    }
+    metadata.and_then(|m| extract_yaml_string(m, key))
+}
+
+/// List-field counterpart of [`dual_string`].
+fn dual_list(front_matter: &str, metadata: Option<&str>, key: &str, skill_name: &str) -> Vec<String> {
+    let v = extract_yaml_list(front_matter, key);
+    if !v.is_empty() {
+        warn_deprecated_top_level(skill_name, key);
+        return v;
+    }
+    metadata.map(|m| extract_yaml_list(m, key)).unwrap_or_default()
+}
+
+/// Bool-field counterpart of [`dual_string`].
+fn dual_bool(
+    front_matter: &str,
+    metadata: Option<&str>,
+    key: &str,
+    skill_name: &str,
+) -> Option<bool> {
+    if let Some(v) = extract_yaml_bool(front_matter, key) {
+        warn_deprecated_top_level(skill_name, key);
+        return Some(v);
+    }
+    metadata.and_then(|m| extract_yaml_bool(m, key))
+}
+
+fn warn_deprecated_top_level(skill_name: &str, field: &str) {
+    warn!(
+        skill = %skill_name,
+        field,
+        "skill frontmatter: top-level `{field}` is deprecated, move it under `metadata:` \
+         (issue #125) — run scripts/migrate_skill_frontmatter.py to migrate in place"
+    );
+}
+
+/// Validate `name` against the Agent Skills spec's constraints and resolve
+/// it against the skill's parent directory name. Non-fatal: violations are
+/// logged, and only the directory-mismatch case (constraint 4) overrides
+/// the returned name — the other three are just WARNed against whatever
+/// name was parsed.
+fn validate_and_resolve_name(front_matter_name: Option<String>, path: &Path) -> String {
+    let dir_name = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let name = front_matter_name.unwrap_or_else(|| dir_name.clone());
+
+    let valid_chars = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !valid_chars {
+        warn!(
+            name = %name,
+            path = %path.display(),
+            "skill name violates Agent Skills spec: must be 1-64 chars, lowercase letters/digits/hyphens only"
+        );
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        warn!(name = %name, path = %path.display(), "skill name violates Agent Skills spec: must not start or end with a hyphen");
+    }
+    if name.contains("--") {
+        warn!(name = %name, path = %path.display(), "skill name violates Agent Skills spec: must not contain consecutive hyphens");
+    }
+    if name != dir_name {
+        warn!(
+            name = %name,
+            dir_name = %dir_name,
+            path = %path.display(),
+            "skill name does not match its parent directory name (Agent Skills spec requires them to match); using directory name as authoritative"
+        );
+        return dir_name;
+    }
+    name
+}
 
 /// 从 SKILL.md 解析的 Skill 定义
 #[derive(Debug, Clone)]
@@ -58,25 +177,24 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
     // 分离 YAML front matter 和 Markdown body
     let (front_matter, body) = parse_front_matter(&content);
 
-    // 解析 YAML front matter
-    let name = extract_yaml_string(&front_matter, "name").unwrap_or_else(|| {
-        // fallback: 用目录名
-        path.parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    });
+    // 解析 YAML front matter — name/description 是标准字段，metadata 是唯一
+    // 允许的扩展命名空间（issue #123/#125）。
+    let raw_name = extract_yaml_string(&front_matter, "name");
+    let name = validate_and_resolve_name(raw_name, path);
 
     let description = extract_yaml_string(&front_matter, "description").unwrap_or_default();
 
-    let keywords = extract_yaml_list(&front_matter, "keywords");
-    let version = extract_yaml_string(&front_matter, "version");
-    let when_to_use = extract_yaml_string(&front_matter, "when_to_use");
-    let argument_hint = extract_yaml_string(&front_matter, "argument_hint");
-    let arguments = extract_yaml_list(&front_matter, "arguments");
-    let user_invocable = extract_yaml_bool(&front_matter, "user_invocable").unwrap_or(true);
-    let agent_invocable = extract_yaml_bool(&front_matter, "agent_invocable").unwrap_or(true);
-    let status = extract_yaml_string(&front_matter, "status");
+    let metadata = extract_yaml_block(&front_matter, "metadata");
+    let metadata = metadata.as_deref();
+
+    let keywords = dual_list(&front_matter, metadata, "keywords", &name);
+    let version = dual_string(&front_matter, metadata, "version", &name);
+    let when_to_use = dual_string(&front_matter, metadata, "when_to_use", &name);
+    let argument_hint = dual_string(&front_matter, metadata, "argument_hint", &name);
+    let arguments = dual_list(&front_matter, metadata, "arguments", &name);
+    let user_invocable = dual_bool(&front_matter, metadata, "user_invocable", &name).unwrap_or(true);
+    let agent_invocable = dual_bool(&front_matter, metadata, "agent_invocable", &name).unwrap_or(true);
+    let status = dual_string(&front_matter, metadata, "status", &name);
 
     Ok(SkillDefinition {
         name,
@@ -281,6 +399,184 @@ Search flights."#;
         assert_eq!(skill.arguments, vec!["from_city", "to_city"]);
         assert!(skill.user_invocable);
         assert!(!skill.agent_invocable);
+    }
+
+    /// issue #125: the same 7 non-standard fields, read from under
+    /// `metadata:` instead of the top level — the spec-compliant form.
+    #[test]
+    fn test_parse_skill_file_reads_fields_from_metadata_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("flight");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let content = r#"---
+name: flight
+description: "Search for flights"
+metadata:
+  version: "1.2.0"
+  when_to_use: "用户查机票时"
+  argument_hint: "[出发城市] [到达城市]"
+  arguments: [from_city, to_city]
+  user_invocable: true
+  agent_invocable: false
+  keywords: [flights, 机票]
+---
+
+# Flight Skill
+
+Search flights."#;
+
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let skill = parse_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(skill.name, "flight");
+        assert_eq!(skill.version, Some("1.2.0".to_string()));
+        assert_eq!(skill.when_to_use, Some("用户查机票时".to_string()));
+        assert_eq!(
+            skill.argument_hint,
+            Some("[出发城市] [到达城市]".to_string())
+        );
+        assert_eq!(skill.arguments, vec!["from_city", "to_city"]);
+        assert_eq!(skill.keywords, vec!["flights", "机票"]);
+        assert!(skill.user_invocable);
+        assert!(!skill.agent_invocable);
+    }
+
+    /// issue #125: a top-level occurrence of a migratable field still wins
+    /// over a `metadata:` value for the same key — the deprecation path
+    /// reads correctly during the transitional dual-read period, it
+    /// doesn't just silently prefer metadata and orphan the top-level
+    /// value.
+    #[test]
+    fn test_parse_skill_file_top_level_wins_over_metadata_during_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("dual");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let content = r#"---
+name: dual
+description: "x"
+version: "top-level"
+metadata:
+  version: "under-metadata"
+---
+body"#;
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let skill = parse_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(skill.version, Some("top-level".to_string()));
+    }
+
+    /// issue #125: `status: draft` under `metadata:` must still be
+    /// filtered out of normal loading — the whole point of the migration
+    /// is that this field's behavior doesn't change, only its location.
+    #[test]
+    fn test_draft_status_under_metadata_is_still_filtered() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("draft-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: draft-skill\ndescription: \"x\"\nmetadata:\n  status: draft\n---\nbody",
+        )
+        .unwrap();
+
+        let drafts = list_draft_skill_names(&skills_dir);
+        assert_eq!(drafts, vec!["draft-skill".to_string()]);
+        assert!(load_skills_from_dir(&skills_dir).is_empty());
+    }
+
+    /// issue #125: `name` matching its parent directory is the common
+    /// case and must be a complete no-op — no override, no warning path
+    /// taken that would matter for behavior.
+    #[test]
+    fn test_name_validation_matching_directory_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("weather");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: weather\ndescription: \"x\"\n---\nbody",
+        )
+        .unwrap();
+
+        let skill = parse_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(skill.name, "weather");
+    }
+
+    /// issue #125: a `name` that doesn't match its parent directory is
+    /// resolved to the directory name — the loader's own view (every other
+    /// function here already keys/dedupes skills by directory) becomes the
+    /// authoritative one instead of silently trusting a stale/typo'd
+    /// frontmatter value.
+    #[test]
+    fn test_name_validation_overrides_mismatched_name_with_directory_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("ctrip-flights");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: ctrip-flight\ndescription: \"x\"\n---\nbody",
+        )
+        .unwrap();
+
+        let skill = parse_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(skill.name, "ctrip-flights");
+    }
+
+    /// issue #125: charset/length, leading/trailing-hyphen, and
+    /// double-hyphen violations are all non-fatal (parsing still
+    /// succeeds and the name is returned as-is) — only the
+    /// directory-mismatch case above actually changes the returned value.
+    #[test]
+    fn test_name_validation_other_violations_are_non_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        for (folder, bad_name) in [
+            ("Has-Upper", "Has-Upper"),
+            ("-leading", "-leading"),
+            ("trailing-", "trailing-"),
+            ("double--hyphen", "double--hyphen"),
+        ] {
+            let skill_dir = dir.path().join(folder);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {bad_name}\ndescription: \"x\"\n---\nbody"),
+            )
+            .unwrap();
+
+            let skill = parse_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+            // Name matches its own (equally non-compliant) directory, so
+            // parsing succeeds and returns the name unchanged — the
+            // violations are logged, not corrected.
+            assert_eq!(skill.name, bad_name);
+        }
+    }
+
+    /// issue #125: round-trip sanity check against the exact output
+    /// `scripts/migrate_skill_frontmatter.py` produces for a file that had
+    /// a pre-existing `metadata:` block, a multi-line list, and several
+    /// scalar fields needing quoting — nested 4 spaces deep (2 for the
+    /// block + 2 for the list items under `arguments:`).
+    #[test]
+    fn test_parse_skill_file_reads_migration_script_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("flight");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let content = "---\nname: flight\ndescription: \"Search for flights\"\nmetadata:\n  \
+            extra_note: \"already here\"\n  version: \"1.2.0\"\n  when_to_use: \"用户查机票时\"\n  \
+            arguments:\n    - from_city\n    - to_city\n  status: \"draft\"\n---\n\n\
+            # Flight Skill\n\nSearch flights.\n";
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let skill = parse_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(skill.name, "flight");
+        assert_eq!(skill.version, Some("1.2.0".to_string()));
+        assert_eq!(skill.when_to_use, Some("用户查机票时".to_string()));
+        assert_eq!(skill.arguments, vec!["from_city", "to_city"]);
+        assert_eq!(skill.status, Some("draft".to_string()));
     }
 
     /// issue #123: a stray `summary:` key (e.g. a not-yet-migrated

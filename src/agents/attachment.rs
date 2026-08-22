@@ -539,6 +539,13 @@ impl AttachmentManager {
             for name in &delta.added {
                 let skill = skills.get(name);
                 let summary = skill.map(|s| s.injected_summary()).unwrap_or_default();
+                // issue #125: fold internal newlines to spaces so a
+                // multi-line `description` renders as one Markdown bullet
+                // instead of its later lines falling outside the `- ` item
+                // (injected_summary() itself keeps preserving the full,
+                // unfolded text for any other future consumer — this is a
+                // render-layer concern, not a content one).
+                let summary: String = summary.split_whitespace().collect::<Vec<_>>().join(" ");
 
                 let mut parts = vec![format!("- **{}**", name)];
                 if !summary.is_empty() {
@@ -704,6 +711,36 @@ mod tests {
         let text = msg.text_content();
 
         assert!(text.contains("Diagnose cron issues."));
+    }
+
+    /// issue #125: a multi-line `description` must render as a single
+    /// Markdown bullet — internal newlines fold to spaces here (the render
+    /// layer), while `injected_summary()` itself keeps preserving the full
+    /// unfolded text (see skills.rs's own regression test for that).
+    #[test]
+    fn skill_listing_folds_multiline_description_into_one_bullet_line() {
+        let mut mgr = SkillManager::new();
+        mgr.register(Skill {
+            name: "flight".to_string(),
+            description: "What it does.\nWhen to use it.".to_string(),
+            keywords: vec![],
+            prompt_body: String::new(),
+            version: None,
+            when_to_use: None,
+            argument_hint: None,
+            arguments: vec![],
+            user_invocable: true,
+            agent_invocable: true,
+            skill_dir: None,
+        });
+
+        let mut am = AttachmentManager::new();
+        am.diff_skills(&mgr, &empty_history());
+        let msg = am.build_message(&mgr).unwrap();
+        let text = msg.text_content();
+
+        assert!(text.contains("- **flight**: What it does. When to use it."));
+        assert!(!text.contains("What it does.\nWhen"));
     }
 
     #[test]

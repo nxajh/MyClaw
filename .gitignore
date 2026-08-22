@@ -16,3 +16,7 @@ myclaw
 # Claude Code agent worktrees (transient, never track)
 .claude/worktrees/
 *.log
+
+# Python bytecode cache (scripts/ tests)
+__pycache__/
+*.pyc

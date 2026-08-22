@@ -183,6 +183,58 @@ pub fn extract_yaml_bool(yaml: &str, key: &str) -> Option<bool> {
     })
 }
 
+/// Extract a nested YAML mapping block by key (e.g. `metadata:` at the
+/// top level, followed by indented `key: value` lines) and return it
+/// dedented — ready to be re-parsed with `extract_yaml_string` /
+/// `extract_yaml_list` / `extract_yaml_bool` as if it were its own
+/// top-level document.
+///
+/// Only matches an unindented occurrence of `key:` with nothing after the
+/// colon on the same line (a block opener, not an inline scalar/list).
+/// Returns `None` if the key is absent, has an inline value, or the block
+/// is empty.
+pub fn extract_yaml_block(yaml: &str, key: &str) -> Option<String> {
+    let mut lines = yaml.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.starts_with(char::is_whitespace) {
+            continue; // not a top-level key
+        }
+        let Some(rest) = line.trim_end().strip_prefix(&format!("{}:", key)) else {
+            continue;
+        };
+        if !rest.trim().is_empty() {
+            return None; // inline scalar/list, not a block
+        }
+
+        let mut block_lines = Vec::new();
+        let mut indent: Option<usize> = None;
+        while let Some(&next_line) = lines.peek() {
+            if next_line.trim().is_empty() {
+                block_lines.push(String::new());
+                lines.next();
+                continue;
+            }
+            let this_indent = next_line.len() - next_line.trim_start().len();
+            if this_indent == 0 {
+                break; // dedented back to top level — block ended
+            }
+            let indent = *indent.get_or_insert(this_indent);
+            if this_indent < indent {
+                break;
+            }
+            block_lines.push(next_line[indent..].to_string());
+            lines.next();
+        }
+
+        return if block_lines.iter().all(|l| l.trim().is_empty()) {
+            None
+        } else {
+            Some(block_lines.join("\n"))
+        };
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +281,51 @@ mod tests {
         let yaml = "tools:\n  - shell\n  - file_read\n  - file_write";
         let items = extract_yaml_list(yaml, "tools");
         assert_eq!(items, vec!["shell", "file_read", "file_write"]);
+    }
+
+    #[test]
+    fn test_extract_yaml_block_basic() {
+        let yaml = "name: flight\nmetadata:\n  version: \"1.0.0\"\n  keywords: [a, b]\ndescription: x";
+        let block = extract_yaml_block(yaml, "metadata").unwrap();
+        assert_eq!(extract_yaml_string(&block, "version"), Some("1.0.0".to_string()));
+        assert_eq!(extract_yaml_list(&block, "keywords"), vec!["a", "b"]);
+        // The block does not leak sibling top-level keys.
+        assert_eq!(extract_yaml_string(&block, "description"), None);
+    }
+
+    #[test]
+    fn test_extract_yaml_block_missing_key_returns_none() {
+        let yaml = "name: flight\ndescription: x";
+        assert_eq!(extract_yaml_block(yaml, "metadata"), None);
+    }
+
+    #[test]
+    fn test_extract_yaml_block_inline_value_is_not_a_block() {
+        // `metadata: {}` or any inline value on the same line is not a
+        // nested block this parser supports — must return None, not panic
+        // or misparse.
+        let yaml = "metadata: {}\nname: x";
+        assert_eq!(extract_yaml_block(yaml, "metadata"), None);
+    }
+
+    #[test]
+    fn test_extract_yaml_block_empty_block_returns_none() {
+        let yaml = "metadata:\nname: x";
+        assert_eq!(extract_yaml_block(yaml, "metadata"), None);
+    }
+
+    #[test]
+    fn test_extract_yaml_block_preserves_nested_multiline_list_indentation() {
+        // A nested multi-line list under the block key must dedent by only
+        // the block's own indent, keeping the list's relative indentation
+        // intact for extract_yaml_list's multi-line parsing.
+        let yaml = "metadata:\n  arguments:\n    - from_city\n    - to_city\n  version: \"1.0\"";
+        let block = extract_yaml_block(yaml, "metadata").unwrap();
+        assert_eq!(
+            extract_yaml_list(&block, "arguments"),
+            vec!["from_city", "to_city"]
+        );
+        assert_eq!(extract_yaml_string(&block, "version"), Some("1.0".to_string()));
     }
 
     #[test]
