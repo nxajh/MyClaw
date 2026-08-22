@@ -418,6 +418,19 @@ impl TelegramChannel {
     /// Ensure a blank line before GFM table blocks so Telegram's markdown
     /// parser recognises them. Without a preceding blank line (or message
     /// start), the parser treats `| col | col |` as literal text.
+    /// Escape a leading `#{1,6}` run when immediately followed by a digit
+    /// (issue #114). CommonMark requires whitespace (or end of line) after
+    /// the `#` run for a valid ATX heading, but Telegram's rich-message
+    /// renderer parses more loosely and treats e.g. `#108` (no space) as a
+    /// heading — a false positive on issue/PR references and other
+    /// hash-prefixed numbers at the start of a line. A genuine heading is
+    /// always `#` + space, so this narrow match never touches real
+    /// headings (`# Title`, `## Notes`, ...).
+    fn escape_digit_heading_lookalikes(text: &str) -> String {
+        let re = regex::Regex::new(r"(?m)^(#{1,6})(\d)").unwrap();
+        re.replace_all(text, r"\$1$2").to_string()
+    }
+
     fn normalize_markdown_tables(text: &str) -> String {
         let lines: Vec<&str> = text.lines().collect();
         let mut result: Vec<String> = Vec::with_capacity(lines.len() + 4);
@@ -483,7 +496,7 @@ impl TelegramChannel {
     ) -> anyhow::Result<Option<i64>> {
         let client = self.http_client();
 
-        let normalized = Self::normalize_markdown_tables(text);
+        let normalized = Self::escape_digit_heading_lookalikes(&Self::normalize_markdown_tables(text));
         let mut rich_body = serde_json::json!({
             "chat_id": chat_id,
             "rich_message": {
@@ -632,7 +645,7 @@ impl TelegramChannel {
     ) -> anyhow::Result<bool> {
         let client = self.http_client();
 
-        let normalized = Self::normalize_markdown_tables(text);
+        let normalized = Self::escape_digit_heading_lookalikes(&Self::normalize_markdown_tables(text));
         let body = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id,
@@ -736,11 +749,17 @@ impl TelegramChannel {
         markdown: &str,
     ) -> anyhow::Result<bool> {
         let client = self.http_client();
+        // issue #114: this feeds the same rich_message.markdown server-side
+        // renderer as send_rich_message/edit_message_text_raw (which already
+        // normalize) — the streaming preview (this fn's only caller) can
+        // just as easily contain a leading "#108"-shaped line.
+        let normalized =
+            Self::escape_digit_heading_lookalikes(&Self::normalize_markdown_tables(markdown));
         let body = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id,
             "rich_message": {
-                "markdown": markdown,
+                "markdown": normalized,
             },
         });
         let resp = client
@@ -3515,5 +3534,56 @@ mod tests {
             out4.contains("Text2\n\n| B |"),
             "second table missing blank"
         );
+    }
+
+    /// issue #114: Telegram's rich-message renderer parses `#108` (no
+    /// space) at line start as an ATX heading, even though CommonMark
+    /// requires whitespace after the `#` run for that. This is the
+    /// exact repro from the issue.
+    #[test]
+    fn test_escape_digit_heading_lookalikes_issue_reference() {
+        let input = "#108 已立案";
+        let out = TelegramChannel::escape_digit_heading_lookalikes(input);
+        assert_eq!(out, "\\#108 已立案");
+    }
+
+    #[test]
+    fn test_escape_digit_heading_lookalikes_leaves_real_headings_alone() {
+        assert_eq!(
+            TelegramChannel::escape_digit_heading_lookalikes("## 备注"),
+            "## 备注"
+        );
+        assert_eq!(
+            TelegramChannel::escape_digit_heading_lookalikes("# 标准标题"),
+            "# 标准标题"
+        );
+    }
+
+    #[test]
+    fn test_escape_digit_heading_lookalikes_multiple_hashes() {
+        // Rare but per the issue: a run up to 6 '#'s immediately followed
+        // by a digit is escaped too, not just a single '#'.
+        assert_eq!(
+            TelegramChannel::escape_digit_heading_lookalikes("#####108"),
+            "\\#####108"
+        );
+    }
+
+    #[test]
+    fn test_escape_digit_heading_lookalikes_only_at_line_start() {
+        // A '#' mid-line (not at column 0) is not heading syntax at all —
+        // must be left untouched.
+        let input = "see #108 for details";
+        assert_eq!(
+            TelegramChannel::escape_digit_heading_lookalikes(input),
+            input
+        );
+    }
+
+    #[test]
+    fn test_escape_digit_heading_lookalikes_multiline() {
+        let input = "line1\n#108 fixed\nline3\n#2026 date-ish";
+        let out = TelegramChannel::escape_digit_heading_lookalikes(input);
+        assert_eq!(out, "line1\n\\#108 fixed\nline3\n\\#2026 date-ish");
     }
 }

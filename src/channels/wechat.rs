@@ -2078,12 +2078,19 @@ fn filter_markdown(text: &str) -> String {
             }
             filtered = escaped;
         }
-        // Convert H5/H6 to bold
+        // Convert H5/H6 to bold. CommonMark requires whitespace (or EOL)
+        // after the '#' run for it to be a heading at all — issue #114:
+        // without that check, "#####108" (a literal hash-prefixed number,
+        // not a heading) had its hashes silently swallowed into "**108**".
         let trimmed = filtered.trim_start();
         let leading_hashes = filtered.len() - trimmed.len();
         if trimmed.starts_with("#####") {
-            let content = trimmed.trim_start_matches('#').trim();
-            filtered = format!("{}**{}**", &filtered[..leading_hashes], content);
+            let after_hashes = trimmed.trim_start_matches('#');
+            let is_heading = after_hashes.is_empty() || after_hashes.starts_with(char::is_whitespace);
+            if is_heading {
+                let content = after_hashes.trim();
+                filtered = format!("{}**{}**", &filtered[..leading_hashes], content);
+            }
         }
         result.push_str(&filtered);
         result.push('\n');
@@ -2100,6 +2107,21 @@ mod tests {
     #[test]
     fn test_client_version_encoding() {
         assert_eq!(build_client_version(), 132102); // 2.4.6
+    }
+
+    /// issue #114 (顺带修): a real H5 heading ("##### Title") still
+    /// collapses to bold.
+    #[test]
+    fn test_filter_markdown_h5_heading_still_converts() {
+        assert_eq!(filter_markdown("##### Title"), "**Title**");
+    }
+
+    /// issue #114 (顺带修): "#####108" is a literal hash-prefixed number,
+    /// not a heading (no whitespace after the '#' run) — the hashes must
+    /// not be silently swallowed into "**108**".
+    #[test]
+    fn test_filter_markdown_hash_digit_not_treated_as_heading() {
+        assert_eq!(filter_markdown("#####108"), "#####108");
     }
 
     #[test]
