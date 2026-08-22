@@ -697,7 +697,7 @@ impl Tool for FileEditTool {
 
         let replaced_count = if replace_all { count } else { 1 };
         let line_number = find_line_number(&content, old_string);
-        let diff = replacement_context_diff(&content, old_string, new_string, line_number);
+        let diff = replacement_context_diff(&content, old_string, new_string);
         Ok(ToolResult {
             success: true,
             output: format!(
@@ -719,63 +719,183 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Find the 1-based line number where `needle` first occurs in `haystack`.
 fn find_line_number(haystack: &str, needle: &str) -> usize {
-    if let Some(pos) = haystack.find(needle) {
-        haystack[..pos].lines().count() + 1
-    } else {
-        0
+    match haystack.find(needle) {
+        Some(pos) => haystack[..pos].matches('\n').count() + 1,
+        None => 0,
     }
 }
 
-fn replacement_context_diff(
-    content: &str,
-    old_string: &str,
-    new_string: &str,
-    line_number: usize,
-) -> String {
-    let old_lines: Vec<&str> = old_string.lines().collect();
-    let new_lines: Vec<&str> = new_string.lines().collect();
-    let all_lines: Vec<&str> = content.lines().collect();
+/// Build a unified-diff-style context around the first `old_string` ->
+/// `new_string` replacement in `content`.
+///
+/// `old_string` need not be a whole line (issue #108): it may be a mid-line
+/// substring, or span multiple lines. Rather than diffing `old_string` and
+/// `new_string` as standalone lines — which misrenders when the match
+/// doesn't start at a line boundary — this locates the byte range of the
+/// match, widens it out to the full line(s) it falls within, and diffs
+/// those full lines (old vs. reconstructed-with-replacement) so the shown
+/// line numbers and context match what's actually on disk.
+fn replacement_context_diff(content: &str, old_string: &str, new_string: &str) -> String {
+    let Some(pos) = content.find(old_string) else {
+        return String::new();
+    };
+    let end = pos + old_string.len();
 
-    let old_len = old_lines.len().max(1);
-    let start = line_number.saturating_sub(1);
-    let context_before_start = start.saturating_sub(3);
-    let after_start = (start + old_len).min(all_lines.len());
-    let after_end = (after_start + 3).min(all_lines.len());
+    let line_start = content[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_end = content[end..]
+        .find('\n')
+        .map(|i| end + i)
+        .unwrap_or(content.len());
+    let start_line_number = content[..line_start].matches('\n').count() + 1;
+
+    let old_full = &content[line_start..line_end];
+    let new_full = format!(
+        "{}{}{}",
+        &content[line_start..pos],
+        new_string,
+        &content[end..line_end]
+    );
+
+    let all_lines: Vec<&str> = content.lines().collect();
+    let start_idx = start_line_number - 1;
+    let end_idx = (start_idx + old_full.split('\n').count()).min(all_lines.len());
+    let context_before_start = start_idx.saturating_sub(3);
+    let context_after_end = (end_idx + 3).min(all_lines.len());
 
     let mut out = String::new();
     out.push_str("--- before\n+++ after\n");
-    out.push_str(&format!("@@ line {} @@\n", line_number));
+    out.push_str(&format!("@@ line {} @@\n", start_line_number));
 
-    for line in &all_lines[context_before_start..start] {
+    for line in &all_lines[context_before_start..start_idx] {
         out.push(' ');
         out.push_str(&str_utils::truncate_line(line, 200));
         out.push('\n');
     }
-    if old_lines.is_empty() {
-        out.push_str("-\n");
-    } else {
-        for line in old_lines {
-            out.push('-');
-            out.push_str(&str_utils::truncate_line(line, 200));
-            out.push('\n');
-        }
+    for line in old_full.split('\n') {
+        out.push('-');
+        out.push_str(&str_utils::truncate_line(line, 200));
+        out.push('\n');
     }
-    if new_lines.is_empty() {
-        out.push_str("+\n");
-    } else {
-        for line in new_lines {
-            out.push('+');
-            out.push_str(&str_utils::truncate_line(line, 200));
-            out.push('\n');
-        }
+    for line in new_full.split('\n') {
+        out.push('+');
+        out.push_str(&str_utils::truncate_line(line, 200));
+        out.push('\n');
     }
-    for line in &all_lines[after_start..after_end] {
+    for line in &all_lines[end_idx..context_after_end] {
         out.push(' ');
         out.push_str(&str_utils::truncate_line(line, 200));
         out.push('\n');
     }
 
     out
+}
+
+#[cfg(test)]
+mod file_edit_diff_tests {
+    use super::*;
+
+    /// issue #108: old_string that is a mid-line substring (not the whole
+    /// line) must resolve to the line it's actually on, and the diff must
+    /// show the full old/new line — not a fabricated bare-substring line.
+    #[test]
+    fn find_line_number_handles_mid_line_substring() {
+        let content = "TOOLTEST-LINE-1: The quick brown fox jumps over the lazy dog.\n\
+                        TOOLTEST-LINE-2: some other text\n\
+                        TOOLTEST-LINE-3: marker=alpha-7742 (for file_edit replacement)\n\
+                        TOOLTEST-LINE-4: end of file sentinel EOF-9931\n";
+        let needle = "marker=alpha-7742 (for file_edit replacement)";
+        assert_eq!(find_line_number(content, needle), 3);
+    }
+
+    #[test]
+    fn find_line_number_handles_line_start_match() {
+        let content = "line1\nline2\nline3\n";
+        assert_eq!(find_line_number(content, "line1"), 1);
+        assert_eq!(find_line_number(content, "line2"), 2);
+        assert_eq!(find_line_number(content, "line3"), 3);
+    }
+
+    #[test]
+    fn diff_reconstructs_full_line_for_mid_line_substring() {
+        let content = "TOOLTEST-LINE-1: The quick brown fox jumps over the lazy dog.\n\
+                        TOOLTEST-LINE-2: some other text\n\
+                        TOOLTEST-LINE-3: marker=alpha-7742 (for file_edit replacement)\n\
+                        TOOLTEST-LINE-4: end of file sentinel EOF-9931\n";
+        let old = "marker=alpha-7742 (for file_edit replacement)";
+        let new = "marker=beta-9913 (file_edit verified)";
+        let diff = replacement_context_diff(content, old, new);
+
+        assert!(diff.contains("@@ line 3 @@"), "got: {diff}");
+        // The full original line 3 is the deleted line, not a bare
+        // substring fabricated as its own line.
+        assert!(
+            diff.contains("-TOOLTEST-LINE-3: marker=alpha-7742 (for file_edit replacement)"),
+            "got: {diff}"
+        );
+        assert!(
+            diff.contains("+TOOLTEST-LINE-3: marker=beta-9913 (file_edit verified)"),
+            "got: {diff}"
+        );
+        // Line 3 itself must not also appear as unchanged context.
+        assert!(
+            !diff.contains(" TOOLTEST-LINE-3:"),
+            "line 3 should not appear as unmodified context: {diff}"
+        );
+        // Surrounding lines are untouched context.
+        assert!(diff.contains(" TOOLTEST-LINE-2: some other text"), "got: {diff}");
+        assert!(
+            diff.contains(" TOOLTEST-LINE-4: end of file sentinel EOF-9931"),
+            "got: {diff}"
+        );
+    }
+
+    #[test]
+    fn diff_still_correct_for_whole_line_match() {
+        let content = "line1\nline2\nline3\n";
+        let diff = replacement_context_diff(content, "line2", "replaced2");
+        assert!(diff.contains("@@ line 2 @@"), "got: {diff}");
+        assert!(diff.contains("-line2"), "got: {diff}");
+        assert!(diff.contains("+replaced2"), "got: {diff}");
+        assert!(diff.contains(" line1"), "got: {diff}");
+        assert!(diff.contains(" line3"), "got: {diff}");
+    }
+
+    #[tokio::test]
+    async fn execute_reports_correct_line_for_mid_line_substring() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("matrix.txt");
+        std::fs::write(
+            &path,
+            "TOOLTEST-LINE-1: The quick brown fox jumps over the lazy dog.\n\
+             TOOLTEST-LINE-2: some other text\n\
+             TOOLTEST-LINE-3: marker=alpha-7742 (for file_edit replacement)\n\
+             TOOLTEST-LINE-4: end of file sentinel EOF-9931\n",
+        )
+        .unwrap();
+
+        let tool = FileEditTool::new();
+        let result = tool
+            .execute(
+                json!({
+                    "path": path.to_str().unwrap(),
+                    "old_string": "marker=alpha-7742 (for file_edit replacement)",
+                    "new_string": "marker=beta-9913 (file_edit verified)",
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "got: {:?}", result);
+        assert!(
+            result.output.contains("(first match line 3)"),
+            "got: {}",
+            result.output
+        );
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("TOOLTEST-LINE-3: marker=beta-9913 (file_edit verified)"));
+    }
 }
 
 #[cfg(test)]
