@@ -679,6 +679,52 @@ impl Tool for ShellTool {
     }
 }
 
+/// issue #129: build the "here's what's actually alive" listing appended to
+/// a `shell_poll`/`shell_kill` unknown-`process_id` error. Scoped to the
+/// calling session only (other sessions' process ids aren't this model's
+/// business), newest-first, capped so a long-running session with many
+/// tracked processes doesn't blow up the error message.
+const UNKNOWN_PROCESS_LISTING_CAP: usize = 20;
+const UNKNOWN_PROCESS_COMMAND_PREVIEW_CHARS: usize = 60;
+
+fn format_unknown_process_listing(registry: &HashMap<String, ProcEntry>, session_id: &str) -> String {
+    let mut entries: Vec<&ProcEntry> = registry
+        .values()
+        .filter(|e| e.session_id == session_id)
+        .collect();
+    if entries.is_empty() {
+        return " No tracked processes for this session — the id may be from a prior \
+                 session, or never existed."
+            .to_string();
+    }
+    entries.sort_by(|a, b| b.spawned_at_ms.cmp(&a.spawned_at_ms));
+    let total = entries.len();
+    let shown: Vec<String> = entries
+        .into_iter()
+        .take(UNKNOWN_PROCESS_LISTING_CAP)
+        .map(|e| {
+            let cut = safe_char_boundary(&e.command, UNKNOWN_PROCESS_COMMAND_PREVIEW_CHARS);
+            let preview = &e.command[..cut];
+            let ellipsis = if cut < e.command.len() { "..." } else { "" };
+            format!(
+                "  {} state={} command={:?}{}",
+                e.process_id, e.state, preview, ellipsis
+            )
+        })
+        .collect();
+    let omitted = total.saturating_sub(shown.len());
+    let omitted_note = if omitted > 0 {
+        format!("\n  ... and {omitted} more")
+    } else {
+        String::new()
+    };
+    format!(
+        " This session's tracked processes:\n{}{}",
+        shown.join("\n"),
+        omitted_note
+    )
+}
+
 // ── ShellPollTool ────────────────────────────────────────────────────────
 
 pub struct ShellPollTool {
@@ -730,7 +776,7 @@ impl Tool for ShellPollTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
         let process_id = args["process_id"]
             .as_str()
@@ -739,13 +785,20 @@ impl Tool for ShellPollTool {
         let wait_secs = args["wait_secs"].as_u64().unwrap_or(0).min(300);
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs);
-        let mut entry = match self.registry.read().await.get(process_id).cloned() {
+        let found = self.registry.read().await.get(process_id).cloned();
+        let mut entry = match found {
             Some(e) => e,
             None => {
+                // issue #129: an unknown process_id is most often a
+                // transcription error (the id is 32 hex chars with no
+                // structure to sanity-check) — list this session's live
+                // process-table entries so the model can self-correct in
+                // one turn instead of guessing again.
+                let listing = format_unknown_process_listing(&*self.registry.read().await, &session.id);
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("process_id '{}' not found", process_id)),
+                    error: Some(format!("process_id '{}' not found.{}", process_id, listing)),
                 });
             }
         };
@@ -844,7 +897,7 @@ impl Tool for ShellKillTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
         let process_id = args["process_id"]
             .as_str()
@@ -855,13 +908,18 @@ impl Tool for ShellKillTool {
             _ => libc::SIGTERM,
         };
 
-        let entry = match self.registry.read().await.get(process_id).cloned() {
+        let found = self.registry.read().await.get(process_id).cloned();
+        let entry = match found {
             Some(e) => e,
             None => {
+                // issue #129: same self-correction aid as shell_poll — a
+                // wrong process_id here is the same transcription-error
+                // shape, just aimed at killing instead of checking.
+                let listing = format_unknown_process_listing(&*self.registry.read().await, &session.id);
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("process_id '{}' not found", process_id)),
+                    error: Some(format!("process_id '{}' not found.{}", process_id, listing)),
                 });
             }
         };
@@ -1183,5 +1241,114 @@ mod tests {
             .unwrap();
         assert!(!result.success);
         assert!(result.error.unwrap().contains("not found"));
+    }
+
+    fn entry_for(process_id: &str, session_id: &str, command: &str, spawned_at_ms: i64) -> ProcEntry {
+        ProcEntry {
+            process_id: process_id.to_string(),
+            session_id: session_id.to_string(),
+            command: command.to_string(),
+            workdir: None,
+            pid: 999_999,
+            pid_start_ticks: None,
+            spawned_at_ms,
+            output_path: "/tmp/does-not-matter".to_string(),
+            state: "running".to_string(),
+            exit_code: None,
+        }
+    }
+
+    /// issue #129: an unknown process_id (usually a transcription error —
+    /// the id is 32 hex chars with no self-check) must come back with a
+    /// listing of what's actually alive, scoped to the calling session and
+    /// excluding other sessions' entries.
+    #[tokio::test]
+    async fn shell_poll_unknown_process_id_lists_this_sessions_processes_only() {
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        {
+            let mut w = registry.write().await;
+            w.insert(
+                "sh_mine1".to_string(),
+                entry_for("sh_mine1", "s1", "echo one", 1000),
+            );
+            w.insert(
+                "sh_mine2".to_string(),
+                entry_for("sh_mine2", "s1", "echo two", 2000),
+            );
+            w.insert(
+                "sh_other".to_string(),
+                entry_for("sh_other", "s2", "echo not-mine", 3000),
+            );
+        }
+        let poll_tool = ShellPollTool::new(registry, None);
+        let session = crate::agents::session::Session::new("s1".to_string());
+        let result = poll_tool
+            .execute(json!({ "process_id": "sh_typo" }), &session)
+            .await
+            .unwrap();
+        let err = result.error.unwrap();
+        assert!(err.contains("sh_mine1"));
+        assert!(err.contains("sh_mine2"));
+        assert!(err.contains("echo one"));
+        assert!(err.contains("echo two"));
+        assert!(!err.contains("sh_other"), "must not leak another session's process ids");
+        assert!(!err.contains("not-mine"));
+        // Newest-first: sh_mine2 (spawned later) appears before sh_mine1.
+        assert!(err.find("sh_mine2").unwrap() < err.find("sh_mine1").unwrap());
+    }
+
+    #[tokio::test]
+    async fn shell_poll_unknown_process_id_with_no_tracked_processes_says_so() {
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let poll_tool = ShellPollTool::new(registry, None);
+        let session = crate::agents::session::Session::new("empty-session".to_string());
+        let result = poll_tool
+            .execute(json!({ "process_id": "sh_nope" }), &session)
+            .await
+            .unwrap();
+        assert!(result.error.unwrap().contains("No tracked processes"));
+    }
+
+    #[tokio::test]
+    async fn shell_poll_unknown_process_id_listing_caps_long_lists() {
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        {
+            let mut w = registry.write().await;
+            for i in 0..(UNKNOWN_PROCESS_LISTING_CAP + 5) {
+                w.insert(
+                    format!("sh_{i}"),
+                    entry_for(&format!("sh_{i}"), "s1", "echo x", i as i64),
+                );
+            }
+        }
+        let poll_tool = ShellPollTool::new(registry, None);
+        let session = crate::agents::session::Session::new("s1".to_string());
+        let result = poll_tool
+            .execute(json!({ "process_id": "sh_typo" }), &session)
+            .await
+            .unwrap();
+        let err = result.error.unwrap();
+        assert!(err.contains("and 5 more"));
+    }
+
+    /// issue #129: shell_kill gets the same self-correction aid as
+    /// shell_poll — same wrong-id transcription failure mode.
+    #[tokio::test]
+    async fn shell_kill_unknown_process_id_lists_this_sessions_processes() {
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        registry.write().await.insert(
+            "sh_alive".to_string(),
+            entry_for("sh_alive", "s1", "sleep 100", 1000),
+        );
+        let kill_tool = ShellKillTool::new(registry);
+        let session = crate::agents::session::Session::new("s1".to_string());
+        let result = kill_tool
+            .execute(json!({ "process_id": "sh_typo" }), &session)
+            .await
+            .unwrap();
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("not found"));
+        assert!(err.contains("sh_alive"));
     }
 }
