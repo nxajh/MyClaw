@@ -45,7 +45,7 @@ impl Tool for AgentResumeTool {
                 },
                 "extra_secs": {
                     "type": "integer",
-                    "description": "Optional fresh budget in seconds. Defaults to the delegation's original timeout; clamped to the global 1800s ceiling."
+                    "description": "Optional fresh budget in seconds. Defaults to double the delegation's original timeout (minimum 600s), since resume is only reachable after that budget already ran out; clamped to the global 1800s ceiling."
                 }
             },
             "required": ["sub_session_id"]

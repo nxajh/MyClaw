@@ -1442,7 +1442,12 @@ impl DelegationCoordinator {
                 cp.status
             );
         }
-        let requested = extra_secs.unwrap_or(cp.timeout_secs);
+        // Issue #111: resume is only reachable after the original budget
+        // already ran out, so defaulting to that same budget guarantees a
+        // second timeout unless the first one was a fluke. Default to
+        // double the original (floor 600s) instead — still overridable via
+        // `extra_secs`, but no longer self-defeating on its core use case.
+        let requested = extra_secs.unwrap_or_else(|| cp.timeout_secs.saturating_mul(2).max(600));
         let budget = requested.clamp(1, SUB_AGENT_TIMEOUT_MAX_SECS);
 
         // Re-arm the parent side. Registered (active) context first; the
@@ -2057,6 +2062,40 @@ mod tests {
         );
         let err = dc.resume_timed_out(&sub.id, None).unwrap_err();
         assert!(format!("{:#}", err).contains("already running"));
+    }
+
+    #[tokio::test]
+    async fn resume_timed_out_default_budget_doubles_original_with_floor_and_ceiling() {
+        let (dc, manager, _dir) = coordinator_with_backend();
+        let backend = manager.backend();
+
+        // Issue #111 repro: a small original budget (15s) must not default to
+        // itself again — the delegation only reaches `resume` after that
+        // budget already ran out once. 15 * 2 = 30, below the 600s floor.
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let sub = manager.create_sub_session(&parent.session_id, "coder").unwrap();
+        backend
+            .save_delegation_checkpoint(&checkpoint_for(&sub.id, &parent.session_id, "timed_out", 15))
+            .unwrap();
+        dc.resume_timed_out(&sub.id, None).unwrap();
+        assert_eq!(backend.load_delegation_checkpoint(&sub.id).unwrap().timeout_secs, 600);
+
+        // Original budget large enough that doubling it clears the floor:
+        // 500 * 2 = 1000.
+        let sub2 = manager.create_sub_session(&parent.session_id, "coder").unwrap();
+        backend
+            .save_delegation_checkpoint(&checkpoint_for(&sub2.id, &parent.session_id, "timed_out", 500))
+            .unwrap();
+        dc.resume_timed_out(&sub2.id, None).unwrap();
+        assert_eq!(backend.load_delegation_checkpoint(&sub2.id).unwrap().timeout_secs, 1000);
+
+        // Doubling past the global ceiling still clamps to 1800.
+        let sub3 = manager.create_sub_session(&parent.session_id, "coder").unwrap();
+        backend
+            .save_delegation_checkpoint(&checkpoint_for(&sub3.id, &parent.session_id, "timed_out", 1000))
+            .unwrap();
+        dc.resume_timed_out(&sub3.id, None).unwrap();
+        assert_eq!(backend.load_delegation_checkpoint(&sub3.id).unwrap().timeout_secs, 1800);
     }
 
     #[test]
