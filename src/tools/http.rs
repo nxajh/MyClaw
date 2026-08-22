@@ -30,6 +30,16 @@ impl Default for HttpRequestTool {
     }
 }
 
+/// Block-level tags whose boundaries must become whitespace before the
+/// generic tag-strip runs — otherwise adjacent block text nodes fuse
+/// together word-to-word (issue #110: `<h1>Example Domain</h1><p>Example
+/// Domain...` stripped to `Example DomainExample Domain...`, a word
+/// boundary that doesn't exist in the source). Mainstream extractors
+/// (readability, `lynx -dump`, html2text) all preserve whitespace here.
+const BLOCK_TAGS: &str = "p|div|h1|h2|h3|h4|h5|h6|li|ul|ol|tr|td|th|table|thead|tbody|tfoot|\
+    blockquote|section|article|header|footer|nav|pre|form|fieldset|figure|figcaption|\
+    dl|dt|dd|address|main|aside";
+
 /// Naive HTML tag stripper — removes tags and decodes basic entities.
 fn strip_html(html: &str) -> String {
     // Remove <script> and <style> blocks entirely.
@@ -38,7 +48,15 @@ fn strip_html(html: &str) -> String {
     let text = re_script.replace_all(html, "");
     let text = re_style.replace_all(&text, "");
 
-    // Remove HTML tags.
+    // Turn block-element boundaries and <br> into newlines before the
+    // generic strip below removes the tags themselves.
+    let re_block =
+        regex::Regex::new(&format!(r"(?i)</?(?:{BLOCK_TAGS})(?:\s[^>]*)?>")).unwrap();
+    let text = re_block.replace_all(&text, "\n");
+    let re_br = regex::Regex::new(r"(?i)<br\s*/?>").unwrap();
+    let text = re_br.replace_all(&text, "\n");
+
+    // Remove remaining (inline) HTML tags.
     let re_tag = regex::Regex::new(r"<[^>]+>").unwrap();
     let text = re_tag.replace_all(&text, "");
 
@@ -200,5 +218,68 @@ impl Tool for HttpRequestTool {
                 Some(format!("HTTP {}", status))
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod strip_html_tests {
+    use super::*;
+
+    /// issue #110: adjacent block-level elements must not fuse into one
+    /// word — this is the example.com-shaped repro from the issue.
+    #[test]
+    fn block_elements_are_separated_by_whitespace() {
+        let html = "<html><body><h1>Example Domain</h1><p>Example Domain \
+                     is for illustrative examples.</p></body></html>";
+        let text = strip_html(html);
+        assert!(!text.contains("DomainExample"), "got: {text:?}");
+        assert!(text.contains("Example Domain"));
+        assert!(text.contains("is for illustrative examples."));
+    }
+
+    #[test]
+    fn div_elements_are_separated() {
+        let html = "<div>first</div><div>second</div>";
+        let text = strip_html(html);
+        assert!(!text.contains("firstsecond"), "got: {text:?}");
+    }
+
+    #[test]
+    fn table_cells_are_separated() {
+        let html = "<table><tr><td>a</td><td>b</td></tr></table>";
+        let text = strip_html(html);
+        assert!(!text.contains("ab"), "got: {text:?}");
+    }
+
+    #[test]
+    fn br_forces_a_break() {
+        let html = "line one<br>line two<br/>line three";
+        let text = strip_html(html);
+        assert!(!text.contains("oneline"), "got: {text:?}");
+        assert!(!text.contains("twoline"), "got: {text:?}");
+    }
+
+    #[test]
+    fn inline_elements_still_run_together_as_before() {
+        // Inline tags (b/i/span/a) are not block-level: no whitespace is
+        // fabricated at their boundaries beyond what's in the source,
+        // matching prior (correct) behavior.
+        let html = "<p>hello <b>bold</b>world</p>";
+        let text = strip_html(html);
+        assert_eq!(text, "hello boldworld");
+    }
+
+    #[test]
+    fn script_and_style_blocks_still_removed_entirely() {
+        let html = "<style>.x{color:red}</style><p>visible</p><script>evil()</script>";
+        let text = strip_html(html);
+        assert_eq!(text, "visible");
+    }
+
+    #[test]
+    fn entities_still_decoded() {
+        let html = "<p>Tom &amp; Jerry &lt;3</p>";
+        let text = strip_html(html);
+        assert_eq!(text, "Tom & Jerry <3");
     }
 }
