@@ -183,6 +183,47 @@ pub fn extract_yaml_bool(yaml: &str, key: &str) -> Option<bool> {
     })
 }
 
+/// Return `yaml` with the named block (its opener line `key:` plus all of
+/// its indented continuation lines) removed, leaving only genuinely
+/// top-level lines.
+///
+/// Companion to [`extract_yaml_block`] — see issue #127: `extract_yaml_string`
+/// / `extract_yaml_list` / `extract_yaml_bool` scan for `{key}:` after
+/// `line.trim()`, so an indented line *inside* a nested block (e.g.
+/// `  keywords: [a, b]` under `metadata:`) still matches a "top-level"
+/// lookup once trimmed. A caller distinguishing "top-level" from "inside
+/// the block" (skill_loader's dual-read) must scan the block-stripped
+/// remainder, not the raw front matter, or every already-migrated field
+/// false-positives as if it were still top-level.
+pub fn strip_yaml_block(yaml: &str, key: &str) -> String {
+    let mut out_lines: Vec<&str> = Vec::new();
+    let mut lines = yaml.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.starts_with(char::is_whitespace) {
+            out_lines.push(line);
+            continue;
+        }
+        let is_opener = line
+            .trim_end()
+            .strip_prefix(&format!("{}:", key))
+            .is_some_and(|rest| rest.trim().is_empty());
+        if !is_opener {
+            out_lines.push(line);
+            continue;
+        }
+
+        // Consume (drop) the block's indented/blank continuation lines.
+        while let Some(&next_line) = lines.peek() {
+            if next_line.trim().is_empty() || next_line.starts_with(char::is_whitespace) {
+                lines.next();
+            } else {
+                break;
+            }
+        }
+    }
+    out_lines.join("\n")
+}
+
 /// Extract a nested YAML mapping block by key (e.g. `metadata:` at the
 /// top level, followed by indented `key: value` lines) and return it
 /// dedented — ready to be re-parsed with `extract_yaml_string` /
@@ -326,6 +367,47 @@ mod tests {
             vec!["from_city", "to_city"]
         );
         assert_eq!(extract_yaml_string(&block, "version"), Some("1.0".to_string()));
+    }
+
+    /// issue #127 root cause: `extract_yaml_string`/`list`/`bool` trim each
+    /// line before matching a key, so a "top-level" scan over the *raw*
+    /// front matter also matches that same key indented under a nested
+    /// block — every already-migrated `metadata.*` field false-positived
+    /// as still top-level. `strip_yaml_block` must remove the block
+    /// entirely so a subsequent top-level lookup on the remainder returns
+    /// nothing for keys that only exist inside it.
+    #[test]
+    fn test_strip_yaml_block_removes_indented_lines_from_top_level_scan() {
+        let yaml = "name: flight\ndescription: \"x\"\nmetadata:\n  version: \"1.0.0\"\n  keywords: [a, b]\n  arguments:\n    - from_city\n    - to_city\n";
+        let stripped = strip_yaml_block(yaml, "metadata");
+
+        // Genuinely top-level lines survive untouched.
+        assert_eq!(extract_yaml_string(&stripped, "name"), Some("flight".to_string()));
+        assert_eq!(extract_yaml_string(&stripped, "description"), Some("x".to_string()));
+
+        // Fields that exist only inside the block must not "leak" into the
+        // top-level scan once the block is stripped — this is the exact
+        // false-positive the deprecation WARN was hitting.
+        assert_eq!(extract_yaml_string(&stripped, "version"), None);
+        assert!(extract_yaml_list(&stripped, "keywords").is_empty());
+        assert!(extract_yaml_list(&stripped, "arguments").is_empty());
+    }
+
+    #[test]
+    fn test_strip_yaml_block_no_block_present_is_a_no_op() {
+        let yaml = "name: flight\ndescription: \"x\"\nversion: \"1.0.0\"";
+        assert_eq!(strip_yaml_block(yaml, "metadata"), yaml);
+    }
+
+    #[test]
+    fn test_strip_yaml_block_leaves_a_true_top_level_field_with_the_same_name_as_a_block_field() {
+        // issue #125's transitional dual-read: a field can legitimately
+        // exist at the true top level (not yet migrated) *and* inside
+        // metadata (already migrated under a different value) at once.
+        // Stripping the block must not touch the top-level occurrence.
+        let yaml = "name: dual\nversion: top-level\nmetadata:\n  version: under-metadata\n";
+        let stripped = strip_yaml_block(yaml, "metadata");
+        assert_eq!(extract_yaml_string(&stripped, "version"), Some("top-level".to_string()));
     }
 
     #[test]

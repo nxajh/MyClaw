@@ -56,7 +56,7 @@ use tracing::{info, warn};
 
 use crate::str_utils::{
     extract_yaml_block, extract_yaml_bool, extract_yaml_list, extract_yaml_string,
-    parse_front_matter,
+    parse_front_matter, strip_yaml_block,
 };
 
 /// Read a string field, preferring the top-level occurrence (with a
@@ -207,17 +207,26 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
 
     let metadata = extract_yaml_block(&front_matter, "metadata");
     let metadata = metadata.as_deref();
+    // issue #127: extract_yaml_string/list/bool trim each line before
+    // matching, so scanning the *raw* front_matter for a "top-level"
+    // occurrence also matches that same key indented under `metadata:` —
+    // every already-migrated field false-positived as still-deprecated.
+    // `top_level` has the metadata block's lines removed, so the dual-read
+    // "is this key still at the top level" check only sees genuine
+    // top-level lines.
+    let top_level = strip_yaml_block(&front_matter, "metadata");
+    let top_level = top_level.as_str();
 
-    let keywords = dual_list(&front_matter, metadata, "keywords", &name, path);
-    let version = dual_string(&front_matter, metadata, "version", &name, path);
-    let when_to_use = dual_string(&front_matter, metadata, "when_to_use", &name, path);
-    let argument_hint = dual_string(&front_matter, metadata, "argument_hint", &name, path);
-    let arguments = dual_list(&front_matter, metadata, "arguments", &name, path);
+    let keywords = dual_list(top_level, metadata, "keywords", &name, path);
+    let version = dual_string(top_level, metadata, "version", &name, path);
+    let when_to_use = dual_string(top_level, metadata, "when_to_use", &name, path);
+    let argument_hint = dual_string(top_level, metadata, "argument_hint", &name, path);
+    let arguments = dual_list(top_level, metadata, "arguments", &name, path);
     let user_invocable =
-        dual_bool(&front_matter, metadata, "user_invocable", &name, path).unwrap_or(true);
+        dual_bool(top_level, metadata, "user_invocable", &name, path).unwrap_or(true);
     let agent_invocable =
-        dual_bool(&front_matter, metadata, "agent_invocable", &name, path).unwrap_or(true);
-    let status = dual_string(&front_matter, metadata, "status", &name, path);
+        dual_bool(top_level, metadata, "agent_invocable", &name, path).unwrap_or(true);
+    let status = dual_string(top_level, metadata, "status", &name, path);
 
     Ok(SkillDefinition {
         name,
