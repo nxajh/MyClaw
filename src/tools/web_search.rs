@@ -134,13 +134,26 @@ impl Tool for WebSearchTool {
                         );
                         for (i, result) in results.results.iter().enumerate() {
                             output.push_str(&format!("{}. {}\n", i + 1, result.title));
-                            output.push_str(&format!("   URL: {}\n", result.url));
+                            if is_grounding_redirect_url(&result.url) {
+                                // issue #110: the grounding API's own `uri`
+                                // is an opaque redirect proxy, not the
+                                // article URL — say so instead of letting
+                                // it masquerade as a directly citable link.
+                                output.push_str(&format!(
+                                    "   URL (redirect — resolve via http_request before \
+                                     citing as a permalink): {}\n",
+                                    result.url
+                                ));
+                            } else {
+                                output.push_str(&format!("   URL: {}\n", result.url));
+                            }
                             if !result.snippet.is_empty() {
                                 output.push_str(&format!("   {}\n", result.snippet));
                             }
-                            if let Some(ref published) = result.published_at {
-                                output.push_str(&format!("   Published: {}\n", published));
-                            }
+                            output.push_str(&format!(
+                                "   Published: {}\n",
+                                result.published_at.as_deref().unwrap_or("unknown")
+                            ));
                             output.push('\n');
                         }
 
@@ -248,5 +261,62 @@ impl Tool for WebSearchTool {
             output: String::new(),
             error: Some(format!("All search providers failed. Last error: {}", msg)),
         })
+    }
+}
+
+/// Whether `url` is an opaque grounding-API redirect proxy rather than the
+/// actual source URL (issue #110). Confirmed against Google's Gemini
+/// grounding API, which returns `groundingChunks[].web.uri` values on the
+/// `vertexaisearch.cloud.google.com` host that expire and require an extra
+/// hop to resolve to the real article — this is the upstream API's own
+/// behavior, not something MyClaw wraps.
+fn is_grounding_redirect_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .is_some_and(|host| {
+            host == "vertexaisearch.cloud.google.com"
+                || host.ends_with(".vertexaisearch.cloud.google.com")
+        })
+}
+
+#[cfg(test)]
+mod redirect_detection_tests {
+    use super::*;
+
+    #[test]
+    fn detects_vertex_grounding_redirect() {
+        assert!(is_grounding_redirect_url(
+            "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc123"
+        ));
+    }
+
+    #[test]
+    fn detects_vertex_grounding_redirect_subdomain() {
+        assert!(is_grounding_redirect_url(
+            "https://foo.vertexaisearch.cloud.google.com/grounding-api-redirect/abc123"
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_ordinary_urls() {
+        assert!(!is_grounding_redirect_url("https://example.com/article"));
+        assert!(!is_grounding_redirect_url(
+            "https://news.ycombinator.com/item?id=1"
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_lookalike_host() {
+        // A host that merely contains the string, but isn't the real
+        // domain or a subdomain of it, must not match.
+        assert!(!is_grounding_redirect_url(
+            "https://vertexaisearch.cloud.google.com.evil.example/x"
+        ));
+    }
+
+    #[test]
+    fn handles_unparseable_url_gracefully() {
+        assert!(!is_grounding_redirect_url("not a url"));
     }
 }
