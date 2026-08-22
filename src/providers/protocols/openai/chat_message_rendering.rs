@@ -6,6 +6,20 @@
 use crate::providers::{ChatRequest, ContentPart};
 use base64::Engine as _;
 use serde_json::json;
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
+/// Tool-call ids already WARNed about for empty `arguments` (issue #113).
+/// History is re-sent on every request, so a single stale historical
+/// tool_call with empty arguments re-triggered this WARN on every
+/// subsequent turn (observed: 21x/2h for one static defect) — pure log
+/// noise, not a new event each time. Dedup by id (stable across turns,
+/// unlike message index which shifts as history grows/truncates) so it
+/// fires once per distinct defect, then drops to DEBUG.
+fn warned_empty_args_ids() -> &'static Mutex<HashSet<String>> {
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 /// Map an audio MIME type to the OpenAI `input_audio.format` token. OpenAI
 /// accepts a short codec name ("wav", "mp3", ...) rather than a MIME type.
@@ -46,12 +60,26 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                         empty_name_count += 1;
                     }
                     if tc.arguments.trim().is_empty() {
-                        tracing::warn!(
-                            idx = i,
-                            id = %tc.id,
-                            name = %tc.name,
-                            "render_openai_chat_body: EMPTY tool_call arguments (will be sanitized to \"{{}}\")"
-                        );
+                        let first_time = warned_empty_args_ids()
+                            .lock()
+                            .unwrap()
+                            .insert(tc.id.clone());
+                        if first_time {
+                            tracing::warn!(
+                                idx = i,
+                                id = %tc.id,
+                                name = %tc.name,
+                                "render_openai_chat_body: EMPTY tool_call arguments (will be sanitized to \"{{}}\"); \
+                                 further occurrences of this same tool_call id are logged at DEBUG, not re-warned"
+                            );
+                        } else {
+                            tracing::debug!(
+                                idx = i,
+                                id = %tc.id,
+                                name = %tc.name,
+                                "render_openai_chat_body: EMPTY tool_call arguments (already warned for this id)"
+                            );
+                        }
                     }
                 }
             }
@@ -251,6 +279,51 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::providers::capability_chat::ChatMessage;
+
+    /// issue #113: history is re-sent on every request, so a stale
+    /// historical tool_call with empty arguments must only be WARNed about
+    /// once per id — not every time render_openai_chat_body replays it.
+    #[test]
+    fn empty_tool_call_args_warned_only_once_per_id() {
+        let id = format!("dedup-test-{}", std::process::id());
+        let messages = [ChatMessage {
+            role: "assistant".into(),
+            parts: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![crate::providers::capability_chat::ToolCall {
+                id: id.clone(),
+                name: "some_tool".into(),
+                arguments: "   ".into(),
+            }]),
+            is_error: None,
+            model: None,
+            usage: None,
+        }];
+        let req = ChatRequest {
+            model: "m",
+            messages: &messages,
+            temperature: None,
+            max_tokens: None,
+            thinking: None,
+            stop: None,
+            seed: None,
+            tools: None,
+            stream: true,
+        };
+
+        assert!(!warned_empty_args_ids().lock().unwrap().contains(&id));
+        render_openai_chat_body(&req);
+        assert!(
+            warned_empty_args_ids().lock().unwrap().contains(&id),
+            "first occurrence must be recorded"
+        );
+        // Second (and any further) render of the same historical message
+        // must not re-insert or otherwise misbehave — this is the "history
+        // replay" scenario the issue describes.
+        render_openai_chat_body(&req);
+        assert!(warned_empty_args_ids().lock().unwrap().contains(&id));
+    }
 
     #[test]
     fn audio_format_hint_maps_common_mimes() {

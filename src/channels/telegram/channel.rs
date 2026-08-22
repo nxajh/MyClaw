@@ -33,6 +33,15 @@ const STREAM_THROTTLE: std::time::Duration = std::time::Duration::from_millis(15
 /// limit for `sendMessage` / `editMessageText` during streaming.
 const STREAM_PREVIEW_LIMIT: usize = 4000;
 
+/// Whether a failed `editMessageText` call is Telegram's benign "content
+/// unchanged" rejection (issue #113) — the throttled streaming preview can
+/// legitimately try to re-edit a message with identical content when the
+/// underlying text hasn't changed since the last flush. This is not an
+/// error worth a WARN; the edit is simply a no-op.
+fn is_edit_not_modified(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::BAD_REQUEST && body.contains("message is not modified")
+}
+
 /// A GFM table delimiter row, e.g. `| --- | :--: |`.
 fn is_table_delimiter_local(line: &str) -> bool {
     let t = line.trim();
@@ -641,7 +650,11 @@ impl TelegramChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            warn!("editMessageText failed: {status} {body}");
+            if is_edit_not_modified(status, &body) {
+                debug!("editMessageText: content unchanged, skipping (not an error)");
+            } else {
+                warn!("editMessageText failed: {status} {body}");
+            }
             return Ok(false);
         }
 
@@ -738,7 +751,11 @@ impl TelegramChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            warn!("editMessageText(rich) failed: {status} {body}");
+            if is_edit_not_modified(status, &body) {
+                debug!("editMessageText(rich): content unchanged, skipping (not an error)");
+            } else {
+                warn!("editMessageText(rich) failed: {status} {body}");
+            }
             return Ok(false);
         }
         Ok(true)
@@ -766,7 +783,11 @@ impl TelegramChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            warn!("editMessageText(HTML) failed: {status} {body}");
+            if is_edit_not_modified(status, &body) {
+                debug!("editMessageText(HTML): content unchanged, skipping (not an error)");
+            } else {
+                warn!("editMessageText(HTML) failed: {status} {body}");
+            }
             return Ok(false);
         }
         Ok(true)
@@ -1014,8 +1035,14 @@ impl TelegramChannel {
             loop {
                 // TTL check
                 if start.elapsed() >= max_duration {
+                    // issue #113: this fires whenever a turn simply runs
+                    // long (normal for e.g. multi-step tool use) — it is
+                    // not itself evidence of a stall. Cross-reference with
+                    // the LLM/provider logs for that turn before treating
+                    // this as the root cause of anything.
                     warn!(
-                        "Telegram typing TTL exceeded ({}s) for {}",
+                        "Telegram typing TTL exceeded ({}s) for {} — long turn, not necessarily a stall; \
+                         cross-reference with LLM/provider logs for this turn before escalating",
                         max_duration.as_secs(),
                         recipient_key
                     );
@@ -2907,6 +2934,33 @@ impl TurnStream for TelegramTurnStream {
 mod tests {
     use super::super::types::User;
     use super::*;
+
+    /// issue #113: this is Telegram's benign "content unchanged" rejection
+    /// from a throttled preview re-editing identical text — must be
+    /// distinguished from a genuine edit failure.
+    #[test]
+    fn detects_not_modified_edit_rejection() {
+        assert!(is_edit_not_modified(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"ok":false,"error_code":400,"description":"Bad Request: message is not modified"}"#
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_other_400s_as_not_modified() {
+        assert!(!is_edit_not_modified(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"ok":false,"error_code":400,"description":"Bad Request: message to edit not found"}"#
+        ));
+    }
+
+    #[test]
+    fn does_not_flag_non_400_status() {
+        assert!(!is_edit_not_modified(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "message is not modified"
+        ));
+    }
 
     fn make_config() -> TelegramAccountConfig {
         TelegramAccountConfig {

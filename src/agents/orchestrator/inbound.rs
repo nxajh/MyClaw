@@ -682,8 +682,30 @@ async fn replay_one_sync(ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelIn
     let sk = key.to_string();
     let session_ctx = ctx.sessions.get_or_create_context(&sk);
     let runtime = ctx.runtime.clone();
-    if let Err(e) = session_ctx.process_turn(msg, Some(channel), runtime).await {
+    // Capture routing before `msg` moves into process_turn — process_turn
+    // no longer sends a user-facing error notice itself (issue #113), so
+    // this is the only notification the user gets on a failed replay.
+    let reply_target = msg.receiver.id.clone();
+    let passive_reply_id = msg
+        .receiver
+        .reply_to_message_id
+        .clone()
+        .unwrap_or_else(|| msg.id.clone());
+    let inbound_thread_id = msg.receiver.thread_id.clone();
+    if let Err(e) = session_ctx.process_turn(msg, Some(channel.clone()), runtime).await {
         tracing::warn!(session = %sk, err = %e, "replay: process_turn failed");
+        let text = crate::agents::user_messages::user_facing_error_message(&e);
+        let mut receiver =
+            MessageReceiver::new(reply_target).with_reply_to(passive_reply_id);
+        if let Some(tid) = inbound_thread_id {
+            receiver = receiver.with_thread(tid);
+        }
+        let message = ChannelOutboundMessage {
+            receiver,
+            content: ChannelMessageContent::text(text),
+            options: Default::default(),
+        };
+        let _ = channel.send_message(&message).await;
     }
 }
 

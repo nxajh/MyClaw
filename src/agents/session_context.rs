@@ -1215,20 +1215,17 @@ impl SessionContext {
                 if let Some(s) = stream {
                     s.abort().await;
                 }
-                // Notify channel of error + send error notice to user
+                // Notify channel of error status only — the user-facing
+                // error notice itself is the caller's job (issue #113: this
+                // used to also send a generic MSG_TURN_FAILED text here,
+                // duplicating the classified, more specific notice the
+                // active-session dispatch path already sends on Err; a
+                // caller with a channel but no notice of its own — e.g.
+                // spooled-message replay — sends its own via
+                // `user_facing_error_message`).
                 if let Some(ref ch) = channel_for_send {
                     ch.on_status(&reply_target, crate::ProcessingStatus::Error)
                         .await;
-                    // Best-effort error notice
-                    let err_msg = crate::agents::user_messages::MSG_TURN_FAILED.to_string();
-                    let receiver =
-                        crate::channels::MessageReceiver::new(reply_target.clone());
-                    let message = crate::channels::ChannelOutboundMessage {
-                        receiver,
-                        content: crate::channels::ChannelMessageContent::text(err_msg),
-                        options: Default::default(),
-                    };
-                    let _ = ch.send_message(&message).await;
                 }
                 let channel_name = channel_for_send
                     .as_ref()
