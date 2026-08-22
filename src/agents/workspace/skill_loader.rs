@@ -4,7 +4,9 @@
 //! ```markdown
 //! ---
 //! name: weather
-//! description: "Get current weather conditions and forecasts."
+//! summary: "Get weather conditions and forecasts."
+//! description: "Get current weather conditions and forecasts. Trigger words: \
+//!   weather, forecast, temperature, rain, humidity, wind speed, ..."
 //! keywords: [weather, forecast, temperature, rain]
 //! ---
 //!
@@ -12,6 +14,14 @@
 //!
 //! Use curl to fetch weather from wttr.in.
 //! ```
+//!
+//! `summary` (issue #112) is what gets injected into the system prompt
+//! every time this skill is announced — keep it short (a sentence).
+//! `description` can be longer (e.g. carrying trigger-word hints for the
+//! model to match against) since it's only shown on demand, via
+//! `skill_view` or the `/skills` listing — never injected wholesale.
+//! Skills without a `summary` fall back to a truncated `description` so
+//! existing SKILL.md files keep working unchanged.
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -26,6 +36,11 @@ use crate::str_utils::{
 pub struct SkillDefinition {
     pub name: String,
     pub description: String,
+    /// Short (ideally ≤40 char) summary injected into the system prompt
+    /// every time this skill is announced (issue #112). `None` when the
+    /// SKILL.md has no `summary` field — callers should fall back to a
+    /// truncated `description` (see `injected_summary`).
+    pub summary: Option<String>,
     pub keywords: Vec<String>,
     pub prompt_body: String,
     pub source_path: PathBuf,
@@ -56,6 +71,7 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
     });
 
     let description = extract_yaml_string(&front_matter, "description").unwrap_or_default();
+    let summary = extract_yaml_string(&front_matter, "summary");
 
     let keywords = extract_yaml_list(&front_matter, "keywords");
     let version = extract_yaml_string(&front_matter, "version");
@@ -69,6 +85,7 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
     Ok(SkillDefinition {
         name,
         description,
+        summary,
         keywords,
         prompt_body: body.trim().to_string(),
         source_path: path.to_path_buf(),
@@ -269,6 +286,39 @@ Search flights."#;
         assert_eq!(skill.arguments, vec!["from_city", "to_city"]);
         assert!(skill.user_invocable);
         assert!(!skill.agent_invocable);
+    }
+
+    #[test]
+    fn test_parse_skill_file_summary_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("weather2");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let content = r#"---
+name: weather2
+summary: "Get the weather."
+description: "Get current weather conditions. Trigger words: weather, forecast, rain."
+---
+
+# Weather"#;
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let skill = parse_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(skill.summary, Some("Get the weather.".to_string()));
+        assert!(skill.description.contains("Trigger words"));
+    }
+
+    #[test]
+    fn test_parse_skill_file_no_summary_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("weather3");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let content = "---\nname: weather3\ndescription: \"desc\"\n---\n# Weather";
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let skill = parse_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        assert!(skill.summary.is_none());
     }
 
     #[test]

@@ -538,11 +538,11 @@ impl AttachmentManager {
             );
             for name in &delta.added {
                 let skill = skills.get(name);
-                let desc = skill.map(|s| s.description.as_str()).unwrap_or("");
+                let summary = skill.map(|s| s.injected_summary()).unwrap_or_default();
 
                 let mut parts = vec![format!("- **{}**", name)];
-                if !desc.is_empty() {
-                    parts.push(format!(": {}", desc));
+                if !summary.is_empty() {
+                    parts.push(format!(": {}", summary));
                 }
                 if let Some(s) = skill {
                     if let Some(ref w) = s.when_to_use {
@@ -659,6 +659,7 @@ mod tests {
             mgr.register(Skill {
                 name: name.to_string(),
                 description: format!("{} description", name),
+                summary: None,
                 keywords: vec![],
                 prompt_body: String::new(),
                 version: None,
@@ -675,6 +676,37 @@ mod tests {
 
     fn empty_history() -> Vec<ChatMessage> {
         vec![]
+    }
+
+    /// issue #112: the injected `## Skills` listing uses the bounded
+    /// `injected_summary` (short `summary` field, or truncated
+    /// `description`) — never the full, possibly trigger-word-stuffed
+    /// `description` verbatim.
+    #[test]
+    fn skill_listing_injects_summary_not_full_description() {
+        let mut mgr = SkillManager::new();
+        mgr.register(Skill {
+            name: "cron-diag".to_string(),
+            description: "a".repeat(200),
+            summary: Some("Diagnose cron issues.".to_string()),
+            keywords: vec![],
+            prompt_body: String::new(),
+            version: None,
+            when_to_use: None,
+            argument_hint: None,
+            arguments: vec![],
+            user_invocable: true,
+            agent_invocable: true,
+            skill_dir: None,
+        });
+
+        let mut am = AttachmentManager::new();
+        am.diff_skills(&mgr, &empty_history());
+        let msg = am.build_message(&mgr).unwrap();
+        let text = msg.text_content();
+
+        assert!(text.contains("Diagnose cron issues."));
+        assert!(!text.contains(&"a".repeat(200)));
     }
 
     #[test]
