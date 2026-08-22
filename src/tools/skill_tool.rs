@@ -315,6 +315,7 @@ mod tests {
         Skill {
             name: name.to_string(),
             description: "test desc".to_string(),
+            summary: None,
             keywords: vec![],
             prompt_body: "## Instructions\nDo the thing.".to_string(),
             version: None,

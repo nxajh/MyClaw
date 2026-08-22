@@ -13,6 +13,7 @@ use super::skill_loader::SkillDefinition;
 pub struct Skill {
     pub name: String,
     pub description: String,
+    pub summary: Option<String>,
     pub keywords: Vec<String>,
     pub prompt_body: String,
     pub version: Option<String>,
@@ -30,6 +31,7 @@ impl Skill {
         Self {
             name: def.name.clone(),
             description: def.description.clone(),
+            summary: def.summary.clone(),
             keywords: def.keywords.clone(),
             prompt_body: def.prompt_body.clone(),
             version: def.version.clone(),
@@ -39,6 +41,20 @@ impl Skill {
             user_invocable: def.user_invocable,
             agent_invocable: def.agent_invocable,
             skill_dir: def.source_path.parent().map(|p| p.to_path_buf()),
+        }
+    }
+
+    /// The short text injected into the system prompt every time this
+    /// skill is announced (issue #112) — the author's `summary` field if
+    /// present, else a truncated `description` so unmigrated SKILL.md
+    /// files keep working. Bounded either way: per-turn injection cost no
+    /// longer grows with however many trigger-word-stuffed sentences an
+    /// author packs into `description`, which stays available in full via
+    /// `skill_view` and the `/skills` listing.
+    pub fn injected_summary(&self) -> String {
+        match &self.summary {
+            Some(s) if !s.trim().is_empty() => crate::str_utils::truncate_line(s, 80),
+            _ => crate::str_utils::truncate_line(&self.description, 60),
         }
     }
 }
@@ -109,5 +125,70 @@ impl SkillManager {
             .filter(|s| !s.prompt_body.is_empty())
             .map(|s| (s.name.as_str(), s.prompt_body.as_str()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn skill(description: &str, summary: Option<&str>) -> Skill {
+        Skill {
+            name: "x".to_string(),
+            description: description.to_string(),
+            summary: summary.map(str::to_string),
+            keywords: vec![],
+            prompt_body: String::new(),
+            version: None,
+            when_to_use: None,
+            argument_hint: None,
+            arguments: vec![],
+            user_invocable: true,
+            agent_invocable: true,
+            skill_dir: None,
+        }
+    }
+
+    /// issue #112: an explicit `summary` is what gets injected, verbatim
+    /// when short enough — not the (possibly much longer) `description`.
+    #[test]
+    fn injected_summary_prefers_explicit_summary() {
+        let s = skill(
+            "Long description with lots of trigger words: foo, bar, baz, qux, quux.",
+            Some("Get the weather."),
+        );
+        assert_eq!(s.injected_summary(), "Get the weather.");
+    }
+
+    #[test]
+    fn injected_summary_falls_back_to_description_when_absent() {
+        let s = skill("Short desc", None);
+        assert_eq!(s.injected_summary(), "Short desc");
+    }
+
+    #[test]
+    fn injected_summary_truncates_long_fallback_description() {
+        let long = "a".repeat(200);
+        let s = skill(&long, None);
+        let injected = s.injected_summary();
+        assert!(injected.chars().count() <= 63, "got len {}", injected.chars().count()); // 60 + "..."
+        assert!(injected.ends_with("..."));
+    }
+
+    #[test]
+    fn injected_summary_truncates_oversized_explicit_summary() {
+        // A misused summary field is still bounded — the whole point is a
+        // predictable per-turn injection cost regardless of author input.
+        let long_summary = "b".repeat(200);
+        let s = skill("short", Some(&long_summary));
+        let injected = s.injected_summary();
+        assert!(injected.chars().count() <= 83, "got len {}", injected.chars().count()); // 80 + "..."
+        assert!(injected.ends_with("..."));
+    }
+
+    #[test]
+    fn injected_summary_treats_blank_summary_as_absent() {
+        let s = skill("fallback desc", Some("   "));
+        assert_eq!(s.injected_summary(), "fallback desc");
     }
 }
