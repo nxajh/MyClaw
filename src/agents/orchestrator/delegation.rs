@@ -21,7 +21,7 @@ use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
 use crate::agents::session_context::TerminalRecord;
 use crate::agents::turn::SubStatus;
-use crate::agents::{DelegationEvent, MessageKind, SessionContext};
+use crate::agents::{DelegationEvent, DelegationNotice, MessageKind, SessionContext};
 use crate::channels::ChannelInboundMessage;
 
 /// 方案 C (§3.3, 2026-08-10): appended to every resume-turn notice while
@@ -478,22 +478,30 @@ pub(super) async fn route_notice(
 }
 
 /// P1 (2026-08-13, RFC delegation-notice-queue §4): drain the session's
-/// enqueued delegation notices — one synthetic turn per notice, FIFO.
-/// Triggered by `route_notice` when the session is idle (immediate) and by
-/// the `dispatch_turn` tail (turn-end). Dedupes by notice id within a pass;
-/// a single pass is bounded (notices enqueued DURING the drain stay for the
-/// next pass). `bump_notice_turn` happens here, synchronously before each
-/// notice-turn spawn (`dispatch_turn_spawn`) — the same sync section the
-/// pre-P1 code used.
+/// enqueued delegation notices. Triggered by `route_notice` when the
+/// session is idle (immediate) and by the `dispatch_turn` tail (turn-end).
+/// Dedupes by notice id within a pass; a single pass is bounded (notices
+/// enqueued DURING the drain stay for the next pass, picked up by the
+/// recursive turn-end drain — see `dispatch_turn_spawn`'s tail).
 ///
-/// Issue #106: each notice's turn is now awaited to completion (via the
-/// `JoinHandle` `dispatch_turn_spawn` returns) before the loop moves to the
-/// next notice, so a multi-notice pass delivers in the queue's own FIFO
-/// order — previously all notices in a pass were fired as independent
-/// `tokio::spawn`ed tasks with nothing serializing *which order they'd
-/// actually reach* the shared `turn_lock`, so a pass accumulated while the
-/// session was busy for a while (several completions queued up, then
-/// released together on turn-end) could deliver out of event order.
+/// Issue #106, two rounds:
+/// 1. (`b66f1f0`) Each notice's turn used to be fired via an independent
+///    `tokio::spawn` with nothing serializing which order they'd actually
+///    reach the shared `turn_lock` — arrival order depended on runtime
+///    scheduling, not event order. Fixed by awaiting each notice's turn to
+///    completion before dispatching the next.
+/// 2. (this change) That fix delivered in order, but still cost one full
+///    LLM turn *per notice* — a pass of N accumulated notices took N
+///    sequential round-trips to fully deliver (observed: up to ~2min for
+///    the last of 4). All notices for the *active* session are now merged
+///    into ONE synthetic turn instead: one round-trip delivers the whole
+///    backlog, in order, and the "one wake, one notice" annoyance the
+///    issue's "expected behavior" section asked about is gone by
+///    construction. The non-active fallback (`process_non_active`) is
+///    intentionally left one-call-per-notice — it persists to history for
+///    a switched-away session, not a live wait, so there is no user-facing
+///    latency to fix there, and merging it would need its own separate
+///    audit of that path's persistence semantics.
 pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: &str) {
     let session = match ctx.sessions.get_by_id(session_id) {
         Some(s) => s,
@@ -518,10 +526,24 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
     if notices.is_empty() {
         return;
     }
-    tracing::info!(session_id = %session_id, count = notices.len(), "draining delegation notices");
 
-    // Re-resolve routing + activity per notice: the session may have gone
-    // inactive between enqueue and drain (user switched away mid-turn).
+    let mut seen = std::collections::HashSet::new();
+    let deduped: Vec<DelegationNotice> = notices
+        .into_iter()
+        .filter(|n| {
+            if seen.insert(n.id.clone()) {
+                true
+            } else {
+                tracing::warn!(notice_id = %n.id, "duplicate delegation notice in drain pass; skipping");
+                false
+            }
+        })
+        .collect();
+    if deduped.is_empty() {
+        return;
+    }
+    tracing::info!(session_id = %session_id, count = deduped.len(), "draining delegation notices");
+
     let routing_key = &session.owner;
     let key = match SessionKey::parse(routing_key) {
         Some(k) => k,
@@ -530,80 +552,113 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
             return;
         }
     };
-    let mut seen = std::collections::HashSet::new();
-    for notice in notices {
-        if !seen.insert(notice.id.clone()) {
-            tracing::warn!(notice_id = %notice.id, "duplicate delegation notice in drain pass; skipping");
-            continue;
-        }
-        let silenced_override = notice.silenced_override;
 
-        // Issue #106: re-checked per notice, not once before the loop —
-        // now that each notice's turn is awaited to completion in order
-        // (below), a multi-notice pass can genuinely straddle a session
-        // switch by the time a later notice's turn is about to start.
-        let is_active = ctx
-            .sessions
-            .active_session_id(routing_key)
-            .is_some_and(|id| id == session_id);
+    // Checked ONCE, before any dispatch: taking the queue and deduping above
+    // has no await point, so activity cannot have changed since `notices`
+    // was read. This is at least as safe as the old per-notice re-check —
+    // that existed to guard against a session switch happening *during* a
+    // previous notice's full turn (an await point); merging into one turn
+    // removes all but the last of those await points, shrinking the race
+    // window rather than widening it.
+    let is_active = ctx
+        .sessions
+        .active_session_id(routing_key)
+        .is_some_and(|id| id == session_id);
 
-        if is_active && ctx.channel(&key.account_key()).is_some() {
-            // 单 preview (2026-08-12): count this notice turn in-flight
-            // synchronously (same sync section as `record_terminal`, no
-            // await in between) — the RAII guard in `process_turn`
-            // decrements on exit.
-            sctx.bump_notice_turn();
-
-            let notice_id_for_log = notice.id.clone();
-            let synthetic = ChannelInboundMessage {
-                id: notice.id,
-                sender: crate::channels::MessageSender::new(key.sender.clone()),
-                receiver: crate::channels::MessageReceiver::new(
-                    session
-                        .last_message
-                        .as_ref()
-                        .map(|m| m.receiver.id.clone())
-                        .unwrap_or_default(),
-                ),
-                content: crate::channels::ChannelMessageContent::text(notice.content),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                interruption_scope_id: None,
-                silenced_override,
-                // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
-                run_mode: Default::default(),
-            };
-            // Issue #106: await this notice's turn to completion before
-            // moving to the next one in the loop. `dispatch_turn_spawn`
-            // still runs the turn on its own `tokio::spawn`ed task — that's
-            // what keeps the Future graph acyclic (see its doc comment) —
-            // but awaiting the `JoinHandle` it returns turns what used to be
-            // N independently-scheduled tasks racing the same `turn_lock`
-            // (arrival order then depended on runtime poll order, not
-            // event order — the root cause of out-of-order delivery) into a
-            // strict FIFO sequence matching the queue's own order.
-            if let Some(handle) = super::inbound::dispatch_turn_spawn(ctx, &key, synthetic) {
-                if let Err(e) = handle.await {
-                    tracing::warn!(
-                        notice_id = %notice_id_for_log,
-                        err = %e,
-                        "delegation notice turn task panicked"
-                    );
-                }
-            }
-        } else {
-            // Session went inactive (or channel disappeared) — fall back to
-            // the non-active path so the notice still lands in history.
-            // P2: pass the persisted id so a successful non-active turn marks
-            // the stored entry delivered — otherwise it would stay Pending
-            // and be re-delivered after every restart.
+    if is_active && ctx.channel(&key.account_key()).is_some() {
+        dispatch_notice_batch(ctx, &key, &session, &sctx, deduped).await;
+    } else {
+        // Session went inactive (or channel disappeared) — fall back to the
+        // non-active path so each notice still lands in history. P2: pass
+        // the persisted id so a successful non-active turn marks the stored
+        // entry delivered — otherwise it would stay Pending and be
+        // re-delivered after every restart.
+        for notice in deduped {
             process_non_active(
                 ctx,
                 session_id,
                 &notice.content,
-                silenced_override,
+                notice.silenced_override,
                 Some(notice.id),
             )
             .await;
+        }
+    }
+}
+
+/// Split a notice batch's ids: the first becomes the synthetic message's
+/// own `id` (what `process_turn` persists to history and what
+/// `dispatch_turn_spawn` naturally marks delivered on success), the rest
+/// ride along as `extra_notice_ids` so their own completion-queue entries
+/// also get marked delivered — otherwise they'd stay Pending forever and
+/// be redelivered on every restart despite having actually been delivered.
+/// `batch` must be non-empty.
+fn split_batch_ids(batch: &[DelegationNotice]) -> (String, Vec<String>) {
+    let primary = batch[0].id.clone();
+    let extra = batch[1..].iter().map(|n| n.id.clone()).collect();
+    (primary, extra)
+}
+
+/// Deliver a whole batch of queued delegation notices as ONE synthetic
+/// turn (issue #106 round 2 — see `drain_delegation_notices` doc). `batch`
+/// must be non-empty and already deduped/FIFO-ordered.
+async fn dispatch_notice_batch(
+    ctx: &OrchestratorCtx,
+    key: &SessionKey,
+    session: &crate::agents::session::Session,
+    sctx: &std::sync::Arc<SessionContext>,
+    batch: Vec<DelegationNotice>,
+) {
+    // 单 preview (2026-08-12): count this AS ONE notice turn in-flight,
+    // synchronously (same sync section as `record_terminal`, no await in
+    // between) — the RAII guard in `process_turn` decrements on exit.
+    sctx.bump_notice_turn();
+
+    // silenced_override: each notice captured this at its own enqueue time
+    // (route_notice), but delivering them together means only the state
+    // AFTER the whole batch matters — recompute fresh rather than reuse any
+    // individual notice's now-possibly-stale snapshot.
+    let silenced_override = Some(sctx.has_pending_delegations());
+
+    let (batch_id, extra_notice_ids) = split_batch_ids(&batch);
+    let combined_content = batch
+        .iter()
+        .map(|n| n.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+
+    tracing::debug!(
+        session_id = %sctx.session_id,
+        batch_size = batch.len(),
+        "dispatching delegation notices as one merged turn"
+    );
+
+    let synthetic = ChannelInboundMessage {
+        id: batch_id,
+        sender: crate::channels::MessageSender::new(key.sender.clone()),
+        receiver: crate::channels::MessageReceiver::new(
+            session
+                .last_message
+                .as_ref()
+                .map(|m| m.receiver.id.clone())
+                .unwrap_or_default(),
+        ),
+        content: crate::channels::ChannelMessageContent::text(combined_content),
+        timestamp: chrono::Utc::now().timestamp() as u64,
+        interruption_scope_id: None,
+        silenced_override,
+        // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
+        run_mode: Default::default(),
+    };
+    if let Some(handle) =
+        super::inbound::dispatch_turn_spawn(ctx, key, synthetic, extra_notice_ids)
+    {
+        if let Err(e) = handle.await {
+            tracing::warn!(
+                session_id = %sctx.session_id,
+                err = %e,
+                "delegation notice batch turn task panicked"
+            );
         }
     }
 }
@@ -1095,7 +1150,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_dispatches_each_notice_in_fifo_order() {
+    async fn drain_merges_all_notices_into_one_fifo_ordered_turn() {
         let channel = MockChannel::new();
         let ctx = test_ctx(vec![(("mock".into(), "default".into()), channel.clone())]);
         let sctx = suspended_session(&ctx);
@@ -1110,20 +1165,32 @@ mod tests {
             silenced_override: Some(false),
         });
         drain_delegation_notices(&ctx, &sctx.session_id).await;
-        // Issue #106: no sleep needed here (unlike the sibling tests that go
-        // through `wake`'s outer fire-and-forget spawn) — `drain_delegation_notices`
-        // now awaits each notice's dispatch `JoinHandle` in turn before
-        // returning, so by the time this `.await` resolves both notice turns
-        // have genuinely finished, not just been scheduled — the structural
-        // guarantee behind the fix: a `for` loop awaiting inside its body
-        // cannot start iteration N+1 before iteration N's await resolves.
+        // `drain_delegation_notices` awaits the single batched turn's
+        // dispatch `JoinHandle` before returning, so by the time this
+        // `.await` resolves the turn has genuinely finished, not just been
+        // scheduled.
         assert!(!sctx.has_queued_delegation_notices());
         assert_eq!(sctx.notice_turns_in_flight.load(Ordering::SeqCst), 0);
-        // Each notice spawned a turn; each failed on NullRegistry and sent
-        // one message — the dispatch task's user-facing error detail
-        // (issue #113: process_turn itself no longer also sends a generic
-        // duplicate).
-        assert_eq!(channel.sent.lock().unwrap().len(), 2);
+        // Issue #106 round 2: both notices are delivered as ONE turn, not
+        // two — it fails on NullRegistry and sends exactly one error
+        // message (not one per notice).
+        assert_eq!(channel.sent.lock().unwrap().len(), 1);
+        // The merged synthetic message (persisted to history before the
+        // provider call, even though the call itself then fails) preserves
+        // FIFO order: "first" appears before "second".
+        let session = sctx.session_snapshot().await;
+        let merged = session
+            .history
+            .iter()
+            .find(|m| m.role == "user" && m.text_content().contains("first"))
+            .unwrap_or_else(|| panic!("no merged notice message found in history: {:?}", session.history));
+        let text = merged.text_content();
+        assert!(text.contains("first"), "got: {text}");
+        assert!(text.contains("second"), "got: {text}");
+        assert!(
+            text.find("first") < text.find("second"),
+            "expected FIFO order (first before second), got: {text}"
+        );
     }
 
     #[tokio::test]
@@ -1148,6 +1215,36 @@ mod tests {
         // Only one notice dispatched (dedup) — its failed turn sends one
         // user-facing error message (issue #113).
         assert_eq!(channel.sent.lock().unwrap().len(), 1);
+    }
+
+    fn notice(id: &str) -> DelegationNotice {
+        DelegationNotice {
+            id: id.to_string(),
+            content: String::new(),
+            silenced_override: None,
+        }
+    }
+
+    /// issue #106 round 2: every id in a batch beyond the first must ride
+    /// along as `extra_notice_ids` — this is what feeds
+    /// `dispatch_turn_spawn`'s mark-delivered loop; a bug here means a
+    /// notice was actually delivered (it's in the merged turn content) but
+    /// its completion-queue entry stays Pending forever, redelivering it on
+    /// every daemon restart despite the user having already seen it.
+    #[test]
+    fn split_batch_ids_first_is_primary_rest_are_extra() {
+        let batch = vec![notice("a"), notice("b"), notice("c")];
+        let (primary, extra) = split_batch_ids(&batch);
+        assert_eq!(primary, "a");
+        assert_eq!(extra, vec!["b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn split_batch_ids_single_notice_has_no_extras() {
+        let batch = vec![notice("only")];
+        let (primary, extra) = split_batch_ids(&batch);
+        assert_eq!(primary, "only");
+        assert!(extra.is_empty());
     }
 
     #[tokio::test]

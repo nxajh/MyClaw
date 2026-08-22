@@ -74,6 +74,32 @@ fn resolve_timeout(tool_timeout: Option<u64>, config_timeout: Option<u64>) -> u6
         .min(SUB_AGENT_TIMEOUT_MAX_SECS)
 }
 
+/// Whether `delegate_with_parent` should GC (delete) the sub-session's own
+/// history immediately after it reaches a terminal state (issue #106).
+///
+/// Only for a *successful sync* delegation: the sync caller already has the
+/// full result text folded into its tool-call return, and there is no other
+/// consumer that would ever look the sub-session up again, so keeping its
+/// history around is pure disk waste. Every other case must keep it:
+/// - Failed/timed-out sync delegations are deliberately NOT GC'd here (the
+///   caller sees the error text, but a failed/timed-out sub-session's
+///   checkpoint is kept as a resumable tombstone by the code right after
+///   this call — deleting the session history out from under that would
+///   break `agent_resume`).
+/// - Async delegations must never be GC'd on this path, success or not:
+///   the result also reaches the parent asynchronously via a
+///   `DelegationEvent`, and `session_query`/`sessions_yield` callers
+///   reasonably expect to still be able to look up what a background task
+///   actually did after it finishes. This was the actual bug: the
+///   pre-fix code GC'd on `result.is_ok()` alone, so a successfully
+///   completed *async* delegation's sub-session vanished immediately,
+///   while a *timed-out-then-resumed* one (which never satisfies
+///   `result.is_ok()` on this call) stayed visible — the inconsistency
+///   the issue observed.
+fn should_gc_sub_session(is_async_delegation: bool, result_is_ok: bool) -> bool {
+    result_is_ok && !is_async_delegation
+}
+
 /// Builds the git branch name used for a sub-agent worktree.
 ///
 /// Format: `subagent/{agent_name}_{worktree_id}`, where `worktree_id` is the
@@ -1060,10 +1086,11 @@ impl DelegationCoordinator {
                 }
             };
 
-            // GC: delete the sub-session for sync delegations. The result is
-            // already captured in `result` and returned to the parent's tool
-            // call, so the sub-session history is no longer needed.
-            if result.is_ok() {
+            // GC: delete the sub-session for sync delegations only (issue
+            // #106). See `should_gc_sub_session` for the rationale — this
+            // was previously ungated, so a *successful async* delegation's
+            // sub-session also got deleted immediately on completion.
+            if should_gc_sub_session(is_async_delegation, result.is_ok()) {
                 if let Err(e) = self.session_manager.backend().delete_session(&sub_session_id) {
                     tracing::debug!(sub_session = %sub_session_id, err = %e, "failed to GC sub-session");
                 }
@@ -1933,6 +1960,27 @@ mod tests {
         assert_eq!(resolve_timeout(Some(5000), Some(9000)), 1800);
         // 0 passes through (no lower clamp)
         assert_eq!(resolve_timeout(Some(0), None), 0);
+    }
+
+    /// issue #106: only a *successful sync* delegation is GC'd. In
+    /// particular, a successful *async* delegation must NOT be GC'd — that
+    /// was the actual bug (the pre-fix condition was `result.is_ok()`
+    /// alone, with no `is_async_delegation` check at all).
+    #[test]
+    fn should_gc_sub_session_only_for_successful_sync() {
+        assert!(should_gc_sub_session(false, true), "sync + success -> GC");
+        assert!(
+            !should_gc_sub_session(true, true),
+            "async + success must NOT be GC'd (issue #106)"
+        );
+        assert!(
+            !should_gc_sub_session(false, false),
+            "sync + failure/timeout -> kept as a resumable tombstone"
+        );
+        assert!(
+            !should_gc_sub_session(true, false),
+            "async + failure/timeout -> kept"
+        );
     }
 
     #[test]

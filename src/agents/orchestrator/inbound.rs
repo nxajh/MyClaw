@@ -472,7 +472,7 @@ pub(super) async fn dispatch_turn(
     key: &SessionKey,
     msg: ChannelInboundMessage,
 ) {
-    dispatch_turn_spawn(ctx, key, msg);
+    dispatch_turn_spawn(ctx, key, msg, Vec::new());
 }
 
 /// Synchronous core of `dispatch_turn` — the body has NO awaits (it records
@@ -495,6 +495,7 @@ pub(super) fn dispatch_turn_spawn(
     ctx: &OrchestratorCtx,
     key: &SessionKey,
     msg: ChannelInboundMessage,
+    extra_notice_ids: Vec<String>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let sk = key.to_string();
 
@@ -579,7 +580,12 @@ pub(super) fn dispatch_turn_spawn(
         // Successful turns: process_turn does the final `channel.send_message(text)`
         // fallback internally. We only handle the error notice here.
         // P2: the synthetic notice id is the store's dedup/mark key — clone
-        // before `msg` moves into process_turn.
+        // before `msg` moves into process_turn. `extra_notice_ids` carries
+        // any OTHER notices batched into this same synthetic turn (issue
+        // #106: `drain_delegation_notices` now merges a whole drain pass
+        // into one turn instead of one turn per notice) — every one of them
+        // needs its own completion-queue entry marked delivered too, not
+        // just the id that happened to become this message's own `id`.
         let notice_id = msg.id.clone();
         let result = session_ctx
             .process_turn(msg, Some(channel.clone()), runtime)
@@ -589,14 +595,18 @@ pub(super) fn dispatch_turn_spawn(
         // entry delivered so a restart does not re-deliver it. Only
         // `delegation*` synthetic ids are tracked; `recovery:` and channel
         // user-message ids are never persisted (mark returns false — no-op).
-        // Err keeps the entry Pending (at-least-once re-delivery).
-        if result.is_ok() && notice_id.starts_with("delegation") {
+        // Err keeps the entry Pending (at-least-once re-delivery) for ALL
+        // ids in the batch — a partially-delivered batch is not possible
+        // since they share one turn (one process_turn Ok/Err outcome).
+        if result.is_ok() {
             if let Some(store) = &ctx.completion_queue {
-                match store.mark_delivered(&notice_id) {
-                    Ok(_) => {}
-                    Err(e) => {
+                for id in std::iter::once(&notice_id).chain(extra_notice_ids.iter()) {
+                    if !id.starts_with("delegation") {
+                        continue;
+                    }
+                    if let Err(e) = store.mark_delivered(id) {
                         tracing::warn!(
-                            notice_id = %notice_id,
+                            notice_id = %id,
                             err = %e,
                             "completion queue: mark delivered failed"
                         );
