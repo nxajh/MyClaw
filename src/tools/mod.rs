@@ -88,10 +88,18 @@ use std::sync::Arc;
 /// `shell::adopt_after_restart` on it at startup before any tool call can
 /// reach it — bare CLI callers (no persistent session dir, no daemon to
 /// restart) can ignore it.
+///
+/// `shell_notice_tx` (issue #129): where `background: true` shell commands
+/// report completion, so the orchestrator can wake the spawning session.
+/// `None` for bare CLI usage / tests — no orchestrator to wake.
 pub fn builtin_tools(
     sessions_dir: Option<std::path::PathBuf>,
+    shell_notice_tx: Option<tokio::sync::mpsc::Sender<shell::ShellCompletion>>,
 ) -> (Vec<Arc<dyn Tool>>, shell::ShellRegistry) {
-    let shell = ShellTool::new(sessions_dir);
+    let shell = match shell_notice_tx {
+        Some(tx) => ShellTool::new_with_notice_sender(sessions_dir, tx),
+        None => ShellTool::new(sessions_dir),
+    };
     let shell_registry = shell.registry();
     let shell_poll = ShellPollTool::new(shell.registry(), shell.sessions_dir());
     let shell_kill = ShellKillTool::new(shell.registry());

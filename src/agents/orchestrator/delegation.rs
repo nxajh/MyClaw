@@ -311,6 +311,30 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     .await;
 }
 
+/// Route a `background: true` shell command's completion (issue #129) into
+/// the session that spawned it. Reuses `route_notice` wholesale — same
+/// persistence (`completion_queue`, at-least-once across a restart), same
+/// batching of concurrent completions into one turn (`drain_delegation_notices`)
+/// — but skips `wake`'s sub-agent suspension bookkeeping entirely: a shell
+/// command has no `sub_session_id` of its own and no `record_terminal` entry
+/// to collect, so `NoticeMeta.status` is `None` (mirrors how `Message`
+/// events, the other non-terminal notice kind, are routed). `process_id`
+/// fills the `sub_session_id` slot in the persisted entry purely as an
+/// opaque id — nothing downstream (recovery, dedup) treats it as an actual
+/// sub-session.
+pub(super) async fn route_shell_completion(
+    ctx: &OrchestratorCtx,
+    sc: crate::tools::shell::ShellCompletion,
+) {
+    let synthetic_id = format!("shell:{}", sc.process_id);
+    let notice_meta = NoticeMeta {
+        sub_session_id: sc.process_id,
+        status: None,
+        sent_message_count: 0,
+    };
+    route_notice(ctx, &sc.session_id, sc.content, synthetic_id, Some(notice_meta)).await;
+}
+
 /// Route a synthesized system notice into the parent session:
 /// active → `dispatch_turn` (live streaming to the user's UI); non-active →
 /// `process_non_active` (temporary context, persisted to history). Shared by
@@ -811,6 +835,45 @@ mod tests {
         assert_eq!(e.silenced_override, Some(false));
         assert!(e.content.contains("persisted summary"));
         assert_eq!(e.delivery_state, crate::storage::DeliveryState::Pending);
+    }
+
+    /// issue #129: `route_shell_completion` reuses `route_notice` wholesale
+    /// for a shell background completion — no sub-agent suspension involved
+    /// (plain active session, no `add_pending_task`), yet the notice still
+    /// persists to `completion_queue` the same way a delegation notice does,
+    /// with the shell command's `process_id` riding in the `sub_session_id`
+    /// slot as an opaque id (not a real sub-session).
+    #[tokio::test]
+    async fn route_shell_completion_persists_before_enqueue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+        );
+        let channel: Arc<dyn crate::channels::Channel> = MockChannel::new();
+        let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
+        ctx.completion_queue = Some(Arc::clone(&store));
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        let sid = sctx.session_id.clone();
+
+        route_shell_completion(
+            &ctx,
+            crate::tools::shell::ShellCompletion {
+                session_id: sid.clone(),
+                process_id: "sh_abc123".to_string(),
+                content: "[系统通知] 后台命令已完成 (process_id: sh_abc123, exit_code: 0)。"
+                    .to_string(),
+            },
+        )
+        .await;
+
+        let pending = store.pending();
+        assert_eq!(pending.len(), 1, "shell completion must persist before enqueue");
+        let e = &pending[0];
+        assert_eq!(e.id, "shell:sh_abc123");
+        assert_eq!(e.sub_session_id, "sh_abc123");
+        assert_eq!(e.parent_session_id, sid);
+        assert_eq!(e.status, None);
+        assert!(e.content.contains("sh_abc123"));
     }
 
     #[tokio::test]
