@@ -359,18 +359,21 @@ fn build_skill_extract_prompt(existing_index: &str, session_id: &str) -> String 
          - Create at most 1 skill. Quality over quantity.\n\
          - Use `skill_manage` action `create` with a `name` (kebab-case directory name).\n\
          - The `content` parameter is the FULL SKILL.md including YAML frontmatter.\n\
-         - Frontmatter MUST include `status: draft` — draft skills are hidden from normal \
-         loading until a human reviews and activates them.\n\
+         - Frontmatter MUST include `metadata.status: draft` — draft skills are hidden from \
+         normal loading until a human reviews and activates them.\n\
          \n\
          ## SKILL.md content structure\n\
          ```yaml\n\
          ---\n\
          name: your-skill-name\n\
          description: \"One-line description with trigger conditions and keywords (中英文)\"\n\
-         keywords: [keyword1, keyword2]\n\
-         status: draft\n\
+         metadata:\n\
+         \x20\x20keywords: [keyword1, keyword2]\n\
+         \x20\x20status: draft\n\
          ---\n\
          ```\n\
+         (`name`/`description` are the only standard top-level fields — everything else goes \
+         under `metadata:`, matching how existing skills are structured.)\n\
          Then the body:\n\
          \n\
          # Skill Title\n\
