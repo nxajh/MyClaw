@@ -106,6 +106,9 @@ pub struct Orchestrator {
     delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
     /// Scheduler event receiver (None when scheduling is disabled).
     scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
+    /// Shell background-completion receiver (issue #129) — unlike
+    /// `delegation_rx`, present regardless of sub-agent configuration.
+    shell_notice_rx: Option<mpsc::Receiver<crate::tools::shell::ShellCompletion>>,
 }
 
 /// Return `true` if the session history ends mid-turn and needs recovery or a
@@ -250,6 +253,8 @@ pub struct OrchestratorParts {
     pub delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
     /// Scheduler event receiver (cron triggers / distill checks from Scheduler task).
     pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
+    /// Shell background-completion receiver (issue #129).
+    pub shell_notice_rx: Option<mpsc::Receiver<crate::tools::shell::ShellCompletion>>,
     /// AskRouter shared with the daemon-built `AskUserTool` (same
     /// `Arc<AskRouter>`). The orchestrator's inbound dispatch calls
     /// `ask_router.fulfill(session.id, msg)` to wake any pending ask.
@@ -375,6 +380,7 @@ impl Orchestrator {
             listener_handles,
             delegation_rx: parts.delegation_rx,
             scheduler_rx: parts.scheduler_rx,
+            shell_notice_rx: parts.shell_notice_rx,
         };
 
         info!(
@@ -553,6 +559,11 @@ impl Orchestrator {
             events =
                 Box::pin(events.merge(ReceiverStream::new(srx).map(OrchestratorEvent::Scheduled)));
         }
+        if let Some(nrx) = self.shell_notice_rx.take() {
+            events = Box::pin(
+                events.merge(ReceiverStream::new(nrx).map(OrchestratorEvent::ShellCompletion)),
+            );
+        }
 
         loop {
             // Hot switch checkpoint: SIGUSR1 set the flag — exit loop so
@@ -614,6 +625,9 @@ impl Orchestrator {
                 }
                 OrchestratorEvent::Delegation(event) => {
                     delegation::wake(&self.ctx, event).await;
+                }
+                OrchestratorEvent::ShellCompletion(sc) => {
+                    delegation::route_shell_completion(&self.ctx, sc).await;
                 }
             }
         }

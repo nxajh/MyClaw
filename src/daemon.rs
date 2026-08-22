@@ -502,6 +502,8 @@ async fn build_tools(
     user_registry: &Arc<crate::agents::UserRegistry>,
     namespace: &str,
     session_backend: Arc<dyn crate::storage::SessionBackend>,
+    // issue #129: where `background: true` shell commands report completion.
+    shell_notice_tx: tokio::sync::mpsc::Sender<crate::tools::shell::ShellCompletion>,
 ) -> (
     ToolRegistry,
     Arc<crate::tools::TaskBoards>,
@@ -510,7 +512,10 @@ async fn build_tools(
     crate::tools::shell::ShellRegistry,
 ) {
     let mut tools = ToolRegistry::new();
-    let (builtin, shell_registry) = crate::tools::builtin_tools(Some(config.sessions_root()));
+    let (builtin, shell_registry) = crate::tools::builtin_tools(
+        Some(config.sessions_root()),
+        Some(shell_notice_tx.clone()),
+    );
     for tool in builtin {
         tools.register(tool);
     }
@@ -521,11 +526,13 @@ async fn build_tools(
     // anything else (`myclaw stop`, systemctl, a crash) goes through this
     // deployment's `KillMode=control-group` and kills them along with the
     // daemon, so those entries are marked lost rather than probed for
-    // liveness.
+    // liveness. A `background: true` entry still `running` across a hot
+    // switch keeps its completion notice armed (issue #129).
     crate::tools::shell::adopt_after_restart(
         &config.sessions_root(),
         &shell_registry,
         crate::hot_switch::is_hot_switch(),
+        Some(shell_notice_tx),
     )
     .await;
 
@@ -1157,6 +1164,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Also built before build_tools so SessionQueryTool can share the backend.
     let session_backend = build_session_backend(&config);
 
+    // issue #129: always-on completion channel for `background: true` shell
+    // commands — unlike the delegation channel below, not conditional on
+    // sub-agent configuration (shell backgrounding is a core single-agent
+    // feature too).
+    let (shell_notice_tx, shell_notice_rx) =
+        tokio::sync::mpsc::channel::<crate::tools::shell::ShellCompletion>(100);
+
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
     let (mut tools, task_boards, send_message_tool, friend_ctx, shell_registry) = build_tools(
         &mcp_manager,
@@ -1170,6 +1184,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         &user_registry,
         &config.system.namespace,
         Arc::clone(&session_backend),
+        shell_notice_tx,
     )
     .await;
     // P1 cross-user delivery (RFC §3.5): give send_message access to the
@@ -1558,6 +1573,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         delegator: sub_agent_delegator_arc.clone(),
         delegation_rx,
         scheduler_rx: Some(scheduler_rx),
+        shell_notice_rx: Some(shell_notice_rx),
         workspace_dir: config.workspace_dir.clone(),
         base_dir: base_dir.clone(),
         scheduler: Some(shared_scheduler.clone()),

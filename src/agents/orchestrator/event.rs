@@ -35,6 +35,13 @@ pub enum OrchestratorEvent {
     /// session so the LLM can react.
     Delegation(DelegationEvent),
 
+    /// A `background: true` shell command finished (issue #129). Unlike
+    /// `Delegation`, this fires regardless of whether sub-agents are
+    /// configured — routed through the same completion-notice pipeline
+    /// (`orchestrator::delegation::route_notice`) without any sub-agent
+    /// suspension bookkeeping, since a shell command has no sub-session.
+    ShellCompletion(crate::tools::shell::ShellCompletion),
+
     /// Reply to an outstanding `ask_user` call. Tagged with the session_id
     /// that originated the question (RFC v2: indexed by session_id, not by
     /// routing_key, so cross-channel ask_user works for sub-agents).

@@ -35,8 +35,21 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::Duration;
+
+/// issue #129: a `background: true` shell command reached a terminal state.
+/// Sent to the orchestrator (independent of sub-agent delegation — this
+/// fires in single-agent mode too) so it can wake the spawning session with
+/// the result, reusing the same completion-notice pipeline delegation uses
+/// (batches concurrent completions into one turn, persists for at-least-once
+/// delivery across a restart).
+#[derive(Debug, Clone)]
+pub struct ShellCompletion {
+    pub session_id: String,
+    pub process_id: String,
+    pub content: String,
+}
 
 const MAX_OUTPUT_INLINE: usize = 30_000;
 
@@ -146,6 +159,13 @@ pub struct ProcEntry {
     /// "running" | "exited" | "killed" | "lost_on_restart"
     state: String,
     exit_code: Option<i32>,
+    /// issue #129: only `background: true` spawns get a completion notice —
+    /// a plain foreground call that merely outran `timeout_secs` (and so
+    /// went through the exact same reaper) must stay silent on exit.
+    /// `#[serde(default)]` so process-table entries persisted before this
+    /// field existed still deserialize (as `false`, the old behavior).
+    #[serde(default)]
+    notify_on_exit: bool,
 }
 
 pub type ShellRegistry = Arc<RwLock<HashMap<String, ProcEntry>>>;
@@ -224,12 +244,39 @@ async fn set_state(
     }
 }
 
+/// issue #129: build a `background: true` command's completion-notice
+/// content — process_id, exit_code, and the same inline-truncated output
+/// tail `shell`/`shell_poll` already show, plus `output_path` for the full
+/// capture. `exit_code: None` covers the adopted-orphan reaper, which can
+/// only observe that the process is gone, never how it exited.
+fn build_completion_content(process_id: &str, exit_code: Option<i32>, output_path: &Path) -> String {
+    let (raw, _) = read_lossy_tail(output_path, MAX_TRACKED_OUTPUT);
+    let (display, output_truncated) =
+        cap_output_for_display(&crate::str_utils::neutralize_spoofing(&raw), output_path);
+    format!(
+        "[系统通知] 后台命令已完成 (process_id: {}, exit_code: {})。\noutput_path: {}\n\noutput{}:\n{}",
+        process_id,
+        exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),
+        output_path.display(),
+        if output_truncated { "（已截断）" } else { "" },
+        display
+    )
+}
+
 /// Watch a process this daemon instance actually spawned (owns as a real
 /// child) to completion, updating the table when it exits.
+///
+/// `notify` is `Some` only for a `background: true` spawn (issue #129) —
+/// the timeout path (a foreground call that outran `timeout_secs`) reaches
+/// this same function but with `notify: None`, so it stays silent on exit.
+#[allow(clippy::too_many_arguments)]
 fn spawn_owned_reaper(
     registry: ShellRegistry,
     sessions_dir: Option<PathBuf>,
     process_id: String,
+    session_id: String,
+    output_path: PathBuf,
+    notify: Option<mpsc::Sender<ShellCompletion>>,
     mut child: tokio::process::Child,
 ) {
     tokio::spawn(async move {
@@ -243,6 +290,16 @@ fn spawn_owned_reaper(
             exit_code,
         )
         .await;
+        if let Some(tx) = notify {
+            let content = build_completion_content(&process_id, exit_code, &output_path);
+            let _ = tx
+                .send(ShellCompletion {
+                    session_id,
+                    process_id,
+                    content,
+                })
+                .await;
+        }
     });
 }
 
@@ -250,10 +307,17 @@ fn spawn_owned_reaper(
 /// parent (it was reparented to PID 1), so there's no `wait()` — poll
 /// `/proc` instead. The exit code of an orphan we didn't reap is not
 /// retrievable, so this only ever records that it finished, not how.
+///
+/// `notify` mirrors `spawn_owned_reaper`: `Some` only for a `background:
+/// true` spawn that survived the hot switch (issue #129).
+#[allow(clippy::too_many_arguments)]
 fn spawn_adopted_reaper(
     registry: ShellRegistry,
     sessions_dir: Option<PathBuf>,
     process_id: String,
+    session_id: String,
+    output_path: PathBuf,
+    notify: Option<mpsc::Sender<ShellCompletion>>,
     pid: i32,
     pid_start_ticks: Option<u64>,
 ) {
@@ -268,6 +332,16 @@ fn spawn_adopted_reaper(
                     None,
                 )
                 .await;
+                if let Some(tx) = notify {
+                    let content = build_completion_content(&process_id, None, &output_path);
+                    let _ = tx
+                        .send(ShellCompletion {
+                            session_id,
+                            process_id,
+                            content,
+                        })
+                        .await;
+                }
                 break;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -295,6 +369,7 @@ pub async fn adopt_after_restart(
     sessions_dir: &Path,
     registry: &ShellRegistry,
     hot_switch: bool,
+    notice_tx: Option<mpsc::Sender<ShellCompletion>>,
 ) {
     let Ok(session_dirs) = std::fs::read_dir(sessions_dir) else {
         return;
@@ -334,6 +409,9 @@ pub async fn adopt_after_restart(
                     registry.clone(),
                     Some(sessions_dir.to_path_buf()),
                     entry.process_id.clone(),
+                    entry.session_id.clone(),
+                    PathBuf::from(&entry.output_path),
+                    entry.notify_on_exit.then(|| notice_tx.clone()).flatten(),
                     entry.pid,
                     entry.pid_start_ticks,
                 );
@@ -450,6 +528,9 @@ pub fn latest_entry_summary(sessions_dir: &Path, session_id: &str) -> Option<Str
 pub struct ShellTool {
     registry: ShellRegistry,
     sessions_dir: Option<PathBuf>,
+    /// issue #129: where `background: true` completions are reported.
+    /// `None` for bare CLI usage / tests — no orchestrator to wake.
+    notice_tx: Option<mpsc::Sender<ShellCompletion>>,
 }
 
 impl Default for ShellTool {
@@ -463,6 +544,18 @@ impl ShellTool {
         Self {
             registry: Arc::new(RwLock::new(HashMap::new())),
             sessions_dir,
+            notice_tx: None,
+        }
+    }
+
+    pub fn new_with_notice_sender(
+        sessions_dir: Option<PathBuf>,
+        notice_tx: mpsc::Sender<ShellCompletion>,
+    ) -> Self {
+        Self {
+            registry: Arc::new(RwLock::new(HashMap::new())),
+            sessions_dir,
+            notice_tx: Some(notice_tx),
         }
     }
 
@@ -476,11 +569,16 @@ impl ShellTool {
 
     /// Spawn `command`, register it, and start the reaper that watches it to
     /// completion. Never kills anything — that's `shell_kill`'s job.
+    ///
+    /// `background` (issue #129) gates the completion notice: only an
+    /// explicit `background: true` call arms one, never the plain
+    /// `timeout_secs` overrun path (same reaper, different call site).
     async fn spawn_tracked(
         &self,
         command: &str,
         workdir: Option<&str>,
         session_id: &str,
+        background: bool,
     ) -> anyhow::Result<String> {
         let process_id = format!("sh_{}", uuid::Uuid::new_v4().simple());
 
@@ -529,6 +627,7 @@ impl ShellTool {
             output_path: output_path.to_string_lossy().to_string(),
             state: "running".to_string(),
             exit_code: None,
+            notify_on_exit: background,
         };
         write_entry_disk(self.sessions_dir.as_deref(), &entry);
         self.registry.write().await.insert(process_id.clone(), entry);
@@ -537,6 +636,9 @@ impl ShellTool {
             self.registry.clone(),
             self.sessions_dir.clone(),
             process_id.clone(),
+            session_id.to_string(),
+            output_path,
+            background.then(|| self.notice_tx.clone()).flatten(),
             child,
         );
 
@@ -562,8 +664,10 @@ impl Tool for ShellTool {
          a process_id plus whatever output has been produced so far — use \
          shell_poll to keep checking it and shell_kill to terminate it. \
          Set `background: true` to skip waiting entirely and get the process_id \
-         immediately. Large output (>30K chars) is truncated: the first 30K is \
-         returned inline and the full output is available via full_output_path."
+         immediately — you'll be notified automatically when it finishes (no need \
+         to poll); shell_poll still works if you want to check sooner. Large output \
+         (>30K chars) is truncated: the first 30K is returned inline and the full \
+         output is available via full_output_path."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -599,7 +703,10 @@ impl Tool for ShellTool {
         let workdir = args["workdir"].as_str();
         let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(120).min(300);
 
-        let process_id = match self.spawn_tracked(command, workdir, &session.id).await {
+        let process_id = match self
+            .spawn_tracked(command, workdir, &session.id, background)
+            .await
+        {
             Ok(id) => id,
             Err(e) => {
                 return Ok(ToolResult {
@@ -972,6 +1079,7 @@ mod tests {
             output_path: "/tmp/does-not-matter".to_string(),
             state: state.to_string(),
             exit_code: None,
+            notify_on_exit: false,
         }
     }
 
@@ -1027,7 +1135,7 @@ mod tests {
         write_entry_disk(Some(tmp.path()), &entry);
 
         let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
-        adopt_after_restart(tmp.path(), &registry, false).await;
+        adopt_after_restart(tmp.path(), &registry, false, None).await;
 
         let map = registry.read().await;
         let got = map.get(&entry.process_id).expect("entry adopted into registry");
@@ -1042,7 +1150,7 @@ mod tests {
         write_entry_disk(Some(tmp.path()), &entry);
 
         let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
-        adopt_after_restart(tmp.path(), &registry, true).await;
+        adopt_after_restart(tmp.path(), &registry, true, None).await;
 
         let map = registry.read().await;
         let got = map.get(&entry.process_id).expect("entry adopted into registry");
@@ -1057,7 +1165,7 @@ mod tests {
         write_entry_disk(Some(tmp.path()), &entry);
 
         let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
-        adopt_after_restart(tmp.path(), &registry, false).await;
+        adopt_after_restart(tmp.path(), &registry, false, None).await;
 
         // Not touched — stays absent from the freshly-built registry since
         // only `running` entries get inserted during adoption.
@@ -1069,6 +1177,47 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(entry_json_path(&pdir, &entry.process_id)).unwrap())
                 .unwrap();
         assert_eq!(on_disk.state, "exited");
+    }
+
+    /// issue #129: a `background: true` process still running across a hot
+    /// switch keeps its notice armed — `adopt_after_restart` must thread
+    /// `notify_on_exit` (persisted on the entry) and the notice sender into
+    /// `spawn_adopted_reaper` so the eventual exit still wakes the session.
+    /// (Adopted processes were never our child, so `exit_code` is
+    /// unobservable — `None`/`null`, unlike the owned-reaper path.)
+    #[tokio::test]
+    async fn adopted_background_process_sends_notice_on_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 0.2")
+            .spawn()
+            .expect("spawn real child for adoption test");
+        let pid = child.id().expect("child has a pid") as i32;
+
+        let mut entry = test_entry("running");
+        entry.pid = pid;
+        entry.pid_start_ticks = pid_start_ticks(pid);
+        entry.notify_on_exit = true;
+        entry.output_path = tmp.path().join("out.txt").to_string_lossy().to_string();
+        std::fs::write(&entry.output_path, b"").unwrap();
+        write_entry_disk(Some(tmp.path()), &entry);
+
+        let (tx, mut rx) = mpsc::channel::<ShellCompletion>(8);
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        adopt_after_restart(tmp.path(), &registry, true, Some(tx)).await;
+
+        // Reap the real child ourselves too so the test doesn't leak a
+        // zombie — the adopted reaper only polls /proc, it never wait()s.
+        let _ = child.wait().await;
+
+        let notice = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("completion notice must arrive for an adopted background process")
+            .expect("channel not closed");
+        assert_eq!(notice.session_id, entry.session_id);
+        assert_eq!(notice.process_id, entry.process_id);
+        assert!(notice.content.contains("exit_code: null"));
     }
 
     #[tokio::test]
@@ -1140,6 +1289,96 @@ mod tests {
             assert!(tokio::time::Instant::now() < deadline, "process never completed — was it killed?");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// issue #129: a plain (non-background) call that merely outran
+    /// `timeout_secs` goes through the exact same reaper as a `background:
+    /// true` spawn — it must NOT get a completion notice once it finally
+    /// exits, only the explicit background path should.
+    #[tokio::test]
+    async fn timeout_path_sends_no_completion_notice() {
+        let (tx, mut rx) = mpsc::channel::<ShellCompletion>(8);
+        let tool = ShellTool::new_with_notice_sender(None, tx);
+        let session = crate::agents::session::Session::new("s1".to_string());
+        let result = tool
+            .execute(
+                json!({ "command": "sleep 1 && echo done", "timeout_secs": 0 }),
+                &session,
+            )
+            .await
+            .unwrap();
+        assert!(result.output.contains("state=running"));
+
+        // Give the command time to actually finish (past the 1s sleep).
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "timeout path must never send a completion notice"
+        );
+    }
+
+    /// issue #129: `background: true` must get a completion notice once the
+    /// process exits, carrying process_id, exit_code, and an output tail.
+    #[tokio::test]
+    async fn background_completion_sends_notice_with_exit_code_and_output() {
+        let (tx, mut rx) = mpsc::channel::<ShellCompletion>(8);
+        let tool = ShellTool::new_with_notice_sender(None, tx);
+        let session = crate::agents::session::Session::new("s1".to_string());
+        let result = tool
+            .execute(
+                json!({ "command": "echo hello-from-bg", "background": true }),
+                &session,
+            )
+            .await
+            .unwrap();
+        let process_id = result
+            .output
+            .lines()
+            .find_map(|l| l.strip_prefix("process_id="))
+            .expect("process_id present")
+            .to_string();
+
+        let notice = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("completion notice must arrive")
+            .expect("channel not closed");
+        assert_eq!(notice.session_id, "s1");
+        assert_eq!(notice.process_id, process_id);
+        assert!(notice.content.contains(&process_id));
+        assert!(notice.content.contains("exit_code: 0"));
+        assert!(notice.content.contains("hello-from-bg"));
+    }
+
+    /// issue #129: multiple background completions from the same session
+    /// each arrive as their own notice on the channel — coalescing them into
+    /// one turn is the orchestrator's job (drain_delegation_notices), not
+    /// this tool's; this only proves neither completion is dropped or
+    /// merged away at the source.
+    #[tokio::test]
+    async fn multiple_background_completions_all_arrive() {
+        let (tx, mut rx) = mpsc::channel::<ShellCompletion>(8);
+        let tool = ShellTool::new_with_notice_sender(None, tx);
+        let session = crate::agents::session::Session::new("s1".to_string());
+        for i in 0..3 {
+            tool.execute(
+                json!({ "command": format!("echo run-{i}"), "background": true }),
+                &session,
+            )
+            .await
+            .unwrap();
+        }
+
+        let mut seen = 0;
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("completion notice must arrive")
+                .expect("channel not closed");
+            seen += 1;
+        }
+        assert_eq!(seen, 3);
     }
 
     #[tokio::test]
@@ -1255,6 +1494,7 @@ mod tests {
             output_path: "/tmp/does-not-matter".to_string(),
             state: "running".to_string(),
             exit_code: None,
+            notify_on_exit: false,
         }
     }
 
