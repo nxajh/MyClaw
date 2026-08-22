@@ -677,7 +677,7 @@ impl Tool for ShellTool {
                 "command": { "type": "string", "description": "The shell command to execute." },
                 "timeout_secs": { "type": "integer", "description": "Seconds to wait for completion before returning (default 120, max 300). The command keeps running past this — it is not killed on timeout." },
                 "workdir": { "type": "string", "description": "Working directory (default: current)." },
-                "background": { "type": "boolean", "description": "If true, return a process_id immediately instead of waiting. Use shell_poll to check status and collect output." }
+                "background": { "type": "boolean", "description": "If true, return a process_id immediately instead of waiting. You'll be notified automatically when it finishes; shell_poll still works if you want to check sooner." }
             },
             "required": ["command"]
         })
