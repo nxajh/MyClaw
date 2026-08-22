@@ -38,13 +38,14 @@ fn today(timezone_offset: i32) -> String {
 /// draft names and persists today's date so it won't fire again until
 /// tomorrow. Returns `None` otherwise — including on any I/O error, since
 /// this is a best-effort nudge that must never block or fail a turn.
+///
+/// This is called on every turn (`session_context.rs`/`agent.rs`), so the
+/// cheap once-a-day throttle check runs *before* the full skills-directory
+/// scan (issue #127) — a re-parse of every local SKILL.md, every turn,
+/// regardless of whether today's reminder already fired, was pure waste
+/// (and re-triggers `parse_skill_file`'s deprecation WARNs on every turn
+/// for any not-yet-migrated skill).
 pub fn check_and_arm(base_dir: &Path, timezone_offset: i32) -> Option<Vec<String>> {
-    let skills_dir = base_dir.join("skills");
-    let drafts = crate::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
-    if drafts.len() < THRESHOLD {
-        return None;
-    }
-
     let today = today(timezone_offset);
     let path = state_path(base_dir);
     let already_fired_today = std::fs::read_to_string(&path)
@@ -53,6 +54,12 @@ pub fn check_and_arm(base_dir: &Path, timezone_offset: i32) -> Option<Vec<String
         .and_then(|s| s.last_reminded_date)
         .is_some_and(|d| d == today);
     if already_fired_today {
+        return None;
+    }
+
+    let skills_dir = base_dir.join("skills");
+    let drafts = crate::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
+    if drafts.len() < THRESHOLD {
         return None;
     }
 
@@ -106,6 +113,30 @@ mod tests {
         // still (more than) big enough.
         let second = check_and_arm(base.path(), 0);
         assert!(second.is_none());
+    }
+
+    /// issue #127: on an already-throttled-today call, `check_and_arm`
+    /// must return `None` without needing the skills directory to exist at
+    /// all — a regression guard for the reordered throttle-before-scan
+    /// path (previously the (missing) directory would have been scanned,
+    /// harmlessly finding zero drafts either way, so this doesn't
+    /// distinguish the two orderings by itself; it does guard against the
+    /// throttle check ever being made to depend on the skills directory).
+    #[test]
+    fn throttled_call_does_not_require_skills_dir_to_exist() {
+        let base = tempfile::tempdir().unwrap();
+        // No `skills/` directory created at all.
+        std::fs::write(
+            state_path(base.path()),
+            serde_json::to_string(&ReminderState {
+                last_reminded_date: Some(today(0)),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(check_and_arm(base.path(), 0).is_none());
+        assert!(!base.path().join("skills").exists());
     }
 
     #[test]
