@@ -67,6 +67,14 @@ pub enum ErrorCategory {
     PayloadTooLarge,
     /// Request format error (400 — invalid schema, tool format, etc.).
     FormatError,
+    /// Provider-side content policy rejection (400 — e.g. GLM/Zhipu
+    /// `data_inspection_failed`, OpenAI-style `content_filter`). Distinct
+    /// from [`Self::FormatError`]: the request was well-formed, the
+    /// *content* was refused by that specific provider's review — a
+    /// provider-specific judgment call, not a client bug (issue #136: the
+    /// same input sailed through a different model minutes later). Treated
+    /// as fallback-eligible so routing switches models instead of aborting.
+    ContentPolicy,
     /// A stream reported `finish_reason=tool_calls` but no tool-call event
     /// could be parsed from it (issue #91: an SSE chunk carrying tool-call
     /// deltas failed JSON parsing). Deliberately **not** fallback-eligible:
@@ -90,6 +98,7 @@ impl fmt::Display for ErrorCategory {
             Self::ContextOverflow => write!(f, "ContextOverflow"),
             Self::PayloadTooLarge => write!(f, "PayloadTooLarge"),
             Self::FormatError => write!(f, "FormatError"),
+            Self::ContentPolicy => write!(f, "ContentPolicy"),
             Self::ToolCallLost => write!(f, "ToolCallLost"),
         }
     }
@@ -124,6 +133,9 @@ pub enum FailoverReason {
     ModelNotFound,
     /// Bad request (400) — abort or strip + retry.
     FormatError,
+    /// Provider-side content policy rejection — failover, not abort (see
+    /// [`ErrorCategory::ContentPolicy`]).
+    ContentPolicy,
     /// Stream reported a tool call but none could be parsed — abort, don't
     /// fallback or retry (see [`ErrorCategory::ToolCallLost`]).
     ToolCallLost,
@@ -145,6 +157,7 @@ impl From<ErrorCategory> for FailoverReason {
             ErrorCategory::PayloadTooLarge => Self::PayloadTooLarge,
             ErrorCategory::ModelNotFound => Self::ModelNotFound,
             ErrorCategory::FormatError => Self::FormatError,
+            ErrorCategory::ContentPolicy => Self::ContentPolicy,
             ErrorCategory::ToolCallLost => Self::ToolCallLost,
         }
     }
@@ -264,6 +277,7 @@ impl ClassifiedError {
             FailoverReason::PayloadTooLarge => ErrorCategory::PayloadTooLarge,
             FailoverReason::ModelNotFound => ErrorCategory::ModelNotFound,
             FailoverReason::FormatError => ErrorCategory::FormatError,
+            FailoverReason::ContentPolicy => ErrorCategory::ContentPolicy,
             FailoverReason::ToolCallLost => ErrorCategory::ToolCallLost,
             FailoverReason::Unknown => ErrorCategory::ServerError,
         };
@@ -366,6 +380,7 @@ impl ClassifiedError {
                 | ErrorCategory::Overloaded
                 | ErrorCategory::ServerError
                 | ErrorCategory::Timeout
+                | ErrorCategory::ContentPolicy
         );
         let cooldown = hints.cooldown;
 
@@ -452,6 +467,16 @@ fn recovery_hints_for(category: &ErrorCategory, retry_after: Option<Duration>) -
             cooldown: None,
             report: true,
         },
+        ErrorCategory::ContentPolicy => RecoveryHints {
+            // Same-model retry never helps (the provider will reject the
+            // same content again) — `retry: true` here means "the routing
+            // chain may continue", same semantics as RateLimit/Overloaded;
+            // `should_same_model_retry()` doesn't list ContentPolicy so no
+            // same-model sleep actually happens.
+            retry: true,
+            cooldown: None,
+            report: true,
+        },
         ErrorCategory::ToolCallLost => RecoveryHints {
             retry: false,
             cooldown: None,
@@ -516,6 +541,15 @@ fn classify_provider(provider: &str, status: u16, body: &str) -> Option<ErrorCat
             if body.contains("context_length_exceeded") {
                 return Some(ErrorCategory::ContextOverflow);
             }
+            // Content policy rejection (issue #136): GLM/Zhipu's
+            // `data_inspection_failed` is a *string* business code, not one
+            // of the numeric ones `body_contains_code` checks — a plain
+            // substring match, mirroring `is_billing_quota_body`. Also
+            // covers OpenAI-style `content_filter`/`content_policy_violation`
+            // signals, which fail the same way regardless of vendor.
+            if is_content_policy_body(&bl) {
+                return Some(ErrorCategory::ContentPolicy);
+            }
             // Other 400 → None (caller falls back to FormatError)
             None
         }
@@ -531,6 +565,16 @@ fn is_billing_quota_body(body_lower: &str) -> bool {
         || body_lower.contains("quota_exceeded")
         || body_lower.contains("billing_not_active")
         || body_lower.contains("exceeded_current_quota")
+}
+
+/// Body keywords that mean the provider's own content review rejected the
+/// request (issue #136) — GLM/Zhipu `data_inspection_failed` plus the
+/// OpenAI-style equivalents, which show up as string business codes rather
+/// than the numeric ones `body_contains_code` handles.
+fn is_content_policy_body(body_lower: &str) -> bool {
+    body_lower.contains("data_inspection_failed")
+        || body_lower.contains("content_policy_violation")
+        || body_lower.contains("content_filter")
 }
 
 /// Check whether `body` contains a JSON `"code": <n>` field (with or without
@@ -798,6 +842,42 @@ mod tests {
         let body = r#"{"error":{"message":"context_length_exceeded"}}"#;
         let err = ClassifiedError::classify("openai", 400, body);
         assert_eq!(err.category, ErrorCategory::ContextOverflow);
+    }
+
+    /// Issue #136: GLM/Zhipu content-policy rejection is a *string* business
+    /// code (`data_inspection_failed`), not one of the numeric codes
+    /// `body_contains_code` checks — it must not fall through to the
+    /// FormatError default, and it must be fallback-eligible (the same
+    /// content sailed through a different model in the real incident).
+    #[test]
+    fn layer2_glm_data_inspection_failed_is_content_policy() {
+        let body = r#"{"error":{"code":"data_inspection_failed","param":null,"message":"Input text data may contain inappropriate content.","type":"data_inspection_failed"}}"#;
+        let err = ClassifiedError::classify("glm-5.2", 400, body);
+        assert_eq!(err.category, ErrorCategory::ContentPolicy);
+        assert!(err.should_fallback, "must failover to another model, not abort");
+        assert!(
+            !err.should_same_model_retry(),
+            "same-model retry would just hit the same rejection again"
+        );
+    }
+
+    /// The classification must not depend on the provider name containing
+    /// "glm"/"zhipu" — the business code itself is the signal.
+    #[test]
+    fn layer2_data_inspection_failed_without_glm_provider_name() {
+        let body = r#"{"error":{"code":"data_inspection_failed","message":"..."}}"#;
+        let err = ClassifiedError::classify("", 400, body);
+        assert_eq!(err.category, ErrorCategory::ContentPolicy);
+    }
+
+    /// Optional generalization (issue #136): OpenAI-style content-policy
+    /// signals get the same treatment.
+    #[test]
+    fn layer2_openai_style_content_policy_violation() {
+        let body = r#"{"error":{"type":"content_policy_violation","message":"..."}}"#;
+        let err = ClassifiedError::classify("openai", 400, body);
+        assert_eq!(err.category, ErrorCategory::ContentPolicy);
+        assert!(err.should_fallback);
     }
 
     #[test]
