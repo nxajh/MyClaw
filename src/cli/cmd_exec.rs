@@ -21,7 +21,7 @@ pub async fn run(
     let registry_arc: Arc<dyn myclaw::ProviderRegistry> = Arc::new(registry);
 
     let mut tools = myclaw::ToolRegistry::new();
-    let (builtin, _shell_registry) = myclaw::tools::builtin_tools(None, None);
+    let (builtin, _shell_registry, _shell_tool) = myclaw::tools::builtin_tools(None, None);
     for t in builtin {
         tools.register(t);
     }

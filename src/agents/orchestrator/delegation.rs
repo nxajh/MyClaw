@@ -44,13 +44,18 @@ use crate::channels::ChannelInboundMessage;
 /// the model may legally end the turn (yield or natural EndTurn) and the
 /// completion arrives as the next message. "绝不轮询" borrowed verbatim
 /// from openclaw `system-prompt.ts` L124 ("never poll").
-const SILENCE_GUIDANCE: &str = "[系统提示] 本轮为中间恢复轮：任务尚未全部完成，你的本轮输出将作为进度说明展示给用户。你可以继续处理其他任务；若需要等待子代理结果，请调用 sessions_yield 结束当前轮——子代理完成时会自动唤醒你并把结果作为下一条消息注入。绝不轮询（不要反复查询子代理状态）。";
+/// issue #140: wording generalized from "子代理结果" to "子代理/后台任务结果"
+/// — `has_pending_async_work()` (checked below) now also covers armed
+/// shell background processes, so this guidance fires for shell-only
+/// pending too, not just sub-agent delegations.
+const SILENCE_GUIDANCE: &str = "[系统提示] 本轮为中间恢复轮：任务尚未全部完成，你的本轮输出将作为进度说明展示给用户。你可以继续处理其他任务；若需要等待子代理/后台任务结果，请调用 sessions_yield 结束当前轮——完成时会自动唤醒你并把结果作为下一条消息注入。绝不轮询（不要反复查询状态）。";
 
 /// Append the silence guidance when the resume turn is not final — the
-/// session still has pending delegations, so this turn's output is delivered
+/// session still has pending async work (delegations and/or shell
+/// background processes, issue #140), so this turn's output is delivered
 /// as a progress message, not the end of the turn.
 fn maybe_append_silence_guidance(sctx: &SessionContext, content: &mut String) {
-    if sctx.has_pending_delegations() {
+    if sctx.has_pending_async_work() {
         content.push_str("\n\n");
         content.push_str(SILENCE_GUIDANCE);
     }
@@ -311,25 +316,79 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     .await;
 }
 
-/// Route a `background: true` shell command's completion (issue #129) into
-/// the session that spawned it. Reuses `route_notice` wholesale — same
-/// persistence (`completion_queue`, at-least-once across a restart), same
-/// batching of concurrent completions into one turn (`drain_delegation_notices`)
-/// — but skips `wake`'s sub-agent suspension bookkeeping entirely: a shell
-/// command has no `sub_session_id` of its own and no `record_terminal` entry
-/// to collect, so `NoticeMeta.status` is `None` (mirrors how `Message`
-/// events, the other non-terminal notice kind, are routed). `process_id`
-/// fills the `sub_session_id` slot in the persisted entry purely as an
-/// opaque id — nothing downstream (recovery, dedup) treats it as an actual
-/// sub-session.
+/// Route a shell command's completion (issue #129) into the session that
+/// spawned it. Reuses `route_notice` wholesale — same persistence
+/// (`completion_queue`, at-least-once across a restart), same batching of
+/// concurrent completions into one turn (`drain_delegation_notices`).
+///
+/// issue #140: also mirrors `wake`'s suspension bookkeeping — `process_id`
+/// fills the `sub_session_id` slot in `record_terminal`/`TurnSuspension`
+/// exactly as it already did in the persisted `completion_queue` entry
+/// (nothing downstream treats it as an actual sub-session, just an opaque
+/// id). This is what makes `has_pending_async_work()` (and therefore
+/// silenced/fold/drain/`set_preview`) automatically cover shell background
+/// work too, once `ShellTool::register_pending` has called `add_pending_task`
+/// for it — the two sides of the same suspension the shell tool call itself
+/// registered into.
+///
+/// Unlike `wake`, a `NoSuspension` result does NOT drop the notice: a shell
+/// background process can run far longer than a delegation's bounded
+/// timeout, so by completion time the session's `SessionContext` may have
+/// been reloaded (RFC §三.A reload semantics) since `register_pending` ran —
+/// a legitimate race, not a bug. Falling through preserves #129's original
+/// guarantee (every notify-armed process gets a notice) for that case; it
+/// only loses the pending-suspension treatment for this one notice.
 pub(super) async fn route_shell_completion(
     ctx: &OrchestratorCtx,
     sc: crate::tools::shell::ShellCompletion,
 ) {
     let synthetic_id = format!("shell:{}", sc.process_id);
+    // issue #140: SubStatus only distinguishes Completed/Failed/TimedOut —
+    // a shell process's exit_code collapses onto the first two (there's no
+    // shell-side equivalent of a sub-agent wall-clock timeout kill; a
+    // foreground call that outran timeout_secs was NOT killed, so it always
+    // eventually exits one way or the other).
+    //
+    // `exit_code: None` (review finding on #142, xiaoer-bot) is the adopted-
+    // orphan reaper's case — we aren't its real parent, so we can only
+    // observe that it's gone, never how it exited (see `spawn_adopted_reaper`
+    // / `build_completion_content`'s "exit_code: null"). Mapping that to
+    // Failed contradicted the notice's own content ("后台命令已完成") —
+    // self-contradictory metadata (status says failed, text says completed).
+    // Completed is the better default: the process DID reach a terminal
+    // state, we just can't say how. `Some(n) if n != 0` stays Failed — that
+    // one's unambiguous.
+    let status = match sc.exit_code {
+        Some(0) | None => SubStatus::Completed,
+        Some(_) => SubStatus::Failed,
+    };
+
+    let sctx = ctx
+        .sessions
+        .registered_context_by_session_id(&sc.session_id)
+        .or_else(|| ctx.sessions.load_context_by_session_id(&sc.session_id));
+    if let Some(sctx) = &sctx {
+        match sctx.record_terminal(sc.process_id.clone(), status, sc.content.clone(), 0) {
+            TerminalRecord::Recorded(_) => {}
+            TerminalRecord::Duplicate => {
+                tracing::debug!(
+                    process_id = %sc.process_id,
+                    "shell completion already recorded, skipping duplicate notice"
+                );
+                return;
+            }
+            TerminalRecord::NoSuspension => {
+                tracing::debug!(
+                    process_id = %sc.process_id,
+                    "shell completion has no suspension to collect (session reloaded while running, or registration never reached it) — routing as an ordinary notice"
+                );
+            }
+        }
+    }
+
     let notice_meta = NoticeMeta {
         sub_session_id: sc.process_id,
-        status: None,
+        status: Some(status),
         sent_message_count: 0,
     };
     route_notice(ctx, &sc.session_id, sc.content, synthetic_id, Some(notice_meta)).await;
@@ -367,7 +426,7 @@ pub(super) async fn route_notice(
     //
     // Race fix (2026-08-10, E2E 恢复轮1): the silence INTENT is captured HERE
     // (wake/route time — same sync section right after `record_terminal`, so
-    // `has_pending_delegations()` equals `!snap.pending.is_empty()` of the
+    // `has_pending_async_work()` equals `!snap.pending.is_empty()` of the
     // just-collected terminal), NOT at turn start: a queued notice may run
     // after later terminal events cleared `pending`, and the live snapshot
     // would wrongly mark the intermediate notice loud (it streamed as a
@@ -380,7 +439,7 @@ pub(super) async fn route_notice(
     if let Some(sctx) = &sctx_opt {
         maybe_append_silence_guidance(sctx, &mut content);
     }
-    let silenced_override = sctx_opt.as_ref().map(|s| s.has_pending_delegations());
+    let silenced_override = sctx_opt.as_ref().map(|s| s.has_pending_async_work());
 
     let routing_key = &session.owner;
     let is_active = ctx
@@ -642,7 +701,7 @@ async fn dispatch_notice_batch(
     // (route_notice), but delivering them together means only the state
     // AFTER the whole batch matters — recompute fresh rather than reuse any
     // individual notice's now-possibly-stale snapshot.
-    let silenced_override = Some(sctx.has_pending_delegations());
+    let silenced_override = Some(sctx.has_pending_async_work());
 
     let (batch_id, extra_notice_ids) = split_batch_ids(&batch);
     let combined_content = batch
@@ -837,12 +896,14 @@ mod tests {
         assert_eq!(e.delivery_state, crate::storage::DeliveryState::Pending);
     }
 
-    /// issue #129: `route_shell_completion` reuses `route_notice` wholesale
-    /// for a shell background completion — no sub-agent suspension involved
-    /// (plain active session, no `add_pending_task`), yet the notice still
-    /// persists to `completion_queue` the same way a delegation notice does,
-    /// with the shell command's `process_id` riding in the `sub_session_id`
-    /// slot as an opaque id (not a real sub-session).
+    /// issue #129/#140: `route_shell_completion` reuses `route_notice`
+    /// wholesale for a shell background completion — this session never
+    /// called `add_pending_task` for this process_id, so `record_terminal`
+    /// resolves `NoSuspension` and the notice still routes/persists as an
+    /// ordinary notice (falls through, does not drop it — see the function's
+    /// doc comment). Persists to `completion_queue` the same way a
+    /// delegation notice does, with the shell command's `process_id` riding
+    /// in the `sub_session_id` slot as an opaque id (not a real sub-session).
     #[tokio::test]
     async fn route_shell_completion_persists_before_enqueue() {
         let tmp = tempfile::tempdir().unwrap();
@@ -862,6 +923,7 @@ mod tests {
                 process_id: "sh_abc123".to_string(),
                 content: "[系统通知] 后台命令已完成 (process_id: sh_abc123, exit_code: 0)。"
                     .to_string(),
+                exit_code: Some(0),
             },
         )
         .await;
@@ -872,8 +934,114 @@ mod tests {
         assert_eq!(e.id, "shell:sh_abc123");
         assert_eq!(e.sub_session_id, "sh_abc123");
         assert_eq!(e.parent_session_id, sid);
-        assert_eq!(e.status, None);
+        assert_eq!(e.status, Some("completed".to_string()));
         assert!(e.content.contains("sh_abc123"));
+    }
+
+    /// issue #142 review (xiaoer-bot): an adopted orphan's completion
+    /// carries `exit_code: None` (we aren't its real parent, so the real
+    /// exit code is unobservable) — this must map to Completed, not Failed,
+    /// or the persisted status contradicts the notice's own "已完成" content.
+    #[tokio::test]
+    async fn shell_completion_with_unknown_exit_code_maps_to_completed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+        );
+        let channel: Arc<dyn crate::channels::Channel> = MockChannel::new();
+        let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
+        ctx.completion_queue = Some(Arc::clone(&store));
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        let sid = sctx.session_id.clone();
+
+        route_shell_completion(
+            &ctx,
+            crate::tools::shell::ShellCompletion {
+                session_id: sid,
+                process_id: "sh_orphan".to_string(),
+                content: "[系统通知] 后台命令已完成 (process_id: sh_orphan, exit_code: null)。"
+                    .to_string(),
+                exit_code: None,
+            },
+        )
+        .await;
+
+        let pending = store.pending();
+        let e = pending.iter().find(|e| e.id == "shell:sh_orphan").unwrap();
+        assert_eq!(
+            e.status,
+            Some("completed".to_string()),
+            "unknown exit code must not contradict the notice's own 已完成 content"
+        );
+    }
+
+    /// issue #140: the core value of pending-unification — two shell
+    /// background processes registered as pending on the SAME session
+    /// (mirrors `ShellTool::register_pending`'s `add_pending_task` calls).
+    /// The first completion, with the second still pending, must route as a
+    /// SILENCED intermediate notice (wake-time intent captured synchronously
+    /// right after `record_terminal`, exactly like a delegation terminal
+    /// event); the second (last pending item) must be loud/final.
+    #[tokio::test]
+    async fn concurrent_shell_completions_silence_intermediate_notice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+        );
+        let channel: Arc<dyn crate::channels::Channel> = MockChannel::new();
+        let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
+        ctx.completion_queue = Some(Arc::clone(&store));
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        let sid = sctx.session_id.clone();
+        sctx.add_pending_task("sh_a".to_string());
+        sctx.add_pending_task("sh_b".to_string());
+
+        route_shell_completion(
+            &ctx,
+            crate::tools::shell::ShellCompletion {
+                session_id: sid.clone(),
+                process_id: "sh_a".to_string(),
+                content: "a done".to_string(),
+                exit_code: Some(0),
+            },
+        )
+        .await;
+
+        let after_a = store.pending();
+        let a_entry = after_a
+            .iter()
+            .find(|e| e.id == "shell:sh_a")
+            .expect("sh_a notice persisted");
+        assert_eq!(
+            a_entry.silenced_override,
+            Some(true),
+            "sh_b still pending — sh_a's notice must be silenced (intermediate)"
+        );
+        assert_eq!(sctx.suspension_snapshot().unwrap().pending, vec!["sh_b".to_string()]);
+
+        route_shell_completion(
+            &ctx,
+            crate::tools::shell::ShellCompletion {
+                session_id: sid,
+                process_id: "sh_b".to_string(),
+                content: "b done".to_string(),
+                exit_code: Some(1),
+            },
+        )
+        .await;
+
+        let after_b = store.pending();
+        let b_entry = after_b
+            .iter()
+            .find(|e| e.id == "shell:sh_b")
+            .expect("sh_b notice persisted");
+        assert_eq!(
+            b_entry.silenced_override,
+            Some(false),
+            "sh_b is the last pending item — its notice must be loud (final)"
+        );
+        assert_eq!(b_entry.status, Some("failed".to_string()));
+        assert!(sctx.suspension_snapshot().unwrap().pending.is_empty());
     }
 
     #[tokio::test]
@@ -1066,7 +1234,7 @@ mod tests {
         assert!(content.contains("将作为进度说明展示给用户"));
         assert!(content.contains("sessions_yield"));
         assert!(content.contains("结束当前轮"));
-        assert!(content.contains("子代理完成时会自动唤醒你并把结果作为下一条消息注入"));
+        assert!(content.contains("完成时会自动唤醒你并把结果作为下一条消息注入"));
         assert!(content.contains("绝不轮询"));
         assert!(!content.contains("不得输出最终结论"));
         assert!(!content.contains("不会终结"));
@@ -1114,10 +1282,10 @@ mod tests {
         sctx.add_pending_task("t2".to_string());
 
         // wake-1 (t1 terminal): record_terminal runs first, then route_notice
-        // derives the intent from `has_pending_delegations()` — t2 remains →
+        // derives the intent from `has_pending_async_work()` — t2 remains →
         // intermediate notice.
         let _ = sctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0);
-        let intent_t1 = Some(sctx.has_pending_delegations());
+        let intent_t1 = Some(sctx.has_pending_async_work());
         assert_eq!(intent_t1, Some(true));
 
         // Race: t2's terminal lands BEFORE wake-1's turn runs — live pending
@@ -1128,7 +1296,7 @@ mod tests {
         assert!(crate::agents::session_context::decide_silenced(intent_t1, live.clone()));
 
         // wake-2 (t2 terminal): final notice → loud summary.
-        let intent_t2 = Some(sctx.has_pending_delegations());
+        let intent_t2 = Some(sctx.has_pending_async_work());
         assert_eq!(intent_t2, Some(false));
         assert!(!crate::agents::session_context::decide_silenced(intent_t2, live));
     }

@@ -510,9 +510,10 @@ async fn build_tools(
     Arc<crate::tools::SendMessageTool>,
     Arc<crate::tools::FriendToolsCtx>,
     crate::tools::shell::ShellRegistry,
+    Arc<crate::tools::shell::ShellTool>,
 ) {
     let mut tools = ToolRegistry::new();
-    let (builtin, shell_registry) = crate::tools::builtin_tools(
+    let (builtin, shell_registry, shell_tool) = crate::tools::builtin_tools(
         Some(config.sessions_root()),
         Some(shell_notice_tx.clone()),
     );
@@ -646,7 +647,7 @@ async fn build_tools(
     }
 
     tracing::info!(tool_count = tools.tool_count(), "tool registry built");
-    (tools, task_boards, send_message_tool, friend_ctx, shell_registry)
+    (tools, task_boards, send_message_tool, friend_ctx, shell_registry, shell_tool)
 }
 
 /// Build SkillManager from SKILL.md files in the base dir (P1: `{base_dir}/skills`)
@@ -1172,7 +1173,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tokio::sync::mpsc::channel::<crate::tools::shell::ShellCompletion>(100);
 
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
-    let (mut tools, task_boards, send_message_tool, friend_ctx, shell_registry) = build_tools(
+    let (mut tools, task_boards, send_message_tool, friend_ctx, shell_registry, shell_tool) = build_tools(
         &mcp_manager,
         &skills_arc,
         &shared_scheduler,
@@ -1249,6 +1250,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             .with_agents(Arc::clone(&sub_agent_registry))
             .with_resolver(Arc::clone(&user_resolver)),
     );
+    // issue #140: ShellTool was built before SessionManager existed (same
+    // ordering constraint ClientChannel/DelegationCoordinator hit) — wire it
+    // in now so `shell`'s tool calls can register pending async work
+    // (`ShellTool::register_pending` → `SessionContext::add_pending_task`).
+    shell_tool.set_session_manager(Arc::clone(&session_manager));
 
     // ── Sub-agent delegator (conditional) ──────────────────────────────────────
 

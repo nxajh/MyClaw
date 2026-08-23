@@ -95,7 +95,7 @@ use std::sync::Arc;
 pub fn builtin_tools(
     sessions_dir: Option<std::path::PathBuf>,
     shell_notice_tx: Option<tokio::sync::mpsc::Sender<shell::ShellCompletion>>,
-) -> (Vec<Arc<dyn Tool>>, shell::ShellRegistry) {
+) -> (Vec<Arc<dyn Tool>>, shell::ShellRegistry, Arc<ShellTool>) {
     let shell = match shell_notice_tx {
         Some(tx) => ShellTool::new_with_notice_sender(sessions_dir, tx),
         None => ShellTool::new(sessions_dir),
@@ -103,9 +103,15 @@ pub fn builtin_tools(
     let shell_registry = shell.registry();
     let shell_poll = ShellPollTool::new(shell.registry(), shell.sessions_dir());
     let shell_kill = ShellKillTool::new(shell.registry());
+    // issue #140: keep a concrete handle so the caller can wire in the
+    // SessionManager once it exists (`ShellTool::set_session_manager`) —
+    // built before SessionManager in daemon.rs's composition order, same
+    // reason `ClientChannel`/`DelegationCoordinator` use a setter instead of
+    // a constructor param.
+    let shell = Arc::new(shell);
     let tools = vec![
         // Core tools
-        Arc::new(shell) as Arc<dyn Tool>,
+        Arc::clone(&shell) as Arc<dyn Tool>,
         Arc::new(shell_poll),
         Arc::new(shell_kill),
         Arc::new(FileReadTool::new()),
@@ -119,5 +125,5 @@ pub fn builtin_tools(
         // Utility tools
         Arc::new(CalculatorTool::new()),
     ];
-    (tools, shell_registry)
+    (tools, shell_registry, shell)
 }

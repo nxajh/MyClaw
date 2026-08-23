@@ -184,19 +184,26 @@ pub struct OrchestratorCtx {
 }
 
 impl OrchestratorCtx {
-    /// issue #131 (decision 8 only — NOT the full `has_pending_delegations`
-    /// → `has_pending_async_work` generalization from the issue's changelist
-    /// item 1, deliberately deferred, see PR description): this session's
-    /// currently-running tracked shell processes, newest first. Used only to
-    /// build the read-only background-work status reminder injected into a
-    /// user turn that interrupts pending async work — never for silenced/
-    /// fold/drain gating, which stays delegation-only for now. Those gates
-    /// are computed synchronously in the same critical section as
-    /// `record_terminal` specifically to avoid a wake-vs-turn-start race
-    /// (the 2026-08-10 E2E 恢复轮1 fix); wiring the shell registry (behind a
-    /// `tokio::sync::RwLock`, so necessarily `.await`) into that section
-    /// would reopen the same race for shell completions and needs its own
-    /// design pass.
+    /// issue #131 decision 8 / issue #140: this session's currently-running
+    /// tracked shell processes, newest first. Used only to build the
+    /// read-only background-work status reminder injected into a user turn
+    /// that interrupts pending async work — NOT for silenced/fold/drain
+    /// gating.
+    ///
+    /// Those gates are computed synchronously in the same critical section
+    /// as `record_terminal` (the 2026-08-10 E2E 恢复轮1 race fix), which
+    /// rules out reading this `tokio::sync::RwLock`-backed registry live
+    /// inside that section (would force an `.await` into a stretch that must
+    /// stay yield-free). issue #140 covers shell there a different way
+    /// instead — see `ShellTool::register_pending` /
+    /// `SessionContext::add_pending_task`: the shell tool registers itself
+    /// into the SAME `TurnSuspension.pending` list delegation uses, ahead of
+    /// time, from inside its own tool call (already running synchronously
+    /// within the turn that spawned it) — so `has_pending_async_work` covers
+    /// shell for free, with no new read inside the race-sensitive section at
+    /// all. This method stays a plain live registry read because the status
+    /// reminder has no race to avoid — it's informational, never gates
+    /// anything.
     pub async fn running_shell_processes(&self, session_id: &str) -> Vec<crate::tools::shell::ProcSummary> {
         let Some(registry) = &self.shell_registry else {
             return Vec::new();
