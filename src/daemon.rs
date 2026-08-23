@@ -1581,6 +1581,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         known_users: Arc::clone(&known_users),
         user_registry: Arc::clone(&user_registry),
         agent_runtime,
+        shell_registry: Some(shell_registry.clone()),
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────

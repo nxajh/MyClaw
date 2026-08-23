@@ -25,11 +25,26 @@ use crate::channels::{Channel, ChannelInboundMessage};
 /// racy (the E2E 恢复轮1 bug: an intermediate notice was misjudged as the
 /// final turn because `pending` was already empty when its turn ran, so the
 /// EndTurn→Continue mapping / ask_user disable / TTS+on_status suppression
-/// and the injected SILENCE_GUIDANCE disagreed with each other). User
-/// messages carry `None` → fall back to the live snapshot at turn start.
-/// `pub(crate)` so orchestrator tests can pin the wake-time semantics.
-pub(crate) fn decide_silenced(intent: Option<bool>, live: Option<TurnSuspension>) -> bool {
-    intent.unwrap_or_else(|| live.is_some_and(|s| !s.pending.is_empty()))
+/// and the injected SILENCE_GUIDANCE disagreed with each other).
+///
+/// issue #131 decision 3: real user messages carry `None` and are simply
+/// never silenced (`intent.unwrap_or(false)`), regardless of live pending
+/// state. Before #131 this defaulted to the live-snapshot check instead —
+/// safe only because the (now-removed) silent user-message queue guaranteed
+/// `pending` was empty by the time a queued message actually dispatched.
+/// Once a user message can dispatch immediately while background work is
+/// still pending (the whole point of removing the queue — an interrupt gets
+/// answered right away), falling back to the live snapshot would silence a
+/// genuine user turn: its reply would stream as commentary instead of a
+/// real answer, the turn would map EndTurn→Continue (never actually end),
+/// and `ask_user` would be disabled for it. "Silenced" is now exclusively an
+/// opt-in synthetic marker for delegation-notice-routed turns, which always
+/// pass `Some(bool)`; `live` is kept as a parameter only because callers
+/// still have a snapshot in hand, not because this function still uses it
+/// for `None`. `pub(crate)` so orchestrator tests can pin the wake-time
+/// semantics.
+pub(crate) fn decide_silenced(intent: Option<bool>, _live: Option<TurnSuspension>) -> bool {
+    intent.unwrap_or(false)
 }
 
 /// 方案 C (fix v2): semantic stop-reason for observability — a silenced
@@ -95,13 +110,6 @@ pub struct SessionContext {
     /// Mutex is held, so they cannot reach `session.persist` — this copy
     /// keeps the durable state writable on those paths.
     pub suspension_persist: Option<Arc<dyn PersistHook>>,
-    /// 单 preview (2026-08-12): user messages that arrived while the session
-    /// was suspended on async delegations — processed in order AFTER the
-    /// final resume turn completes (静默排队, user-confirmed 2026-08-12; no
-    /// ack is sent to the sender). Runtime-only: NOT persisted, a daemon
-    /// restart drops queued messages (RFC 排队段注明).
-    pub pending_user_messages:
-        std::sync::Mutex<std::collections::VecDeque<ChannelInboundMessage>>,
     /// Loaded UserProfile snapshot taken at SessionContext creation.
     /// Immutable for the lifetime of the context — per RFC §三.A reload
     /// semantics drop the SessionContext and let `SessionManager`
@@ -217,7 +225,6 @@ impl SessionContext {
             turn_lock: Arc::new(Mutex::new(())),
             turn_suspension: std::sync::Mutex::new(None),
             suspension_persist,
-            pending_user_messages: std::sync::Mutex::new(std::collections::VecDeque::new()),
             notice_turns_in_flight: AtomicUsize::new(0),
             delegation_notice_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -239,7 +246,6 @@ impl SessionContext {
             turn_lock: Arc::new(Mutex::new(())),
             turn_suspension: std::sync::Mutex::new(None),
             suspension_persist,
-            pending_user_messages: std::sync::Mutex::new(std::collections::VecDeque::new()),
             notice_turns_in_flight: AtomicUsize::new(0),
             delegation_notice_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -543,24 +549,6 @@ impl SessionContext {
             }
         }
         self.persist_suspension();
-    }
-
-    /// 单 preview (2026-08-12): enqueue a user message that arrived while
-    /// the session was suspended on async delegations (静默排队 — no ack).
-    /// Draining happens after a turn ends outside the suspension sequence.
-    pub fn enqueue_user_message(&self, msg: ChannelInboundMessage) {
-        self.pending_user_messages
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push_back(msg);
-    }
-
-    /// 单 preview (2026-08-12): pop the oldest queued user message, if any.
-    pub fn take_user_message(&self) -> Option<ChannelInboundMessage> {
-        self.pending_user_messages
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pop_front()
     }
 
     /// Run one turn end-to-end: acquire the turn lock, replay the
@@ -1896,15 +1884,23 @@ mod suspension_tests {
         assert!(!decide_silenced(Some(false), live_with_t2));
     }
 
+    /// issue #131 decision 3: a genuine user message (`silenced_override =
+    /// None`) is never silenced, regardless of live pending state — the
+    /// silent user-message queue that used to guarantee `pending` was empty
+    /// by dispatch time is gone, so a user interrupt must always get a real,
+    /// turn-ending answer rather than being folded into intermediate
+    /// commentary just because background work happens to still be pending.
     #[test]
-    fn decide_silenced_defaults_to_live_snapshot_for_user_messages() {
+    fn decide_silenced_never_silences_user_messages_even_with_live_pending() {
         let (ctx, _m) = make_ctx();
         // Not suspended → loud.
         assert!(!decide_silenced(None, ctx.suspension_snapshot()));
-        // Suspended with pending → silenced (user-message resume turn).
+        // Suspended with pending (background work still running) → still
+        // loud: this is the exact case the old live-snapshot fallback got
+        // wrong once queuing was removed.
         ctx.add_pending_task("t1".to_string());
-        assert!(decide_silenced(None, ctx.suspension_snapshot()));
-        // Suspended but fully collected → loud (final resume turn).
+        assert!(!decide_silenced(None, ctx.suspension_snapshot()));
+        // Suspended but fully collected → loud either way.
         ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0);
         assert!(!decide_silenced(None, ctx.suspension_snapshot()));
     }
@@ -1944,38 +1940,4 @@ mod suspension_tests {
         );
     }
 
-    // ── 架构修正 (RFC §3.7): 挂起期间用户消息排队 ─────────────────────────
-
-    fn queued_msg(text: &str) -> crate::channels::ChannelInboundMessage {
-        crate::channels::ChannelInboundMessage {
-            id: "q".to_string(),
-            sender: crate::channels::MessageSender::new("u1".to_string()),
-            receiver: crate::channels::MessageReceiver::new("u1".to_string()),
-            content: crate::channels::ChannelMessageContent::text(text.to_string()),
-            timestamp: 0,
-            interruption_scope_id: None,
-            silenced_override: None,
-            run_mode: Default::default(),
-        }
-    }
-
-    #[test]
-    fn user_message_queue_is_fifo_and_drains() {
-        let ctx = suspended();
-        ctx.enqueue_user_message(queued_msg("first"));
-        ctx.enqueue_user_message(queued_msg("second"));
-        assert_eq!(ctx.take_user_message().unwrap().content.text, "first");
-        assert_eq!(ctx.take_user_message().unwrap().content.text, "second");
-        assert!(ctx.take_user_message().is_none(), "queue drains to empty");
-    }
-
-    #[test]
-    fn user_message_queue_is_isolated_per_session() {
-        let (ctx_a, _m) = make_ctx();
-        let (ctx_b, _m) = make_ctx();
-        ctx_a.add_pending_task("t1".to_string());
-        ctx_a.enqueue_user_message(queued_msg("for a"));
-        assert!(ctx_b.take_user_message().is_none(), "queue is per-session");
-        assert_eq!(ctx_a.take_user_message().unwrap().content.text, "for a");
-    }
 }
