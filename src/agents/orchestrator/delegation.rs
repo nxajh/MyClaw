@@ -348,10 +348,19 @@ pub(super) async fn route_shell_completion(
     // shell-side equivalent of a sub-agent wall-clock timeout kill; a
     // foreground call that outran timeout_secs was NOT killed, so it always
     // eventually exits one way or the other).
-    let status = if sc.exit_code == Some(0) {
-        SubStatus::Completed
-    } else {
-        SubStatus::Failed
+    //
+    // `exit_code: None` (review finding on #142, xiaoer-bot) is the adopted-
+    // orphan reaper's case — we aren't its real parent, so we can only
+    // observe that it's gone, never how it exited (see `spawn_adopted_reaper`
+    // / `build_completion_content`'s "exit_code: null"). Mapping that to
+    // Failed contradicted the notice's own content ("后台命令已完成") —
+    // self-contradictory metadata (status says failed, text says completed).
+    // Completed is the better default: the process DID reach a terminal
+    // state, we just can't say how. `Some(n) if n != 0` stays Failed — that
+    // one's unambiguous.
+    let status = match sc.exit_code {
+        Some(0) | None => SubStatus::Completed,
+        Some(_) => SubStatus::Failed,
     };
 
     let sctx = ctx
@@ -927,6 +936,43 @@ mod tests {
         assert_eq!(e.parent_session_id, sid);
         assert_eq!(e.status, Some("completed".to_string()));
         assert!(e.content.contains("sh_abc123"));
+    }
+
+    /// issue #142 review (xiaoer-bot): an adopted orphan's completion
+    /// carries `exit_code: None` (we aren't its real parent, so the real
+    /// exit code is unobservable) — this must map to Completed, not Failed,
+    /// or the persisted status contradicts the notice's own "已完成" content.
+    #[tokio::test]
+    async fn shell_completion_with_unknown_exit_code_maps_to_completed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+        );
+        let channel: Arc<dyn crate::channels::Channel> = MockChannel::new();
+        let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
+        ctx.completion_queue = Some(Arc::clone(&store));
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        let sid = sctx.session_id.clone();
+
+        route_shell_completion(
+            &ctx,
+            crate::tools::shell::ShellCompletion {
+                session_id: sid,
+                process_id: "sh_orphan".to_string(),
+                content: "[系统通知] 后台命令已完成 (process_id: sh_orphan, exit_code: null)。"
+                    .to_string(),
+                exit_code: None,
+            },
+        )
+        .await;
+
+        let pending = store.pending();
+        let e = pending.iter().find(|e| e.id == "shell:sh_orphan").unwrap();
+        assert_eq!(
+            e.status,
+            Some("completed".to_string()),
+            "unknown exit code must not contradict the notice's own 已完成 content"
+        );
     }
 
     /// issue #140: the core value of pending-unification — two shell
