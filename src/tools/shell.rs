@@ -328,9 +328,19 @@ async fn mark_notify_on_exit(
 /// Render the terminal-state tool output shared by `execute()`'s normal
 /// completion path and its race-recovery path (an entry that turned out to
 /// already be terminal when `mark_notify_on_exit` looked).
+///
+/// issue #141: `success` reflects whether the TOOL did its job (spawned,
+/// tracked, captured output to a clean exit) — not whether the command's
+/// own exit code happened to be zero. A nonzero exit code is data about the
+/// command's result (`grep` no-match, `git diff --quiet` has changes, `gh
+/// pr checks` pending), not a tool malfunction; `state=`/`exit_code=` are
+/// the first two output lines specifically so the model can read that data
+/// itself. This aligns the foreground path with `shell_poll`, which has
+/// always treated reaching any terminal state as tool-success. `killed` /
+/// `lost_on_restart` stay `success: false` — those ARE abnormal
+/// terminations (the process didn't get to run to its own completion).
 fn terminal_result(entry: &ProcEntry, process_id: &str, display: &str, output_truncated: bool) -> ToolResult {
-    let exit_code = entry.exit_code.unwrap_or(-1);
-    let success = entry.state == "exited" && exit_code == 0;
+    let success = entry.state == "exited";
     let output = format!(
         "state={}\nexit_code={}\nprocess_id={}\n\noutput{}:\n{}",
         entry.state,
@@ -345,7 +355,7 @@ fn terminal_result(entry: &ProcEntry, process_id: &str, display: &str, output_tr
         error: if success {
             None
         } else {
-            Some(format!("exit code {}", exit_code))
+            Some(format!("process did not exit normally (state={})", entry.state))
         },
     }
 }
@@ -1464,6 +1474,56 @@ mod tests {
             .unwrap();
         assert!(result.success, "output: {}", result.output);
         assert!(result.output.contains("yes"));
+    }
+
+    /// issue #141: `terminal_result`'s `success` reflects whether the tool
+    /// did its job, not whether the command's own exit code was zero — a
+    /// nonzero exit code is data (`grep` no-match, `git diff --quiet` has
+    /// changes, `gh pr checks` pending), not a tool malfunction. Only a
+    /// non-`exited` terminal state (`lost_on_restart` — the daemon restarted
+    /// through a path that didn't preserve the child) is a real tool-level
+    /// failure. Tested directly against `terminal_result` rather than
+    /// through `execute()`: in practice `execute()` only ever calls it with
+    /// `state == "exited"` for the process it just spawned itself (a
+    /// `lost_on_restart` entry only arises from `adopt_after_restart`
+    /// recovering an OLD daemon instance's entries, never from a live
+    /// spawn-and-wait cycle within one `execute()` call).
+    #[test]
+    fn terminal_result_success_only_reflects_tool_state_not_exit_code() {
+        let mut exited_nonzero = test_entry("exited");
+        exited_nonzero.exit_code = Some(8);
+        let r = terminal_result(&exited_nonzero, "sh_x", "", false);
+        assert!(r.success, "a nonzero exit code must still be tool success");
+        assert!(r.error.is_none());
+
+        let mut exited_zero = test_entry("exited");
+        exited_zero.exit_code = Some(0);
+        let r2 = terminal_result(&exited_zero, "sh_x", "", false);
+        assert!(r2.success);
+
+        let lost = test_entry("lost_on_restart");
+        let r3 = terminal_result(&lost, "sh_x", "", false);
+        assert!(!r3.success, "a non-exited terminal state is a real tool failure");
+        assert!(r3.error.is_some());
+    }
+
+    /// issue #141: end-to-end through the real `execute()` path (not just
+    /// `terminal_result` in isolation) — this is what actually reaches
+    /// `agent.rs`'s `is_error`, which feeds the Telegram preview's `_failed_`
+    /// suffix, the model-facing `is_error` flag on the provider protocols,
+    /// and the skill-extraction turn-had-error gate.
+    #[tokio::test]
+    async fn nonzero_exit_code_is_tool_success_end_to_end() {
+        let tool = ShellTool::new(None);
+        let session = crate::agents::session::Session::new("s1".to_string());
+        let result = tool
+            .execute(json!({ "command": "exit 8", "timeout_secs": 5 }), &session)
+            .await
+            .unwrap();
+        assert!(result.success, "output: {}", result.output);
+        assert!(result.error.is_none());
+        assert!(result.output.contains("state=exited"));
+        assert!(result.output.contains("exit_code=8"));
     }
 
     #[tokio::test]
