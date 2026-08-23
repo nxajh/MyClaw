@@ -195,6 +195,59 @@ impl TaskBoards {
 }
 
 // ---------------------------------------------------------------------------
+// Unknown-task-id listing (issue #132, P1)
+// ---------------------------------------------------------------------------
+
+/// Cap on how many tasks a not-found error enumerates, and how much of each
+/// subject it previews — mirrors `shell.rs`'s `format_unknown_process_listing`
+/// (issue #130): a copied or hallucinated id gets a real, capped list to
+/// self-correct against instead of a bare "not found".
+const UNKNOWN_TASK_LISTING_CAP: usize = 20;
+const UNKNOWN_TASK_SUBJECT_PREVIEW_CHARS: usize = 60;
+
+/// Build the "here's what's actually on this board" listing appended to a
+/// task_create/task_update/task_delete not-found error. The board is already
+/// per-session (`TaskState` is loaded from that session's own `tasks.json`),
+/// so no session filtering is needed here, unlike the shell process table.
+/// Ids are shown in full (not a shortened tail) to match `task_list`'s own
+/// display convention — a listing in a different id format would be its own
+/// source of confusion.
+///
+/// Reviewer note (PR #133): capping over `state.tasks`' insertion order would
+/// keep the *oldest* tasks and drop the newest ones once a board exceeds the
+/// cap — backwards, since a copied or hallucinated id is most likely to
+/// reference a task that was just created (both production incidents were).
+/// Shown newest-first instead, mirroring #130's shell listing.
+fn format_unknown_task_listing(state: &TaskState) -> String {
+    let total = state.tasks.len();
+    if total == 0 {
+        return " This session's task board is empty.".to_string();
+    }
+    let shown: Vec<String> = state
+        .tasks
+        .iter()
+        .rev()
+        .take(UNKNOWN_TASK_LISTING_CAP)
+        .map(|t| {
+            let preview =
+                crate::str_utils::truncate_line(&t.subject, UNKNOWN_TASK_SUBJECT_PREVIEW_CHARS);
+            format!("  {} status={} subject={:?}", t.id, t.status, preview)
+        })
+        .collect();
+    let omitted = total.saturating_sub(shown.len());
+    let omitted_note = if omitted > 0 {
+        format!("\n  ... and {omitted} more")
+    } else {
+        String::new()
+    };
+    format!(
+        " This session's tasks (use task_list to browse the tree):\n{}{}",
+        shown.join("\n"),
+        omitted_note
+    )
+}
+
+// ---------------------------------------------------------------------------
 // task_create
 // ---------------------------------------------------------------------------
 
@@ -258,7 +311,11 @@ impl Tool for TaskCreateTool {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("parent task not found: {}", parent_id)),
+                    error: Some(format!(
+                        "parent task not found: {}.{}",
+                        parent_id,
+                        format_unknown_task_listing(&state)
+                    )),
                 });
             }
         }
@@ -495,7 +552,11 @@ impl Tool for TaskUpdateTool {
             None => Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("task not found: {}", task_id)),
+                error: Some(format!(
+                    "task not found: {}.{}",
+                    task_id,
+                    format_unknown_task_listing(&state)
+                )),
             }),
         }
     }
@@ -552,7 +613,11 @@ impl Tool for TaskDeleteTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("task not found: {}", task_id)),
+                error: Some(format!(
+                    "task not found: {}.{}",
+                    task_id,
+                    format_unknown_task_listing(&state)
+                )),
             });
         }
 
@@ -673,6 +738,133 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    /// issue #132 (P1): an unknown task_id on task_update comes back with a
+    /// listing of what's actually on this session's board, so a copied or
+    /// hallucinated id can self-correct in one step.
+    #[tokio::test]
+    async fn test_update_unknown_task_id_lists_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let create = TaskCreateTool { boards: boards(&dir) };
+        create
+            .execute(json!({"subject": "Real Goal"}), &make_session("test"))
+            .await
+            .unwrap();
+
+        let update = TaskUpdateTool { boards: boards(&dir) };
+        let result = update
+            .execute(
+                json!({"task_id": "myclaw/t/does-not-exist", "status": "completed"}),
+                &make_session("test"),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("task not found: myclaw/t/does-not-exist"));
+        assert!(err.contains("Real Goal"), "listing must show what does exist: {err}");
+    }
+
+    /// issue #132 (P1): same self-correction on task_delete.
+    #[tokio::test]
+    async fn test_delete_unknown_task_id_lists_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let create = TaskCreateTool { boards: boards(&dir) };
+        create
+            .execute(json!({"subject": "Real Goal"}), &make_session("test"))
+            .await
+            .unwrap();
+
+        let delete = TaskDeleteTool { boards: boards(&dir) };
+        let result = delete
+            .execute(
+                json!({"task_id": "myclaw/t/does-not-exist"}),
+                &make_session("test"),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("task not found: myclaw/t/does-not-exist"));
+        assert!(err.contains("Real Goal"));
+    }
+
+    /// issue #132 (P1): task_create's parent-not-found gets the same
+    /// treatment — the parent id is just as copyable/hallucinatable as any
+    /// other task id.
+    #[tokio::test]
+    async fn test_create_unknown_parent_lists_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let create = TaskCreateTool { boards: boards(&dir) };
+        create
+            .execute(json!({"subject": "Real Goal"}), &make_session("test"))
+            .await
+            .unwrap();
+
+        let result = create
+            .execute(
+                json!({"subject": "Orphan", "parent": "myclaw/t/does-not-exist"}),
+                &make_session("test"),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("parent task not found: myclaw/t/does-not-exist"));
+        assert!(err.contains("Real Goal"));
+    }
+
+    /// issue #132 (P1): an empty board says so plainly instead of an empty list.
+    #[tokio::test]
+    async fn test_unknown_task_id_on_empty_board_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let update = TaskUpdateTool { boards: boards(&dir) };
+        let result = update
+            .execute(
+                json!({"task_id": "myclaw/t/does-not-exist", "status": "completed"}),
+                &make_session("test"),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("empty"), "empty board must say so: {err}");
+    }
+
+    /// issue #132 (P1): a long board caps the listing instead of dumping
+    /// every task into the error (mirrors #130's cap-at-20 for shell procs).
+    #[tokio::test]
+    async fn test_unknown_task_listing_caps_long_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let create = TaskCreateTool { boards: boards(&dir) };
+        let subjects: Vec<String> = (0..25).map(|i| format!("Goal {i}")).collect();
+        create
+            .execute(json!({"subject": subjects}), &make_session("test"))
+            .await
+            .unwrap();
+
+        let update = TaskUpdateTool { boards: boards(&dir) };
+        let result = update
+            .execute(
+                json!({"task_id": "myclaw/t/does-not-exist", "status": "completed"}),
+                &make_session("test"),
+            )
+            .await
+            .unwrap();
+
+        let err = result.error.unwrap();
+        assert!(err.contains("and 5 more"), "expected 25 tasks capped at 20: {err}");
+        // Reviewer note (PR #133): the cap must keep the newest tasks, not
+        // the oldest — a copied/hallucinated id is most likely to reference
+        // something just created, and that's exactly what the oldest-first
+        // cap used to drop first.
+        assert!(err.contains("Goal 24"), "newest task must survive the cap: {err}");
+        assert!(!err.contains("Goal 0\""), "oldest task must be the one dropped: {err}");
     }
 
     /// P1-B1: task boards are per-session — session A's tasks are invisible
