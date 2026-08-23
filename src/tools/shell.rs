@@ -286,15 +286,54 @@ async fn set_state(
 /// once it has outrun `timeout_secs` — the synchronous `shell` call is about
 /// to report it as still going (no terminal result to deliver inline), so
 /// unify it with the explicit `background: true` case and notify when it
-/// eventually finishes. No-op if the process already finished by the time
-/// this runs (nothing to convert) or already notifies.
-async fn mark_notify_on_exit(registry: &ShellRegistry, sessions_dir: Option<&Path>, process_id: &str) {
+/// eventually finishes.
+///
+/// Returns the entry's state *after* the attempted flip (still cloned even
+/// when no flip happened) so the caller can detect the narrow race where the
+/// process exits between `execute()`'s deadline snapshot and this function
+/// acquiring the write lock: the reaper may already have recorded a
+/// terminal state with `notify_on_exit` still `false` (this function then
+/// correctly no-ops rather than flipping a state that's no longer
+/// `"running"`), in which case no notice will ever fire for it and the
+/// caller must report the terminal result inline instead of promising one
+/// (review finding on #139 — xiaoer-bot). `None` only if the entry was
+/// removed from the registry entirely in that same window.
+async fn mark_notify_on_exit(
+    registry: &ShellRegistry,
+    sessions_dir: Option<&Path>,
+    process_id: &str,
+) -> Option<ProcEntry> {
     let mut map = registry.write().await;
-    if let Some(entry) = map.get_mut(process_id) {
-        if entry.state == "running" && !entry.notify_on_exit {
-            entry.notify_on_exit = true;
-            write_entry_disk(sessions_dir, entry);
-        }
+    let entry = map.get_mut(process_id)?;
+    if entry.state == "running" && !entry.notify_on_exit {
+        entry.notify_on_exit = true;
+        write_entry_disk(sessions_dir, entry);
+    }
+    Some(entry.clone())
+}
+
+/// Render the terminal-state tool output shared by `execute()`'s normal
+/// completion path and its race-recovery path (an entry that turned out to
+/// already be terminal when `mark_notify_on_exit` looked).
+fn terminal_result(entry: &ProcEntry, process_id: &str, display: &str, output_truncated: bool) -> ToolResult {
+    let exit_code = entry.exit_code.unwrap_or(-1);
+    let success = entry.state == "exited" && exit_code == 0;
+    let output = format!(
+        "state={}\nexit_code={}\nprocess_id={}\n\noutput{}:\n{}",
+        entry.state,
+        entry.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),
+        process_id,
+        if output_truncated { " (truncated)" } else { "" },
+        display
+    );
+    ToolResult {
+        success,
+        output,
+        error: if success {
+            None
+        } else {
+            Some(format!("exit code {}", exit_code))
+        },
     }
 }
 
@@ -816,7 +855,20 @@ impl Tool for ShellTool {
             // this call already reported "still running" with no terminal
             // result, so from here on it's treated the same as an explicit
             // `background: true` spawn — armed for a completion notice.
-            mark_notify_on_exit(&self.registry, self.sessions_dir.as_deref(), &process_id).await;
+            //
+            // Narrow race (xiaoer-bot review, #139): the process can exit
+            // between the deadline snapshot above and this flip acquiring
+            // the write lock — if the reaper wins, it already recorded a
+            // terminal state with `notify_on_exit` still false, and the flip
+            // below correctly no-ops (nothing "running" left to arm). No
+            // notice will ever fire for it then, so detect that case via the
+            // returned live state and report the terminal result inline
+            // instead of promising a notify that would never come.
+            if let Some(live) = mark_notify_on_exit(&self.registry, self.sessions_dir.as_deref(), &process_id).await {
+                if live.state != "running" {
+                    return Ok(terminal_result(&live, &process_id, &display, output_truncated));
+                }
+            }
             let output = format!(
                 "state=running\nprocess_id={}\ncommand={}\ntimeout_secs={}\nnote=command is still running, it was NOT killed; you'll be notified automatically when it finishes — call sessions_yield to suspend and wait for that, or shell_kill(process_id) to terminate it\n\noutput_so_far{}:\n{}",
                 process_id,
@@ -832,25 +884,7 @@ impl Tool for ShellTool {
             });
         }
 
-        let exit_code = entry.exit_code.unwrap_or(-1);
-        let success = entry.state == "exited" && exit_code == 0;
-        let output = format!(
-            "state={}\nexit_code={}\nprocess_id={}\n\noutput{}:\n{}",
-            entry.state,
-            entry.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),
-            process_id,
-            if output_truncated { " (truncated)" } else { "" },
-            display
-        );
-        Ok(ToolResult {
-            success,
-            output,
-            error: if success {
-                None
-            } else {
-                Some(format!("exit code {}", exit_code))
-            },
-        })
+        Ok(terminal_result(&entry, &process_id, &display, output_truncated))
     }
 }
 
@@ -1401,6 +1435,46 @@ mod tests {
                 .await
                 .is_err(),
             "a foreground call that finished within timeout_secs must not send a completion notice"
+        );
+    }
+
+    /// issue #131 review (xiaoer-bot, #139): `mark_notify_on_exit` flips a
+    /// still-running entry and returns its live (now-armed) state.
+    #[tokio::test]
+    async fn mark_notify_on_exit_flips_running_entry() {
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        registry
+            .write()
+            .await
+            .insert("sh_x".to_string(), test_entry("running"));
+
+        let live = mark_notify_on_exit(&registry, None, "sh_x")
+            .await
+            .expect("entry present");
+        assert_eq!(live.state, "running");
+        assert!(live.notify_on_exit);
+    }
+
+    /// issue #131 review (xiaoer-bot, #139): the narrow race this guards —
+    /// if the process has already reached a terminal state by the time
+    /// `mark_notify_on_exit` gets the write lock (the reaper won), it must
+    /// no-op (nothing "running" to arm) and hand back the terminal state so
+    /// `execute()` can report it inline instead of promising a notify that
+    /// will never fire.
+    #[tokio::test]
+    async fn mark_notify_on_exit_is_a_noop_once_already_terminal() {
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let mut entry = test_entry("exited");
+        entry.exit_code = Some(0);
+        registry.write().await.insert("sh_x".to_string(), entry);
+
+        let live = mark_notify_on_exit(&registry, None, "sh_x")
+            .await
+            .expect("entry present");
+        assert_eq!(live.state, "exited");
+        assert!(
+            !live.notify_on_exit,
+            "a terminal entry must not be armed — the reaper already decided notify_on_exit for it"
         );
     }
 
