@@ -300,6 +300,19 @@ impl DelegationCoordinator {
         self.running.len()
     }
 
+    /// Durable checkpoints currently in `timed_out` status — the only ones
+    /// `resume_timed_out` will actually accept (issue #134 P2). Backs the
+    /// listing appended to `agent_resume`'s not-found error; unscoped by
+    /// parent session, same convention as `running_records`/`agent_list`.
+    pub fn timed_out_checkpoints(&self) -> Vec<crate::storage::DelegationCheckpoint> {
+        self.session_manager
+            .backend()
+            .load_delegation_checkpoints()
+            .into_iter()
+            .filter(|cp| cp.status == "timed_out")
+            .collect()
+    }
+
     /// Checkpoint all running tasks to durable storage and cancel them.
     ///
     /// Called during daemon shutdown (before hot-switch fork or process exit).
@@ -2057,6 +2070,40 @@ mod tests {
         let err = dc.resume_timed_out(&sub.id, None).unwrap_err();
         assert!(format!("{:#}", err).contains("not resumable"));
         assert!(format!("{:#}", err).contains("failed"));
+    }
+
+    /// issue #134 (P2): `timed_out_checkpoints` backs agent_resume's
+    /// not-found listing — only `timed_out` status checkpoints qualify, not
+    /// `failed`/`cancelled`/`running` ones.
+    #[tokio::test]
+    async fn timed_out_checkpoints_filters_by_status() {
+        let (dc, manager, _dir) = coordinator_with_backend();
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let backend = manager.backend();
+
+        let timed_out_sub = manager.create_sub_session(&parent.session_id, "coder").unwrap();
+        backend
+            .save_delegation_checkpoint(&checkpoint_for(
+                &timed_out_sub.id,
+                &parent.session_id,
+                "timed_out",
+                600,
+            ))
+            .unwrap();
+
+        let failed_sub = manager.create_sub_session(&parent.session_id, "coder").unwrap();
+        backend
+            .save_delegation_checkpoint(&checkpoint_for(
+                &failed_sub.id,
+                &parent.session_id,
+                "failed",
+                600,
+            ))
+            .unwrap();
+
+        let timed_out = dc.timed_out_checkpoints();
+        assert_eq!(timed_out.len(), 1);
+        assert_eq!(timed_out[0].sub_session_id, timed_out_sub.id);
     }
 
     #[tokio::test]

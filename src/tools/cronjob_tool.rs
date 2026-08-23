@@ -602,7 +602,11 @@ impl CronJobTool {
                 output: format!("Job '{}' updated: {}.", id, changed_fields.join(", ")),
                 error: None,
             }),
-            Ok(false) => Ok(err_result(&format!("Job '{}' not found.", id))),
+            Ok(false) => Ok(err_result(&format!(
+                "Job '{}' not found.{}",
+                id,
+                format_unknown_job_listing(self.scheduler.jobs())
+            ))),
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -718,7 +722,11 @@ impl CronJobTool {
                 output: format!("Job {} {}.", id, action_name),
                 error: None,
             }),
-            Ok(false) => Ok(err_result(&format!("Job '{}' not found.", id))),
+            Ok(false) => Ok(err_result(&format!(
+                "Job '{}' not found.{}",
+                id,
+                format_unknown_job_listing(self.scheduler.jobs())
+            ))),
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -737,7 +745,13 @@ impl CronJobTool {
         let jobs = self.scheduler.jobs();
         let job = match jobs.iter().find(|j| j.id == id) {
             Some(j) => j.clone(),
-            None => return Ok(err_result(&format!("Job '{}' not found.", id))),
+            None => {
+                return Ok(err_result(&format!(
+                    "Job '{}' not found.{}",
+                    id,
+                    format_unknown_job_listing(jobs)
+                )));
+            }
         };
         let name = job.name.clone().unwrap_or_else(|| job.id.clone());
 
@@ -771,7 +785,11 @@ impl CronJobTool {
                     error: None,
                 })
             }
-            Ok(false) => Ok(err_result(&format!("Job '{}' not found.", id))),
+            Ok(false) => Ok(err_result(&format!(
+                "Job '{}' not found.{}",
+                id,
+                format_unknown_job_listing(self.scheduler.jobs())
+            ))),
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -795,7 +813,11 @@ impl CronJobTool {
                 ),
                 error: None,
             }),
-            Ok(None) => Ok(err_result(&format!("Job '{}' not found.", id))),
+            Ok(None) => Ok(err_result(&format!(
+                "Job '{}' not found.{}",
+                id,
+                format_unknown_job_listing(self.scheduler.jobs())
+            ))),
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -840,7 +862,11 @@ impl CronJobTool {
                         error: None,
                     })
                 }
-                None => Ok(err_result(&format!("Job '{}' not found", id))),
+                None => Ok(err_result(&format!(
+                    "Job '{}' not found.{}",
+                    id,
+                    format_unknown_job_listing(jobs)
+                ))),
             };
         }
 
@@ -875,6 +901,43 @@ fn err_result(msg: &str) -> ToolResult {
         output: String::new(),
         error: Some(msg.to_string()),
     }
+}
+
+/// issue #134 (P3): build the "here's what's actually configured" listing
+/// appended to all six of this tool's `Job '{}' not found` errors — same
+/// self-correction principle as #130 (shell)/#133 (task)/#134 P2 (agent),
+/// applied to cron job ids. Unscoped (cron jobs are daemon-wide, matching
+/// this tool's existing behavior — `execute` never reads `session`).
+/// Newest-first (`created_at` descending, string-comparable since it's
+/// RFC3339), matching #133's reviewed convention; jobs are a small, capped
+/// set in practice so this is one helper for all six call sites rather than
+/// six near-duplicates.
+fn format_unknown_job_listing(mut jobs: Vec<JobEntry>) -> String {
+    if jobs.is_empty() {
+        return " No cron jobs configured.".to_string();
+    }
+    jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let total = jobs.len();
+    let shown: Vec<String> = jobs
+        .into_iter()
+        .take(crate::str_utils::UNKNOWN_ID_LISTING_CAP)
+        .map(|j| {
+            let status = if j.enabled { "enabled" } else { "disabled" };
+            let name = j.name.as_deref().unwrap_or("(unnamed)");
+            format!("  {} name={:?} status={}", j.id, name, status)
+        })
+        .collect();
+    let omitted = total.saturating_sub(shown.len());
+    let omitted_note = if omitted > 0 {
+        format!("\n  ... and {omitted} more")
+    } else {
+        String::new()
+    };
+    format!(
+        " Configured cron jobs (use cronjob action=\"list\" for details):\n{}{}",
+        shown.join("\n"),
+        omitted_note
+    )
 }
 
 fn format_run_record(i: usize, run: &crate::agents::scheduling::cron_types::RunRecord) -> String {
@@ -1365,5 +1428,157 @@ mod update_echo_tests {
         assert_eq!(job.delivery.channel.as_deref(), Some("discord"));
         assert_eq!(job.delivery.to.as_deref(), Some("chan-9"));
         assert_eq!(job.delivery.thread_id.as_deref(), Some("t-1"));
+    }
+}
+
+/// issue #134 (P3): all six `Job '{}' not found` sites list what's actually
+/// configured instead of a bare failure.
+#[cfg(test)]
+mod unknown_job_listing_tests {
+    use super::*;
+    use crate::agents::scheduling::scheduler::Scheduler;
+
+    fn test_tool(dir: &std::path::Path) -> CronJobTool {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sched = Scheduler::new(
+            dir.join("jobs"),
+            "test",
+            "UTC".to_string(),
+            None,
+            tx,
+            dir.join("last_channel"),
+            dir.join("last_recipient"),
+        );
+        let entry = JobEntry {
+            id: String::new(),
+            schedule: Some(ScheduleSpec::cron("0 9 * * *")),
+            webhook: None,
+            prompt: "p".to_string(),
+            name: Some("real-job".to_string()),
+            tz: None,
+            active_hours: None,
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            created_at: None,
+            delivery: DeliveryConfig::default(),
+            last_runs: Vec::new(),
+            enabled_tools: None,
+            disabled_tools: None,
+            retry: None,
+            failure_alert: None,
+            consecutive_errors: 0,
+            consecutive_skipped: 0,
+            max_runs: None,
+            completed_runs: 0,
+            delete_after_run: false,
+            model: None,
+            provider: None,
+            last_failure_alert_at: None,
+            context_policy: crate::config::scheduler::ContextPolicy::Inject,
+        };
+        sched.add_job(entry).unwrap();
+        CronJobTool::new(sched)
+    }
+
+    #[test]
+    fn update_unknown_id_lists_real_jobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = test_tool(tmp.path());
+        let result = tool
+            .handle_update(&serde_json::json!({"id": "no-such-job", "enabled": false}))
+            .unwrap();
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("no-such-job"));
+        assert!(err.contains("real-job"), "listing must show what does exist: {err}");
+    }
+
+    #[test]
+    fn pause_unknown_id_lists_real_jobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = test_tool(tmp.path());
+        let result = tool
+            .handle_set_enabled(&serde_json::json!({"id": "no-such-job"}), false)
+            .unwrap();
+        assert!(result.error.unwrap().contains("real-job"));
+    }
+
+    #[test]
+    fn run_unknown_id_lists_real_jobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = test_tool(tmp.path());
+        let result = tool
+            .handle_run(&serde_json::json!({"id": "no-such-job"}))
+            .unwrap();
+        assert!(result.error.unwrap().contains("real-job"));
+    }
+
+    #[test]
+    fn remove_unknown_id_lists_real_jobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = test_tool(tmp.path());
+        let result = tool
+            .handle_remove(&serde_json::json!({"id": "no-such-job"}))
+            .unwrap();
+        assert!(result.error.unwrap().contains("real-job"));
+    }
+
+    #[test]
+    fn log_unknown_id_lists_real_jobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = test_tool(tmp.path());
+        let result = tool
+            .handle_log(&serde_json::json!({"id": "no-such-job"}))
+            .unwrap();
+        assert!(result.error.unwrap().contains("real-job"));
+    }
+
+    /// No cron jobs configured at all must say so plainly.
+    #[test]
+    fn empty_listing_says_so() {
+        assert!(format_unknown_job_listing(vec![]).contains("No cron jobs configured"));
+    }
+
+    /// #133's reviewed convention: newest (`created_at`) first, and the cap
+    /// keeps the newest entries.
+    #[test]
+    fn newest_first_and_capped() {
+        let jobs: Vec<JobEntry> = (0..25)
+            .map(|i| JobEntry {
+                id: format!("job{i}"),
+                schedule: Some(ScheduleSpec::cron("0 9 * * *")),
+                webhook: None,
+                prompt: "p".to_string(),
+                name: Some(format!("job-{i}")),
+                tz: None,
+                active_hours: None,
+                enabled: true,
+                last_run_at: None,
+                next_run_at: None,
+                // Zero-padded so string comparison sorts the same as
+                // numeric comparison would — mirrors real RFC3339 timestamps.
+                created_at: Some(format!("2026-01-01T00:00:{i:02}Z")),
+                delivery: DeliveryConfig::default(),
+                last_runs: Vec::new(),
+                enabled_tools: None,
+                disabled_tools: None,
+                retry: None,
+                failure_alert: None,
+                consecutive_errors: 0,
+                consecutive_skipped: 0,
+                max_runs: None,
+                completed_runs: 0,
+                delete_after_run: false,
+                model: None,
+                provider: None,
+                last_failure_alert_at: None,
+                context_policy: crate::config::scheduler::ContextPolicy::Inject,
+            })
+            .collect();
+        let listing = format_unknown_job_listing(jobs);
+        assert!(listing.contains("and 5 more"));
+        assert!(listing.contains("job24"), "newest (i=24) must survive the cap: {listing}");
+        assert!(!listing.contains("  job0 "), "oldest (i=0) must be the one dropped: {listing}");
     }
 }
