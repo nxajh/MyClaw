@@ -212,6 +212,12 @@ const UNKNOWN_TASK_SUBJECT_PREVIEW_CHARS: usize = 60;
 /// Ids are shown in full (not a shortened tail) to match `task_list`'s own
 /// display convention — a listing in a different id format would be its own
 /// source of confusion.
+///
+/// Reviewer note (PR #133): capping over `state.tasks`' insertion order would
+/// keep the *oldest* tasks and drop the newest ones once a board exceeds the
+/// cap — backwards, since a copied or hallucinated id is most likely to
+/// reference a task that was just created (both production incidents were).
+/// Shown newest-first instead, mirroring #130's shell listing.
 fn format_unknown_task_listing(state: &TaskState) -> String {
     let total = state.tasks.len();
     if total == 0 {
@@ -220,6 +226,7 @@ fn format_unknown_task_listing(state: &TaskState) -> String {
     let shown: Vec<String> = state
         .tasks
         .iter()
+        .rev()
         .take(UNKNOWN_TASK_LISTING_CAP)
         .map(|t| {
             let preview =
@@ -852,6 +859,12 @@ mod tests {
 
         let err = result.error.unwrap();
         assert!(err.contains("and 5 more"), "expected 25 tasks capped at 20: {err}");
+        // Reviewer note (PR #133): the cap must keep the newest tasks, not
+        // the oldest — a copied/hallucinated id is most likely to reference
+        // something just created, and that's exactly what the oldest-first
+        // cap used to drop first.
+        assert!(err.contains("Goal 24"), "newest task must survive the cap: {err}");
+        assert!(!err.contains("Goal 0\""), "oldest task must be the one dropped: {err}");
     }
 
     /// P1-B1: task boards are per-session — session A's tasks are invisible
