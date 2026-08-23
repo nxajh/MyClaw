@@ -10,6 +10,47 @@ use std::sync::Arc;
 
 use crate::agents::DelegationCoordinator;
 use crate::providers::{Tool, ToolResult};
+use crate::storage::DelegationCheckpoint;
+use crate::str_utils::UNKNOWN_ID_LISTING_CAP;
+
+/// issue #134 (P2): build the "here's what can actually be resumed" listing
+/// appended to agent_resume's not-found/not-resumable errors. Only
+/// `timed_out` checkpoints are ever accepted by `resume_timed_out` — a
+/// listing of *running* sub-agents here would mislead the model into trying
+/// to resume something that's still going (that's `agent_kill`'s job).
+/// Newest-first (`started_at` descending), matching #133's reviewed
+/// convention: a copied or hallucinated id is most likely to reference
+/// something that timed out recently.
+fn format_unknown_resumable_listing(mut checkpoints: Vec<DelegationCheckpoint>) -> String {
+    if checkpoints.is_empty() {
+        return " No timed-out sub-agents are currently resumable.".to_string();
+    }
+    checkpoints.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    let total = checkpoints.len();
+    let shown: Vec<String> = checkpoints
+        .into_iter()
+        .take(UNKNOWN_ID_LISTING_CAP)
+        .map(|cp| {
+            format!(
+                "  {} agent={:?} started_at={}",
+                cp.sub_session_id,
+                cp.agent_name,
+                cp.started_at.to_rfc3339()
+            )
+        })
+        .collect();
+    let omitted = total.saturating_sub(shown.len());
+    let omitted_note = if omitted > 0 {
+        format!("\n  ... and {omitted} more")
+    } else {
+        String::new()
+    };
+    format!(
+        " Resumable (timed-out) sub-agents:\n{}{}",
+        shown.join("\n"),
+        omitted_note
+    )
+}
 
 pub struct AgentResumeTool {
     delegator: Arc<DelegationCoordinator>,
@@ -78,8 +119,60 @@ impl Tool for AgentResumeTool {
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("resume failed: {:#}", e)),
+                error: Some(format!(
+                    "resume failed: {:#}.{}",
+                    e,
+                    format_unknown_resumable_listing(self.delegator.timed_out_checkpoints())
+                )),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checkpoint(id: &str, started_at: chrono::DateTime<chrono::Utc>) -> DelegationCheckpoint {
+        DelegationCheckpoint {
+            parent_session_id: "myclaw/s/parent".to_string(),
+            sub_session_id: id.to_string(),
+            agent_name: "coder".to_string(),
+            status: "timed_out".to_string(),
+            started_at,
+            timeout_secs: 120,
+            allowed_tools: None,
+            last_checkpoint: None,
+        }
+    }
+
+    /// issue #134 (P2): an unknown/non-resumable id lists what's actually
+    /// resumable instead of a bare failure.
+    #[test]
+    fn lists_resumable_checkpoints() {
+        let listing = format_unknown_resumable_listing(vec![checkpoint("s1", chrono::Utc::now())]);
+        assert!(listing.contains("s1"));
+        assert!(listing.contains("coder"));
+    }
+
+    /// No resumable checkpoints at all must say so plainly.
+    #[test]
+    fn empty_says_so() {
+        let listing = format_unknown_resumable_listing(vec![]);
+        assert!(listing.contains("No timed-out sub-agents are currently resumable"));
+    }
+
+    /// #133's reviewed convention: newest (`started_at`) first, and the cap
+    /// keeps the newest entries.
+    #[test]
+    fn newest_first_and_capped() {
+        let base = chrono::Utc::now();
+        let checkpoints: Vec<DelegationCheckpoint> = (0..25)
+            .map(|i| checkpoint(&format!("s{i}"), base - chrono::Duration::seconds(i)))
+            .collect();
+        let listing = format_unknown_resumable_listing(checkpoints);
+        assert!(listing.contains("and 5 more"));
+        assert!(listing.contains("s0"), "newest must survive the cap: {listing}");
+        assert!(!listing.contains("s24"), "oldest must be the one dropped: {listing}");
     }
 }

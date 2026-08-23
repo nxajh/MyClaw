@@ -11,7 +11,39 @@ use serde_json::json;
 use crate::agents::session::Session;
 use crate::agents::user_profile::UserResolver;
 use crate::providers::{Tool, ToolResult};
-use crate::storage::SessionBackend;
+use crate::storage::{SessionBackend, SessionInfo};
+use crate::str_utils::UNKNOWN_ID_LISTING_CAP;
+
+/// issue #134 (P2-P3): build the "here's what you actually have" listing
+/// appended to session_query's `action="messages"` not-found/not-owned
+/// error. Lower priority than the agent/task tools — a session id is rarely
+/// hand-typed (the model normally lists first) — so this stays a light
+/// summary rather than a full per-session breakdown; ids are shown in full
+/// to match `action="list"`'s own display convention. Newest-first
+/// (`last_activity` descending), matching #133's reviewed convention.
+fn format_unknown_session_listing(mut sessions: Vec<SessionInfo>) -> String {
+    if sessions.is_empty() {
+        return " You have no sessions.".to_string();
+    }
+    sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    let total = sessions.len();
+    let shown: Vec<String> = sessions
+        .into_iter()
+        .take(UNKNOWN_ID_LISTING_CAP)
+        .map(|s| format!("  {} messages={}", s.id, s.message_count))
+        .collect();
+    let omitted = total.saturating_sub(shown.len());
+    let omitted_note = if omitted > 0 {
+        format!("\n  ... and {omitted} more")
+    } else {
+        String::new()
+    };
+    format!(
+        " You have {total} session(s) (use action=\"list\" for the full view):\n{}{}",
+        shown.join("\n"),
+        omitted_note
+    )
+}
 
 pub struct SessionQueryTool {
     backend: Arc<dyn SessionBackend>,
@@ -128,7 +160,10 @@ impl Tool for SessionQueryTool {
                         success: false,
                         output: json!({
                             "success": false,
-                            "error": "Session not found or not owned by you."
+                            "error": format!(
+                                "Session not found or not owned by you.{}",
+                                format_unknown_session_listing(sessions)
+                            )
                         })
                         .to_string(),
                         error: None,
@@ -184,5 +219,51 @@ impl Tool for SessionQueryTool {
                 error: None,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(id: &str, last_activity: chrono::DateTime<chrono::Utc>, messages: usize) -> SessionInfo {
+        SessionInfo {
+            id: id.to_string(),
+            owner: "mock:default:u1".to_string(),
+            display_name: None,
+            created_at: last_activity,
+            last_activity,
+            message_count: messages,
+        }
+    }
+
+    /// issue #134 (P2-P3): an unknown/unowned session_id lists what the
+    /// caller actually has instead of a bare not-found.
+    #[test]
+    fn lists_owned_sessions() {
+        let listing = format_unknown_session_listing(vec![info("s1", chrono::Utc::now(), 3)]);
+        assert!(listing.contains("s1"));
+        assert!(listing.contains("messages=3"));
+    }
+
+    /// No sessions at all must say so plainly.
+    #[test]
+    fn empty_says_so() {
+        let listing = format_unknown_session_listing(vec![]);
+        assert!(listing.contains("You have no sessions"));
+    }
+
+    /// #133's reviewed convention: newest (`last_activity`) first, and the
+    /// cap keeps the newest entries.
+    #[test]
+    fn newest_first_and_capped() {
+        let base = chrono::Utc::now();
+        let sessions: Vec<SessionInfo> = (0..25)
+            .map(|i| info(&format!("s{i}"), base - chrono::Duration::seconds(i), 1))
+            .collect();
+        let listing = format_unknown_session_listing(sessions);
+        assert!(listing.contains("and 5 more"));
+        assert!(listing.contains("s0"), "newest must survive the cap: {listing}");
+        assert!(!listing.contains("s24"), "oldest must be the one dropped: {listing}");
     }
 }

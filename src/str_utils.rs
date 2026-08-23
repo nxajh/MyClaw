@@ -9,6 +9,17 @@
 //! Shared by `skill_loader` and `agent_loader` to parse YAML front matter
 //! from Markdown files (`SKILL.md`, `AGENT.md`).
 
+/// Shared cap/preview constants for the "unknown id" not-found listings
+/// several tools append to their errors (shell #130, task #133, agent_kill/
+/// agent_resume/cronjob #134): a copied or hallucinated id gets a real,
+/// capped list to self-correct against instead of a bare "not found". Each
+/// tool's listing is otherwise bespoke (different fields, different id
+/// shapes) — only the cap/preview width is common enough to share; shell.rs
+/// and task.rs predate this constant and keep their own local copies rather
+/// than being retrofitted here.
+pub const UNKNOWN_ID_LISTING_CAP: usize = 20;
+pub const UNKNOWN_ID_PREVIEW_CHARS: usize = 60;
+
 /// Return the byte offset of the `max_chars`-th character, or the full string
 /// length if the string is shorter.
 // char_offset("hello", 3) == 3

@@ -59,9 +59,10 @@ pub use known_users::{
 };
 pub use attachment::AttachmentManager;
 pub use delegation::{
-    AgentMail, AgentMessage, DelegationEvent, MessageKind, render_agent_mail_reminder,
+    AgentMail, AgentMessage, DelegationEvent, DelegationStatus, MessageKind,
+    render_agent_mail_reminder,
 };
-pub use delegation_coordinator::DelegationCoordinator;
+pub use delegation_coordinator::{DelegationCoordinator, RunningAgentInfo};
 pub(crate) use delegation_coordinator::SUB_AGENT_TIMEOUT_MAX_SECS;
 pub use delegator::{AgentDelegator, AgentMessenger};
 pub use error::AgentError;
