@@ -192,6 +192,16 @@ impl Agent {
         // has been executed and persisted, return to SessionContext so the
         // origin turn releases its lock before the completion wake is queued.
         let mut async_delegation_spawned = false;
+        // issue #140: same turn-boundary role as `async_delegation_spawned`,
+        // but for a `shell` call armed for a future completion notice
+        // (`background: true`, or a foreground call converted mid-flight by
+        // the timeout branch — see `tools::shell`'s `mark_notify_on_exit`).
+        // The shell tool itself registers the pending entry (via a
+        // SessionManager lookup, mirroring how `agent_delegate`'s async path
+        // registers through `DelegationCoordinator`); this flag only decides
+        // whether THIS turn is the origin of a suspension sequence, exactly
+        // like `async_delegation_spawned` does for delegation.
+        let mut shell_pending_spawned = false;
         // Send tools are not always declared (loaded on demand), so fold any
         // prior references that would become orphan tool calls.
         fold_absent_tool(&mut messages, &tool_specs, "send_message", "消息发送结果");
@@ -598,8 +608,10 @@ impl Agent {
                 // Silenced resume turns already
                 // get `defer_collapse` from `process_turn`; the final loud
                 // resume turn has `async_delegation_spawned == false`, so
-                // neither flag applies there.
-                if async_delegation_spawned && !session.turn_silenced {
+                // neither flag applies there. issue #140: a shell background
+                // spawn is an origin turn exactly like a delegation spawn —
+                // same preview treatment.
+                if (async_delegation_spawned || shell_pending_spawned) && !session.turn_silenced {
                     if let Some(stream) = session.turn_stream.as_mut() {
                         stream.defer_collapse();
                     }
@@ -684,7 +696,9 @@ impl Agent {
                     // dispatcher suspends instead of ending. The model may have
                     // continued with other work after the spawn (the old forced
                     // truncation is gone); its output is the preview content.
-                    has_pending: async_delegation_spawned,
+                    // issue #140: a shell background spawn is the same kind of
+                    // origin turn.
+                    has_pending: async_delegation_spawned || shell_pending_spawned,
                 });
             }
 
@@ -798,6 +812,19 @@ impl Agent {
                     turn_had_error = true;
                 }
 
+                // issue #140: detect a shell call that just armed itself for
+                // a future completion notice — `state=running` is the header
+                // ONLY `background: true`'s immediate return and the
+                // timeout-conversion return use (checked via `starts_with`,
+                // not `contains`, so a command's own echoed output — which
+                // always comes AFTER this header, never before — can't spoof
+                // a false match). The race-recovery path (`terminal_result`
+                // in shell.rs) and the plain fast-completion path both start
+                // with a different `state=` value, so neither is armed.
+                if call.name == "shell" && !is_error && result_content.starts_with("state=running") {
+                    shell_pending_spawned = true;
+                }
+
                 match loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
                     LoopBreak::Detected(reason) => {
                         tracing::warn!(
@@ -888,8 +915,10 @@ impl Agent {
 
                 // sessions_yield (docs/delegation-notice-queue-rfc.md §3.2):
                 // explicit hand-off — deterministic EndTurn, discard remaining
-                // tool_calls. has_pending reuses async_delegation_spawned so
-                // suspension proceeds normally when sub-agents were spawned.
+                // tool_calls. has_pending reuses async_delegation_spawned (and,
+                // issue #140, shell_pending_spawned) so suspension proceeds
+                // normally when sub-agents or background shell work were
+                // spawned.
                 if call.name == "sessions_yield" && !is_error {
                     let remaining = response.tool_calls.len() - i - 1;
                     if remaining > 0 {
@@ -903,7 +932,7 @@ impl Agent {
                         text: response.text.clone(),
                         stop_reason: StopReason::EndTurn,
                         pending_retry: None,
-                        has_pending: async_delegation_spawned,
+                        has_pending: async_delegation_spawned || shell_pending_spawned,
                     });
                 }
 
@@ -931,11 +960,13 @@ impl Agent {
                 }
             }
 
-            if async_delegation_spawned {
+            if async_delegation_spawned || shell_pending_spawned {
                 tracing::debug!(
                     session = %session.id,
                     parent = session.parent_session_id.as_deref().unwrap_or("none"),
-                    "async delegation spawned this turn; has_pending flag set at EndTurn"
+                    async_delegation_spawned,
+                    shell_pending_spawned,
+                    "async work spawned this turn; has_pending flag set at EndTurn"
                 );
             }
 
@@ -2092,6 +2123,44 @@ mod tests {
             false,
             r#"{"path":"x"}"#
         ));
+    }
+
+    /// issue #140: mirrors the inline `shell_pending_spawned` check exactly
+    /// — a shell call is armed for a future completion notice iff it's
+    /// `shell` (not `shell_poll`/`shell_kill`), didn't error, and its output
+    /// starts with `state=running` (the header only `background: true`'s
+    /// immediate return and the timeout-conversion return use).
+    #[test]
+    fn shell_pending_spawned_detection_logic() {
+        fn is_shell_armed(name: &str, is_error: bool, output: &str) -> bool {
+            name == "shell" && !is_error && output.starts_with("state=running")
+        }
+
+        // background: true's immediate return → armed
+        assert!(is_shell_armed(
+            "shell",
+            false,
+            "state=running\nprocess_id=sh_x\ncommand=echo hi\n..."
+        ));
+        // timeout-conversion return → armed
+        assert!(is_shell_armed(
+            "shell",
+            false,
+            "state=running\nprocess_id=sh_x\ncommand=echo hi\ntimeout_secs=0\nnote=..."
+        ));
+        // fast completion within timeout_secs → NOT armed (already delivered
+        // its terminal result synchronously)
+        assert!(!is_shell_armed(
+            "shell",
+            false,
+            "state=exited\nexit_code=0\nprocess_id=sh_x\n..."
+        ));
+        // error result → not armed even if the output happens to start with
+        // the marker
+        assert!(!is_shell_armed("shell", true, "state=running\n..."));
+        // different tool → not armed regardless of output shape
+        assert!(!is_shell_armed("shell_poll", false, "state=running\n..."));
+        assert!(!is_shell_armed("shell_kill", false, "state=running\n..."));
     }
 
     #[test]

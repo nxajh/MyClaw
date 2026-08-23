@@ -680,6 +680,16 @@ fn recover_completion_queue(ctx: &Arc<OrchestratorCtx>) {
 /// (progress folding). The merged notice then routes one resume turn; once the
 /// covered sub-sessions' terminal events land, `pending` is empty and the final
 /// resume turn is loud (RFC §3.4).
+///
+/// issue #140: `pending` can now also hold shell `process_id`s (see
+/// `ShellTool::register_pending`) — identified by `is_shell_process_id`'s
+/// `sh_` prefix, checked against `ctx.shell_registry`'s POST-`adopt_after_restart`
+/// state instead of the sub-agent `covered` set (a completely different
+/// survival mechanism: shell has no timeout-bounded recovery loop, just
+/// "did this process's real PID survive"). A shell entry still `running`
+/// there IS covered — its adopted reaper will complete it naturally through
+/// the normal `route_shell_completion` path — exactly parallel to how a
+/// covered sub-session's terminal event arrives through `wake`.
 async fn recover_suspension(
     ctx: &Arc<OrchestratorCtx>,
     session_ctx: Arc<SessionContext>,
@@ -690,9 +700,37 @@ async fn recover_suspension(
         None => return,
     };
 
-    // Fail every pending sub-session the sub-agent recovery loop won't cover.
+    // Fail every pending item neither recovery loop will cover.
     let mut failed: Vec<String> = Vec::new();
-    for sub_session_id in snapshot.pending.iter() {
+    for id in snapshot.pending.iter() {
+        if crate::tools::shell::is_shell_process_id(id) {
+            let still_running = match &ctx.shell_registry {
+                Some(registry) => registry.read().await.get(id).is_some_and(|e| e.is_running()),
+                None => false,
+            };
+            if still_running {
+                continue;
+            }
+            let content = match &ctx.shell_registry {
+                Some(registry) => crate::tools::shell::recovery_lost_content(registry, id).await,
+                None => format!(
+                    "[系统通知] 后台命令状态未知 (process_id: {}): daemon 重启，无法查询该进程记录。若仍需要这次任务的结果，请重新执行。",
+                    id
+                ),
+            };
+            match session_ctx.record_terminal(id.clone(), SubStatus::Failed, content.clone(), 0) {
+                TerminalRecord::Recorded(_) => failed.push(content),
+                TerminalRecord::Duplicate | TerminalRecord::NoSuspension => {
+                    tracing::debug!(
+                        process_id = %id,
+                        "recover_suspension: shell entry already collected or no suspension, skipping failure notice"
+                    );
+                }
+            }
+            continue;
+        }
+
+        let sub_session_id = id;
         if covered.contains(sub_session_id) {
             continue;
         }
@@ -735,8 +773,8 @@ async fn recover_suspension(
         }
     }
 
-    // All pending sub-sessions are covered by the sub-agent recovery loop —
-    // their terminal events arrive naturally; nothing to synthesize here.
+    // Every pending item is covered by one of the two recovery loops —
+    // terminal events arrive naturally; nothing to synthesize here.
     if failed.is_empty() {
         return;
     }
@@ -1007,6 +1045,88 @@ mod tests {
         let snap = sctx.suspension_snapshot().unwrap();
         assert!(snap.results.is_empty());
         assert_eq!(snap.pending.len(), 2);
+    }
+
+    /// issue #140: a shell `process_id` in `pending` that's still `running`
+    /// in the registry after `adopt_after_restart` survived a hot switch —
+    /// its adopted reaper will complete it naturally through the normal
+    /// `route_shell_completion` path, exactly parallel to a covered
+    /// sub-session. `recover_suspension` must leave it alone (no failure
+    /// notice, no `record_terminal`).
+    #[tokio::test]
+    async fn recover_suspension_skips_shell_entry_still_running_after_adopt() {
+        let registry: crate::tools::shell::ShellRegistry =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let mut ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        let sid = sctx.session_id.clone();
+        sctx.add_pending_task("sh_alive".to_string());
+        registry.write().await.insert(
+            "sh_alive".to_string(),
+            crate::tools::shell::test_proc_entry("sh_alive", &sid, "running"),
+        );
+        ctx.shell_registry = Some(registry);
+        let ctx = Arc::new(ctx);
+
+        let covered: HashSet<String> = [].into_iter().collect();
+        recover_suspension(&ctx, sctx.clone(), &covered).await;
+
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert!(snap.results.is_empty(), "a still-running shell entry must not be failed");
+        assert_eq!(snap.pending, vec!["sh_alive".to_string()]);
+    }
+
+    /// issue #140: a shell `process_id` in `pending` that is NOT `running`
+    /// post-adopt (cold restart lost it, or it died during the hot-switch
+    /// window) did NOT survive — `recover_suspension` must synthesize a
+    /// shell-specific failure notice for it (not the sub-agent wording) and
+    /// collect it via `record_terminal`, same as an uncovered sub-session.
+    #[tokio::test]
+    async fn recover_suspension_fails_shell_entry_not_running_after_adopt() {
+        let registry: crate::tools::shell::ShellRegistry =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let mut ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        let sid = sctx.session_id.clone();
+        sctx.add_pending_task("sh_lost".to_string());
+        registry.write().await.insert(
+            "sh_lost".to_string(),
+            crate::tools::shell::test_proc_entry("sh_lost", &sid, "lost_on_restart"),
+        );
+        ctx.shell_registry = Some(registry);
+        let ctx = Arc::new(ctx);
+
+        let covered: HashSet<String> = [].into_iter().collect();
+        recover_suspension(&ctx, sctx.clone(), &covered).await;
+
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert_eq!(snap.results.len(), 1);
+        let r = &snap.results[0];
+        assert_eq!(r.sub_session_id, "sh_lost");
+        assert_eq!(r.status, SubStatus::Failed);
+        assert!(r.content.contains("后台命令"), "must use shell wording, not sub-agent wording: {}", r.content);
+        assert!(!r.content.contains("子代理"), "must NOT use sub-agent wording: {}", r.content);
+        assert!(snap.pending.is_empty());
+    }
+
+    /// issue #140: a shell `process_id` in `pending` whose registry entry is
+    /// gone entirely (very old restart already swept by `ENTRY_RETENTION_SECS`,
+    /// or `ctx.shell_registry` itself is `None`) still gets a minimal failure
+    /// notice — never silently stuck forever.
+    #[tokio::test]
+    async fn recover_suspension_fails_shell_entry_with_no_registry() {
+        let ctx = Arc::new(test_ctx(vec![])); // shell_registry: None
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("sh_unknown".to_string());
+
+        let covered: HashSet<String> = [].into_iter().collect();
+        recover_suspension(&ctx, sctx.clone(), &covered).await;
+
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert_eq!(snap.results.len(), 1);
+        assert_eq!(snap.results[0].sub_session_id, "sh_unknown");
+        assert_eq!(snap.results[0].status, SubStatus::Failed);
+        assert!(snap.pending.is_empty());
     }
 
     /// 方案4: if a pending task was already collected by the sub-agent

@@ -2122,7 +2122,7 @@ mod tests {
             .unwrap();
 
         // Parent turn already ended (no suspension) — resume must re-arm it.
-        assert!(!parent.has_pending_delegations());
+        assert!(!parent.has_pending_async_work());
 
         let resumed = dc.resume_timed_out(&sub.id, Some(9999)).unwrap();
         assert_eq!(resumed, sub.id);
@@ -2136,7 +2136,7 @@ mod tests {
 
         // Parent suspension re-armed so the eventual terminal event records
         // (instead of hitting the Duplicate drop path).
-        assert!(parent.has_pending_delegations());
+        assert!(parent.has_pending_async_work());
 
         // Second resume while the first holds the slot → already running.
         // (recover_async returned early without inserting a RunningEntry

@@ -332,8 +332,14 @@ impl SessionContext {
         session.turn_injections.extend(texts);
     }
 
-    /// 方案 C: register an async delegation against this session's suspension
-    /// (called from the sync `spawn_delegate_async` path; std Mutex, no await).
+    /// 方案 C: register a pending async work item against this session's
+    /// suspension — `sub_session_id` is a misnomer kept for the delegation
+    /// caller (`spawn_delegate_async`); it's really just an opaque unique id
+    /// (std Mutex, no await). issue #140: `ShellTool::register_pending` calls
+    /// this same method with a shell `process_id` instead, which is what
+    /// makes `has_pending_async_work` (and everything gated on it —
+    /// silenced/fold/drain/`set_preview`) automatically cover shell
+    /// background work too, without either caller knowing about the other.
     pub fn add_pending_task(&self, sub_session_id: String) {
         {
             let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
@@ -345,8 +351,11 @@ impl SessionContext {
         self.persist_suspension();
     }
 
-    /// 方案 C: true while the turn is suspended on uncollected delegations.
-    pub fn has_pending_delegations(&self) -> bool {
+    /// 方案 C / issue #140: true while the turn is suspended on uncollected
+    /// async work — sub-agent delegations and/or armed shell background
+    /// processes, both registered into the same `TurnSuspension.pending` via
+    /// `add_pending_task`.
+    pub fn has_pending_async_work(&self) -> bool {
         self.turn_suspension
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -935,7 +944,7 @@ impl SessionContext {
                 // Command/user turns that run while delegations are pending
                 // are NOT part of the sequence (has_pending=false → normal
                 // delivery). Replaces the old unconditional overwrite with
-                // `has_pending_delegations()`, which wrongly marked such
+                // `has_pending_async_work()`, which wrongly marked such
                 // turns suspended and gated their delivery.
                 turn_result.has_pending = turn_result.has_pending || silenced;
                 // 单 preview (2026-08-12): this notice turn is now finished —
@@ -1573,10 +1582,10 @@ mod suspension_tests {
     #[test]
     fn pending_flips_with_registration_and_collection() {
         let ctx = suspended();
-        assert!(ctx.has_pending_delegations());
+        assert!(ctx.has_pending_async_work());
         assert_eq!(ctx.suspension_snapshot().unwrap().pending, vec!["t1"]);
         ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0);
-        assert!(!ctx.has_pending_delegations());
+        assert!(!ctx.has_pending_async_work());
         assert!(ctx.suspension_snapshot().is_some(), "collected result keeps the suspension until clear");
     }
 
@@ -1635,7 +1644,7 @@ mod suspension_tests {
     fn record_terminal_without_suspension_returns_no_suspension() {
         let (ctx, _m) = make_ctx();
         assert!(ctx.suspension_snapshot().is_none());
-        assert!(!ctx.has_pending_delegations());
+        assert!(!ctx.has_pending_async_work());
         let rec = ctx.record_terminal("t9".into(), SubStatus::Completed, "x".into(), 0);
         assert!(matches!(rec, TerminalRecord::NoSuspension));
         assert!(ctx.suspension_snapshot().is_none());

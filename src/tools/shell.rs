@@ -49,6 +49,11 @@ pub struct ShellCompletion {
     pub session_id: String,
     pub process_id: String,
     pub content: String,
+    /// issue #140: lets the orchestrator map this completion onto
+    /// `SubStatus` (Completed/Failed) for `record_terminal`, the same
+    /// suspension-collection call delegation terminal events go through.
+    /// `None` for an adopted orphan (never observed the real exit).
+    pub exit_code: Option<i32>,
 }
 
 const MAX_OUTPUT_INLINE: usize = 30_000;
@@ -206,6 +211,14 @@ pub struct ProcSummary {
 
 pub type ShellRegistry = Arc<RwLock<HashMap<String, ProcEntry>>>;
 
+/// issue #140: `spawn_tracked` always prefixes process ids with `sh_` — used
+/// by `recover_suspension` (orchestrator startup recovery) to tell a shell
+/// pending entry apart from a sub-agent session id in the shared, generic
+/// `TurnSuspension.pending` list.
+pub fn is_shell_process_id(id: &str) -> bool {
+    id.starts_with("sh_")
+}
+
 fn entry_dir(sessions_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir
         .join(crate::ids::bare_dir_name(session_id))
@@ -356,6 +369,41 @@ fn build_completion_content(process_id: &str, exit_code: Option<i32>, output_pat
     )
 }
 
+/// issue #140: build the restart-recovery notice for a `pending` shell
+/// process_id that did NOT survive the restart — checked by the caller
+/// against the live registry (a `running` entry after `adopt_after_restart`
+/// means it DID survive and its adopted reaper will complete it naturally;
+/// this is only for the rest). Reuses whatever the registry captured
+/// (state/exit_code/output tail, same shape as `build_completion_content`)
+/// for a richer notice than a generic "unknown"; falls back to a minimal
+/// message when the entry itself is gone (a much older restart already
+/// swept it via `ENTRY_RETENTION_SECS`).
+pub async fn recovery_lost_content(registry: &ShellRegistry, process_id: &str) -> String {
+    let entry = registry.read().await.get(process_id).cloned();
+    match entry {
+        Some(e) => {
+            let (raw, _) = read_lossy_tail(Path::new(&e.output_path), MAX_TRACKED_OUTPUT);
+            let (display, output_truncated) = cap_output_for_display(
+                &crate::str_utils::neutralize_spoofing(&raw),
+                Path::new(&e.output_path),
+            );
+            format!(
+                "[系统通知] 后台命令已中断 (process_id: {}, state: {}, exit_code: {}): daemon 重启，该进程未能存活（可能已完成但未及记录，也可能被中止）。\noutput_path: {}\n\noutput{}:\n{}",
+                process_id,
+                e.state,
+                e.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),
+                e.output_path,
+                if output_truncated { "（已截断）" } else { "" },
+                display
+            )
+        }
+        None => format!(
+            "[系统通知] 后台命令状态未知 (process_id: {}): daemon 重启，该进程记录已不可查（可能已被清理）。若仍需要这次任务的结果，请重新执行。",
+            process_id
+        ),
+    }
+}
+
 /// Watch a process this daemon instance actually spawned (owns as a real
 /// child) to completion, updating the table when it exits.
 ///
@@ -395,6 +443,7 @@ fn spawn_owned_reaper(
                         session_id,
                         process_id,
                         content,
+                        exit_code,
                     })
                     .await;
             }
@@ -440,6 +489,7 @@ fn spawn_adopted_reaper(
                                 session_id,
                                 process_id,
                                 content,
+                                exit_code: None,
                             })
                             .await;
                     }
@@ -634,6 +684,14 @@ pub struct ShellTool {
     /// issue #129: where `background: true` completions are reported.
     /// `None` for bare CLI usage / tests — no orchestrator to wake.
     notice_tx: Option<mpsc::Sender<ShellCompletion>>,
+    /// issue #140: session lookup for registering a notify-armed process as
+    /// pending async work (`SessionContext::add_pending_task`), the same
+    /// mechanism `agent_delegate(mode="async")` uses. Set once, after
+    /// construction — `ShellTool` is built before `SessionManager` exists in
+    /// `daemon.rs`'s composition order (mirrors `set_runtime`/`set_messenger`
+    /// elsewhere for the same reason). `None` for bare CLI usage / tests —
+    /// nothing to register against.
+    session_manager: std::sync::OnceLock<Arc<crate::agents::SessionManager>>,
 }
 
 impl Default for ShellTool {
@@ -648,6 +706,7 @@ impl ShellTool {
             registry: Arc::new(RwLock::new(HashMap::new())),
             sessions_dir,
             notice_tx: None,
+            session_manager: std::sync::OnceLock::new(),
         }
     }
 
@@ -659,6 +718,7 @@ impl ShellTool {
             registry: Arc::new(RwLock::new(HashMap::new())),
             sessions_dir,
             notice_tx: Some(notice_tx),
+            session_manager: std::sync::OnceLock::new(),
         }
     }
 
@@ -668,6 +728,32 @@ impl ShellTool {
 
     pub fn sessions_dir(&self) -> Option<PathBuf> {
         self.sessions_dir.clone()
+    }
+
+    /// issue #140: wire the `SessionManager` in after construction (daemon.rs
+    /// builds `ShellTool` before `SessionManager` exists). Idempotent no-op
+    /// if already set.
+    pub fn set_session_manager(&self, sm: Arc<crate::agents::SessionManager>) {
+        let _ = self.session_manager.set(sm);
+    }
+
+    /// issue #140: register `process_id` as pending async work on
+    /// `session_id`'s suspension — the shell-side half of the unification
+    /// with delegation (`SessionContext::add_pending_task` is the exact same
+    /// method `agent_delegate(mode="async")` calls). Called at every point a
+    /// process becomes armed for a completion notice: `background: true` at
+    /// spawn time, and the timeout-conversion branch in `execute()`. A
+    /// no-op when no `SessionManager` is wired (bare CLI / tests) or the
+    /// session has no live registered context (shouldn't happen — this only
+    /// runs from inside that session's own tool call — but tool execution
+    /// must never panic on a missing lookup).
+    fn register_pending(&self, session_id: &str, process_id: &str) {
+        let Some(sm) = self.session_manager.get() else {
+            return;
+        };
+        if let Some(sctx) = sm.registered_context_by_session_id(session_id) {
+            sctx.add_pending_task(process_id.to_string());
+        }
     }
 
     /// Spawn `command`, register it, and start the reaper that watches it to
@@ -734,6 +820,11 @@ impl ShellTool {
         };
         write_entry_disk(self.sessions_dir.as_deref(), &entry);
         self.registry.write().await.insert(process_id.clone(), entry);
+        if background {
+            // issue #140: armed for notify from the start — register now,
+            // same moment `notify_on_exit` was set on the entry above.
+            self.register_pending(session_id, &process_id);
+        }
 
         spawn_owned_reaper(
             self.registry.clone(),
@@ -869,6 +960,9 @@ impl Tool for ShellTool {
                     return Ok(terminal_result(&live, &process_id, &display, output_truncated));
                 }
             }
+            // issue #140: successfully armed (still running) — register now,
+            // same moment as the `background: true` spawn-time case above.
+            self.register_pending(&session.id, &process_id);
             let output = format!(
                 "state=running\nprocess_id={}\ncommand={}\ntimeout_secs={}\nnote=command is still running, it was NOT killed; you'll be notified automatically when it finishes — call sessions_yield to suspend and wait for that, or shell_kill(process_id) to terminate it\n\noutput_so_far{}:\n{}",
                 process_id,
@@ -1057,6 +1151,27 @@ impl Tool for ShellPollTool {
             output,
             error: None,
         })
+    }
+}
+
+/// Test-only `ProcEntry` constructor, exposed `pub(crate)` (not gated to
+/// this module's own `mod tests`) so other modules' tests — issue #140's
+/// `orchestrator::recovery` coverage in particular — can populate a
+/// `ShellRegistry` without needing every private field.
+#[cfg(test)]
+pub(crate) fn test_proc_entry(process_id: &str, session_id: &str, state: &str) -> ProcEntry {
+    ProcEntry {
+        process_id: process_id.to_string(),
+        session_id: session_id.to_string(),
+        command: "echo test".to_string(),
+        workdir: None,
+        pid: 999_999,
+        pid_start_ticks: None,
+        spawned_at_ms: now_ms(),
+        output_path: "/tmp/does-not-matter".to_string(),
+        state: state.to_string(),
+        exit_code: None,
+        notify_on_exit: true,
     }
 }
 
@@ -1505,9 +1620,93 @@ mod tests {
             .expect("channel not closed");
         assert_eq!(notice.session_id, "s1");
         assert_eq!(notice.process_id, process_id);
+        assert_eq!(notice.exit_code, Some(0));
         assert!(notice.content.contains(&process_id));
         assert!(notice.content.contains("exit_code: 0"));
         assert!(notice.content.contains("hello-from-bg"));
+    }
+
+    /// issue #140: a `background: true` spawn registers itself as pending
+    /// async work on its own session's suspension — the same mechanism
+    /// `agent_delegate(mode="async")` uses (`SessionContext::add_pending_task`)
+    /// — once `ShellTool` has a `SessionManager` wired in.
+    #[tokio::test]
+    async fn background_spawn_registers_pending_via_session_manager() {
+        let sm = Arc::new(crate::agents::session::SessionManager::default());
+        let sctx = sm.get_or_create_context("test:routing:key");
+        let sid = sctx.session_id.clone();
+        assert!(!sctx.has_pending_async_work());
+
+        let tool = ShellTool::new(None);
+        tool.set_session_manager(Arc::clone(&sm));
+        let session = crate::agents::session::Session::new(sid.clone());
+        let result = tool
+            .execute(json!({ "command": "sleep 30", "background": true }), &session)
+            .await
+            .unwrap();
+        let process_id = result
+            .output
+            .lines()
+            .find_map(|l| l.strip_prefix("process_id="))
+            .expect("process_id present")
+            .to_string();
+
+        assert!(sctx.has_pending_async_work());
+        let snap = sctx.suspension_snapshot().expect("suspension created");
+        assert!(snap.pending.contains(&process_id));
+
+        // Clean up so the test doesn't leak a sleep(30) orphan.
+        let kill_tool = ShellKillTool::new(tool.registry());
+        kill_tool
+            .execute(json!({ "process_id": process_id }), &session)
+            .await
+            .unwrap();
+    }
+
+    /// issue #140: the timeout-conversion branch registers pending too, at
+    /// the moment it flips `notify_on_exit` — not just the `background: true`
+    /// spawn-time path.
+    #[tokio::test]
+    async fn timeout_conversion_registers_pending_via_session_manager() {
+        let sm = Arc::new(crate::agents::session::SessionManager::default());
+        let sctx = sm.get_or_create_context("test:routing:key2");
+        let sid = sctx.session_id.clone();
+
+        let tool = ShellTool::new(None);
+        tool.set_session_manager(Arc::clone(&sm));
+        let session = crate::agents::session::Session::new(sid.clone());
+        let result = tool
+            .execute(
+                json!({ "command": "sleep 1 && echo done", "timeout_secs": 0 }),
+                &session,
+            )
+            .await
+            .unwrap();
+        assert!(result.output.contains("state=running"));
+        let process_id = result
+            .output
+            .lines()
+            .find_map(|l| l.strip_prefix("process_id="))
+            .expect("process_id present")
+            .to_string();
+
+        assert!(sctx.has_pending_async_work());
+        let snap = sctx.suspension_snapshot().expect("suspension created");
+        assert!(snap.pending.contains(&process_id));
+    }
+
+    /// issue #140: without a wired `SessionManager` (bare CLI / tests), a
+    /// `background: true` spawn must not panic — `register_pending` is a
+    /// silent no-op.
+    #[tokio::test]
+    async fn background_spawn_without_session_manager_does_not_panic() {
+        let tool = ShellTool::new(None);
+        let session = crate::agents::session::Session::new("s1".to_string());
+        let result = tool
+            .execute(json!({ "command": "echo hi", "background": true }), &session)
+            .await
+            .unwrap();
+        assert!(result.output.contains("state=running"));
     }
 
     /// issue #129: multiple background completions from the same session
