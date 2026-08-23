@@ -134,6 +134,9 @@ fn message_for_classified(c: &crate::providers::ClassifiedError) -> String {
                 "⚠️ 请求无法处理（格式错误）。".to_string()
             }
         }
+        ErrorCategory::ContentPolicy => {
+            "⚠️ 内容被模型方审查拦截，请调整表述后重试，或使用 /model 切换模型。".to_string()
+        }
         ErrorCategory::ToolCallLost => {
             "⚠️ 模型决定执行的操作在传输中丢失，未被执行。请重新说明需要做什么。".to_string()
         }
@@ -250,6 +253,21 @@ mod tests {
         assert!(msg.contains("冷却"), "got: {msg}");
         assert!(msg.contains("/model"), "got: {msg}");
         assert!(!msg.contains("过于频繁"), "got: {msg}");
+    }
+
+    /// Issue #136: a GLM content-policy rejection must not surface as the
+    /// generic "格式错误" (format error) text — that reads as a client bug
+    /// when the request was actually well-formed and just refused on content.
+    #[test]
+    fn http_400_data_inspection_failed_maps_to_content_policy_not_format_error() {
+        let e: anyhow::Error = crate::providers::ProviderHttpError {
+            status: 400,
+            message: r#"{"error":{"code":"data_inspection_failed","param":null,"message":"Input text data may contain inappropriate content.","type":"data_inspection_failed"}}"#.into(),
+        }
+        .into();
+        let msg = user_facing_error_message(&e);
+        assert!(msg.contains("审查"), "got: {msg}");
+        assert!(!msg.contains("格式错误"), "got: {msg}");
     }
 
     #[test]
