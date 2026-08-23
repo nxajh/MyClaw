@@ -178,9 +178,40 @@ pub struct OrchestratorCtx {
     /// opened (degraded to in-memory-only delivery, fail-open) or in
     /// in-memory tests.
     pub inbound_spool: Option<Arc<crate::storage::InboundSpool>>,
+    /// issue #131: shell process table, shared across all sessions. `None`
+    /// in tests / bare CLI usage that never registers the shell tool.
+    pub shell_registry: Option<crate::tools::shell::ShellRegistry>,
 }
 
 impl OrchestratorCtx {
+    /// issue #131 (decision 8 only — NOT the full `has_pending_delegations`
+    /// → `has_pending_async_work` generalization from the issue's changelist
+    /// item 1, deliberately deferred, see PR description): this session's
+    /// currently-running tracked shell processes, newest first. Used only to
+    /// build the read-only background-work status reminder injected into a
+    /// user turn that interrupts pending async work — never for silenced/
+    /// fold/drain gating, which stays delegation-only for now. Those gates
+    /// are computed synchronously in the same critical section as
+    /// `record_terminal` specifically to avoid a wake-vs-turn-start race
+    /// (the 2026-08-10 E2E 恢复轮1 fix); wiring the shell registry (behind a
+    /// `tokio::sync::RwLock`, so necessarily `.await`) into that section
+    /// would reopen the same race for shell completions and needs its own
+    /// design pass.
+    pub async fn running_shell_processes(&self, session_id: &str) -> Vec<crate::tools::shell::ProcSummary> {
+        let Some(registry) = &self.shell_registry else {
+            return Vec::new();
+        };
+        let mut running: Vec<crate::tools::shell::ProcSummary> = registry
+            .read()
+            .await
+            .values()
+            .filter(|e| e.session_id() == session_id && e.is_running())
+            .map(|e| e.summary())
+            .collect();
+        running.sort_by(|a, b| b.spawned_at_ms.cmp(&a.spawned_at_ms));
+        running
+    }
+
     /// Get or create the `SessionContext` for a routing key.
     ///
     /// First call loads the Session from SessionManager (restoring from

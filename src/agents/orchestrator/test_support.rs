@@ -144,6 +144,7 @@ pub(crate) fn test_ctx(channels: Vec<((String, String), Arc<dyn Channel>)>) -> O
         turn_tracker: Arc::new(TurnTracker::new()),
         completion_queue: None,
         inbound_spool: None,
+        shell_registry: None,
     }
 }
 

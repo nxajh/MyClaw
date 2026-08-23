@@ -463,6 +463,45 @@ impl Interceptor for DispatchTurn {
     }
 }
 
+/// issue #131 decision 8: build the background-work status reminder for a
+/// user turn that interrupts pending async work. `pending_sub_agents` is the
+/// count of not-yet-collected delegation terminals (from the suspension
+/// snapshot); `running_shell` is this session's currently-running tracked
+/// shell processes. Caller only invokes this when at least one is non-empty.
+fn render_background_work_reminder(
+    pending_sub_agents: usize,
+    running_shell: &[crate::tools::shell::ProcSummary],
+) -> String {
+    const COMMAND_PREVIEW_CHARS: usize = 60;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut lines = vec![
+        "[系统提醒] 有后台异步工作仍在进行中，回答用户关于进度/是否完成的问题时请依据下面这份清单，不要凭空猜测："
+            .to_string(),
+    ];
+    if pending_sub_agents > 0 {
+        lines.push(format!("- 子代理: {} 个仍在运行，尚未返回结果", pending_sub_agents));
+    }
+    if !running_shell.is_empty() {
+        lines.push(format!("- 后台进程: {} 个仍在运行", running_shell.len()));
+        for p in running_shell {
+            let elapsed_secs = ((now_ms - p.spawned_at_ms).max(0)) / 1000;
+            let cut = p
+                .command
+                .char_indices()
+                .nth(COMMAND_PREVIEW_CHARS)
+                .map(|(i, _)| i)
+                .unwrap_or(p.command.len());
+            let preview = &p.command[..cut];
+            let ellipsis = if cut < p.command.len() { "..." } else { "" };
+            lines.push(format!(
+                "  {} elapsed={}s command={:?}{}",
+                p.process_id, elapsed_secs, preview, ellipsis
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
 /// Record + persist the inbound message, then spawn the turn. Shared by the
 /// terminal `DispatchTurn` interceptor and by delegation wakes (a delegation
 /// completion is a system note that should drive a turn directly, without
@@ -501,24 +540,16 @@ pub(super) fn dispatch_turn_spawn(
 
     let session_ctx = ctx.sessions.get_or_create_context(&sk);
 
-    // 单 preview (2026-08-12): while the session is suspended on async
-    // delegations, real user messages are queued (静默排队 — no ack) instead
-    // of driving a fresh turn — the final resume turn drains them in order
-    // (RFC turn-suspension §3.3 单 preview/排队段). Delegation notices
-    // (silenced_override = Some) and slash commands (user-initiated, must not
-    // stall behind a suspension) bypass the queue; ask-reply/callback/known
-    // commands were already consumed by earlier interceptors. The
-    // `has_notice_turns_in_flight()` arm keeps queueing while `pending` is
-    // already empty but delegation notices are still queued behind
-    // `turn_lock` — the suspension (and its preview) survives until the LAST
-    // notice finishes, so the user message must not cut in between.
-    if msg.silenced_override.is_none()
-        && !msg.content.text.starts_with('/')
-        && (session_ctx.has_pending_delegations() || session_ctx.has_notice_turns_in_flight())
-    {
-        session_ctx.enqueue_user_message(msg);
-        return None;
-    }
+    // issue #131 decision 3: a real user message that arrives while the
+    // session is suspended on async delegations no longer gets silently
+    // queued (静默排队, removed — see the removed `pending_user_messages`
+    // subsystem) — it dispatches immediately below, same as any other turn.
+    // The 2026-08-14 incident (a queued "done yet?" was never drained after
+    // a hot switch, typing TTL expired, no reply ever sent) is the whole
+    // reason: an unbounded silent queue is worse than an interleaved reply.
+    // `decide_silenced` (session_context.rs) was updated in lockstep so this
+    // turn is never mistaken for a synthetic delegation-notice resume turn
+    // (which still silences on purpose, via an explicit `Some(bool)`).
 
     // B12: store the full inbound message right before processing the turn inside
     // process_turn where turn_lock is held, to avoid appending or overwriting
@@ -543,12 +574,9 @@ pub(super) fn dispatch_turn_spawn(
     let turn_tracker = ctx.turn_tracker.clone();
     let known_users = ctx.known_users.clone();
     let user_registry = ctx.user_registry.clone();
-    // 单 preview: the drained-queue re-dispatch re-runs the full chain, which
-    // needs the whole ctx — cheap (all fields are Arc/Clone).
+    // `ctx` is a borrow and cannot move into the 'static spawn closure —
+    // clone it (cheap, all fields are Arc/Clone).
     let ctx = ctx.clone();
-    // `key` is a borrow and cannot move into the 'static spawn closure; the
-    // drained message is re-dispatched against the same account pair.
-    let account = key.account_key();
     Some(tokio::spawn(async move {
         let _guard = turn_tracker.track();
         // RFC §3.5/§4.3: render per-turn injections — user-level mailbox
@@ -573,6 +601,25 @@ pub(super) fn dispatch_turn_spawn(
                     &pending,
                     display,
                 ));
+        }
+        // issue #131 decision 8: a genuine user message (never a synthetic
+        // delegation-notice turn, which knows its own status already) that
+        // finds async work still pending gets a status reminder — without
+        // this the model has no way to answer "still running?" accurately
+        // now that decision 3 removed the silent queue that used to make
+        // such interrupts wait until the work finished.
+        if msg.silenced_override.is_none() {
+            let pending_sub_agents = session_ctx
+                .suspension_snapshot()
+                .map(|s| s.pending.len())
+                .unwrap_or(0);
+            let running_shell = ctx.running_shell_processes(&sk).await;
+            if pending_sub_agents > 0 || !running_shell.is_empty() {
+                injections.push(render_background_work_reminder(
+                    pending_sub_agents,
+                    &running_shell,
+                ));
+            }
         }
         if !injections.is_empty() {
             session_ctx.stash_turn_injections(injections).await;
@@ -630,24 +677,9 @@ pub(super) fn dispatch_turn_spawn(
         if session_ctx.has_queued_delegation_notices() {
             super::delegation::drain_delegation_notices(&ctx, &session_ctx.session_id).await;
         }
-        // 单 preview (2026-08-12): after a turn that ends OUTSIDE the
-        // suspension sequence (not silenced, no re-delegation, suspension
-        // already clear), drain ONE queued user message and re-dispatch it
-        // through the full chain — serial, the next one is drained by the
-        // next such turn (turn_lock serialization makes this safe; each
-        // drain→dispatch→spawn returns, so no stack recursion).
-        match &result {
-            Ok(turn)
-                if !turn.has_pending
-                    && !session_ctx.has_pending_delegations()
-                    && !session_ctx.has_notice_turns_in_flight() =>
-            {
-                if let Some(queued) = session_ctx.take_user_message() {
-                    dispatch(&ctx, account.clone(), queued).await;
-                }
-            }
-            _ => {}
-        }
+        // issue #131 decision 3: the queued-user-message drain that used to
+        // run here is gone — user messages no longer queue (see the removed
+        // `pending_user_messages` subsystem), so there is nothing to drain.
         if let Err(ref e) = result {
             let text = crate::agents::user_messages::user_facing_error_message(e);
             let receiver = {
@@ -931,7 +963,7 @@ mod tests {
         assert!(ch.texts().iter().any(|t| t == MSG_ABORT_ACK));
     }
 
-    // ── DispatchTurn: 挂起期间用户消息排队 (RFC §3.7 架构修正) ─────────────
+    // ── DispatchTurn: 用户消息立即插话 (issue #131 decision 3 — 移除静默排队) ──
 
     /// Poll until the mock channel has received at least one message — the
     /// spawned turn fails fast against the NullRegistry (provider bail) and
@@ -947,8 +979,13 @@ mod tests {
         }
     }
 
+    /// issue #131 decision 3: a user message that arrives while the session
+    /// is suspended on async delegations no longer queues silently — it
+    /// dispatches a turn right away, same as any other message. This proves
+    /// a turn actually ran (fails fast against the NullRegistry and sends an
+    /// error notice) instead of being held back.
     #[tokio::test]
-    async fn dispatch_turn_queues_user_message_while_suspended() {
+    async fn dispatch_turn_interrupts_immediately_while_suspended() {
         let ch = MockChannel::new();
         let ctx = with_channel(ch.clone());
         let k = key();
@@ -957,104 +994,24 @@ mod tests {
 
         dispatch_turn(&ctx, &k, inbound_msg("user1", "while suspended")).await;
 
-        let queued = sctx.take_user_message().expect("message should be queued");
-        assert_eq!(queued.content.text, "while suspended");
-        // 静默排队:不发确认消息、不 spawn turn.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(ch.texts().is_empty(), "queuing must not send any message");
+        wait_for_sent(&ch).await;
     }
 
+    /// Same invariant when a delegation-notice turn is in flight (counter >
+    /// 0) even though `pending` is already empty — the old queue kept
+    /// blocking user messages in this window too; now nothing blocks it.
     #[tokio::test]
-    async fn dispatch_turn_queues_while_notice_in_flight_even_if_pending_empty() {
+    async fn dispatch_turn_interrupts_immediately_while_notice_in_flight() {
         let ch = MockChannel::new();
         let ctx = with_channel(ch.clone());
         let k = key();
         let sctx = ctx.sessions.get_or_create_context(&k.to_string());
-        // 刷屏 bug 窗口 (2026-08-12): 无挂起任务(或 pending 已被 wake burst 清空),
-        // 但 delegation-notice 轮仍在途(counter=1,排队在 turn_lock 之后)——用户
-        // 消息必须仍静默排队,不得插队开新 turn/preview。
         sctx.bump_notice_turn();
 
-        dispatch_turn(&ctx, &k, inbound_msg("user1", "queued while notice in flight")).await;
+        dispatch_turn(&ctx, &k, inbound_msg("user1", "while notice in flight")).await;
 
-        let queued = sctx
-            .take_user_message()
-            .expect("message should queue while notices are in flight");
-        assert_eq!(queued.content.text, "queued while notice in flight");
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(ch.texts().is_empty(), "queuing must not send any message");
-        // 清掉在途计数后队列恢复空(消息仍在队列,等待序列结束后 drain)。
+        wait_for_sent(&ch).await;
         sctx.finish_notice_turn();
-        assert!(!sctx.has_notice_turns_in_flight());
-    }
-
-    #[tokio::test]
-    async fn dispatch_turn_queue_preserves_fifo_order() {
-        let ch = MockChannel::new();
-        let ctx = with_channel(ch.clone());
-        let k = key();
-        let sctx = ctx.sessions.get_or_create_context(&k.to_string());
-        sctx.add_pending_task("t1".to_string());
-
-        dispatch_turn(&ctx, &k, inbound_msg("user1", "first")).await;
-        dispatch_turn(&ctx, &k, inbound_msg("user1", "second")).await;
-
-        assert_eq!(sctx.take_user_message().unwrap().content.text, "first");
-        assert_eq!(sctx.take_user_message().unwrap().content.text, "second");
-        assert!(sctx.take_user_message().is_none());
-    }
-
-    #[tokio::test]
-    async fn dispatch_turn_bypasses_queue_for_slash_command() {
-        let ch = MockChannel::new();
-        let ctx = with_channel(ch.clone());
-        let k = key();
-        let sctx = ctx.sessions.get_or_create_context(&k.to_string());
-        sctx.add_pending_task("t1".to_string());
-
-        dispatch_turn(&ctx, &k, inbound_msg("user1", "/status")).await;
-
-        assert!(
-            sctx.take_user_message().is_none(),
-            "slash commands must not queue behind a suspension"
-        );
-        // The command drives a turn immediately (fails fast → error notice).
-        wait_for_sent(&ch).await;
-    }
-
-    #[tokio::test]
-    async fn dispatch_turn_bypasses_queue_for_delegation_notice() {
-        let ch = MockChannel::new();
-        let ctx = with_channel(ch.clone());
-        let k = key();
-        let sctx = ctx.sessions.get_or_create_context(&k.to_string());
-        sctx.add_pending_task("t1".to_string());
-
-        let mut notice = inbound_msg("user1", "[系统通知] 子代理已完成后台任务");
-        notice.silenced_override = Some(true);
-        dispatch_turn(&ctx, &k, notice).await;
-
-        assert!(
-            sctx.take_user_message().is_none(),
-            "delegation notices must drive resume turns, not queue"
-        );
-        wait_for_sent(&ch).await;
-    }
-
-    #[tokio::test]
-    async fn dispatch_turn_does_not_queue_when_not_suspended() {
-        let ch = MockChannel::new();
-        let ctx = with_channel(ch.clone());
-        let k = key();
-        let sctx = ctx.sessions.get_or_create_context(&k.to_string());
-
-        dispatch_turn(&ctx, &k, inbound_msg("user1", "normal")).await;
-
-        assert!(
-            sctx.take_user_message().is_none(),
-            "unsuspended sessions never queue"
-        );
-        wait_for_sent(&ch).await;
     }
 
     // ── spool replay (RFC inbound-spool §6.4) ──────────────────────────────

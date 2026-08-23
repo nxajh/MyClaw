@@ -446,7 +446,7 @@ async fn recover_active_session(
     };
     let session_ctx = ctx.session_context_for(&sk);
 
-    let (text, turn_clean) = {
+    let text = {
         let _turn_guard = session_ctx.turn_lock.lock().await;
         let mut session = session_ctx.session.lock().await;
         let resolved = ResolvedTurn::resolve(&session, &ctx.runtime);
@@ -464,12 +464,7 @@ async fn recover_active_session(
             }
         }
         drop(session);
-        // Fix (2026-08-15): whether the recovery turn ended clean (no
-        // re-delegation) — feeds the user-message drain below, mirroring
-        // `dispatch_turn_spawn`'s tail `!turn.has_pending` guard.
-        let turn_clean = matches!(&result, Ok(None))
-            || matches!(&result, Ok(Some(tr)) if !tr.has_pending);
-        let text = match result {
+        match result {
             Ok(Some(tr)) => {
                 tracing::info!(session = %sk, "startup recovery: turn completed");
                 tr.text
@@ -482,8 +477,7 @@ async fn recover_active_session(
                 tracing::warn!(session = %sk, err = %e, "startup recovery failed");
                 crate::agents::user_messages::user_facing_error_message(&e)
             }
-        };
-        (text, turn_clean)
+        }
     };
     if !text.is_empty() {
         let message = ChannelOutboundMessage {
@@ -501,24 +495,13 @@ async fn recover_active_session(
     // `dispatch_turn_spawn`, so its end must run the same queue-drain tail —
     // delegation notices enqueued while the recovery turn ran (`route_notice`
     // saw a busy lock and queued for a "turn-end drain" that never came)
-    // would otherwise starve forever: the gate in `dispatch_turn_spawn`
-    // keeps queueing every user message while `has_notice_turns_in_flight()`
-    // is true, and no future turn exists to drain the notice queue
-    // (observed 2026-08-14: hot-switch recovery ended 16:13:52 without
-    // draining; "做完了吗"/"？" silently queued, typing TTL'd, never answered).
+    // would otherwise starve forever. (issue #131 decision 3: the mirrored
+    // queued-user-message drain that used to follow this — the actual
+    // trigger for the 2026-08-14 incident this comment references — is gone;
+    // user messages no longer queue at all, see the removed
+    // `pending_user_messages` subsystem.)
     if session_ctx.has_queued_delegation_notices() {
         super::delegation::drain_delegation_notices(&ctx, &session_ctx.session_id).await;
-    }
-    // Mirror the dispatch tail's user-message drain — ONE queued message,
-    // only outside a suspension sequence (notice turns just spawned keep
-    // the counter > 0; their own dispatch tails drain the rest in order).
-    if turn_clean
-        && !session_ctx.has_pending_delegations()
-        && !session_ctx.has_notice_turns_in_flight()
-    {
-        if let Some(queued) = session_ctx.take_user_message() {
-            super::inbound::dispatch(&ctx, key.account_key(), queued).await;
-        }
     }
 
     // Phase 2 — lock-free (process_turn takes turn_lock itself).

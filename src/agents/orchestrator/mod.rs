@@ -274,6 +274,12 @@ pub struct OrchestratorParts {
     pub base_dir: std::path::PathBuf,
     /// Shared scheduler for run result tracking and auto-delete.
     pub scheduler: Option<crate::agents::SharedScheduler>,
+    /// issue #131: shell process table, shared across all sessions — used to
+    /// build the background-work status reminder injected into a user turn
+    /// that interrupts pending async work (see
+    /// `OrchestratorCtx::running_shell_processes`). `None` in tests / bare
+    /// CLI usage that never registers the shell tool.
+    pub shell_registry: Option<crate::tools::shell::ShellRegistry>,
 }
 
 impl Orchestrator {
@@ -372,6 +378,7 @@ impl Orchestrator {
             turn_tracker: Arc::new(ctx::TurnTracker::new()),
             completion_queue,
             inbound_spool,
+            shell_registry: parts.shell_registry,
         });
 
         let orchestrator = Orchestrator {

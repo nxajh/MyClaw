@@ -159,13 +159,49 @@ pub struct ProcEntry {
     /// "running" | "exited" | "killed" | "lost_on_restart"
     state: String,
     exit_code: Option<i32>,
-    /// issue #129: only `background: true` spawns get a completion notice —
-    /// a plain foreground call that merely outran `timeout_secs` (and so
-    /// went through the exact same reaper) must stay silent on exit.
-    /// `#[serde(default)]` so process-table entries persisted before this
-    /// field existed still deserialize (as `false`, the old behavior).
+    /// issue #129/#131: whether this process's eventual exit should wake the
+    /// session with a completion notice. True for an explicit `background:
+    /// true` spawn from the start; a plain foreground call starts `false`
+    /// and only flips to `true` if it outruns `timeout_secs` while still
+    /// running (issue #131 decision 2 — a forced-background conversion,
+    /// reversing #129/#130's original "timeout path never notifies"
+    /// decision). A foreground call that finishes within `timeout_secs`
+    /// never flips — its result was already delivered synchronously, so a
+    /// notice would just duplicate it. `#[serde(default)]` so process-table
+    /// entries persisted before this field existed still deserialize (as
+    /// `false`, the old behavior).
     #[serde(default)]
     notify_on_exit: bool,
+}
+
+impl ProcEntry {
+    /// issue #131: owning session, for `OrchestratorCtx::running_shell_processes`
+    /// to filter the shared registry per-session.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.state == "running"
+    }
+
+    pub fn summary(&self) -> ProcSummary {
+        ProcSummary {
+            process_id: self.process_id.clone(),
+            command: self.command.clone(),
+            spawned_at_ms: self.spawned_at_ms,
+        }
+    }
+}
+
+/// issue #131: read-only view of a tracked process for the orchestrator's
+/// background-work status reminder (injected into a user turn that
+/// interrupts pending async work) — deliberately narrower than `ProcEntry`
+/// so that module stays the only place that knows the full entry shape.
+pub struct ProcSummary {
+    pub process_id: String,
+    pub command: String,
+    pub spawned_at_ms: i64,
 }
 
 pub type ShellRegistry = Arc<RwLock<HashMap<String, ProcEntry>>>;
@@ -229,18 +265,75 @@ fn pid_still_this_process(pid: i32, expected_start_ticks: Option<u64>) -> bool {
     }
 }
 
+/// Returns the updated entry (cloned) so callers can decide whether to
+/// notify without a second registry lookup racing a concurrent update.
 async fn set_state(
     registry: &ShellRegistry,
     sessions_dir: Option<&Path>,
     process_id: &str,
     state: &str,
     exit_code: Option<i32>,
-) {
+) -> Option<ProcEntry> {
     let mut map = registry.write().await;
-    if let Some(entry) = map.get_mut(process_id) {
-        entry.state = state.to_string();
-        entry.exit_code = exit_code;
+    let entry = map.get_mut(process_id)?;
+    entry.state = state.to_string();
+    entry.exit_code = exit_code;
+    write_entry_disk(sessions_dir, entry);
+    Some(entry.clone())
+}
+
+/// issue #131 decision 2: flip a still-running process to "notify on exit"
+/// once it has outrun `timeout_secs` — the synchronous `shell` call is about
+/// to report it as still going (no terminal result to deliver inline), so
+/// unify it with the explicit `background: true` case and notify when it
+/// eventually finishes.
+///
+/// Returns the entry's state *after* the attempted flip (still cloned even
+/// when no flip happened) so the caller can detect the narrow race where the
+/// process exits between `execute()`'s deadline snapshot and this function
+/// acquiring the write lock: the reaper may already have recorded a
+/// terminal state with `notify_on_exit` still `false` (this function then
+/// correctly no-ops rather than flipping a state that's no longer
+/// `"running"`), in which case no notice will ever fire for it and the
+/// caller must report the terminal result inline instead of promising one
+/// (review finding on #139 — xiaoer-bot). `None` only if the entry was
+/// removed from the registry entirely in that same window.
+async fn mark_notify_on_exit(
+    registry: &ShellRegistry,
+    sessions_dir: Option<&Path>,
+    process_id: &str,
+) -> Option<ProcEntry> {
+    let mut map = registry.write().await;
+    let entry = map.get_mut(process_id)?;
+    if entry.state == "running" && !entry.notify_on_exit {
+        entry.notify_on_exit = true;
         write_entry_disk(sessions_dir, entry);
+    }
+    Some(entry.clone())
+}
+
+/// Render the terminal-state tool output shared by `execute()`'s normal
+/// completion path and its race-recovery path (an entry that turned out to
+/// already be terminal when `mark_notify_on_exit` looked).
+fn terminal_result(entry: &ProcEntry, process_id: &str, display: &str, output_truncated: bool) -> ToolResult {
+    let exit_code = entry.exit_code.unwrap_or(-1);
+    let success = entry.state == "exited" && exit_code == 0;
+    let output = format!(
+        "state={}\nexit_code={}\nprocess_id={}\n\noutput{}:\n{}",
+        entry.state,
+        entry.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),
+        process_id,
+        if output_truncated { " (truncated)" } else { "" },
+        display
+    );
+    ToolResult {
+        success,
+        output,
+        error: if success {
+            None
+        } else {
+            Some(format!("exit code {}", exit_code))
+        },
     }
 }
 
@@ -266,9 +359,13 @@ fn build_completion_content(process_id: &str, exit_code: Option<i32>, output_pat
 /// Watch a process this daemon instance actually spawned (owns as a real
 /// child) to completion, updating the table when it exits.
 ///
-/// `notify` is `Some` only for a `background: true` spawn (issue #129) —
-/// the timeout path (a foreground call that outran `timeout_secs`) reaches
-/// this same function but with `notify: None`, so it stays silent on exit.
+/// `notice_tx` is the tool's completion-notice sender whenever one is
+/// configured (issue #129) — whether a notice actually fires depends on the
+/// entry's live `notify_on_exit` at the moment of exit (issue #131 decision
+/// 2), NOT a value captured at spawn time: a plain foreground call starts
+/// `notify_on_exit=false` but `execute()`'s timeout branch can flip it to
+/// `true` (via `mark_notify_on_exit`) after this reaper is already running,
+/// once it outruns `timeout_secs` while still going.
 #[allow(clippy::too_many_arguments)]
 fn spawn_owned_reaper(
     registry: ShellRegistry,
@@ -276,13 +373,13 @@ fn spawn_owned_reaper(
     process_id: String,
     session_id: String,
     output_path: PathBuf,
-    notify: Option<mpsc::Sender<ShellCompletion>>,
+    notice_tx: Option<mpsc::Sender<ShellCompletion>>,
     mut child: tokio::process::Child,
 ) {
     tokio::spawn(async move {
         let status = child.wait().await.ok();
         let exit_code = status.and_then(|s| s.code());
-        set_state(
+        let updated = set_state(
             &registry,
             sessions_dir.as_deref(),
             &process_id,
@@ -290,15 +387,17 @@ fn spawn_owned_reaper(
             exit_code,
         )
         .await;
-        if let Some(tx) = notify {
-            let content = build_completion_content(&process_id, exit_code, &output_path);
-            let _ = tx
-                .send(ShellCompletion {
-                    session_id,
-                    process_id,
-                    content,
-                })
-                .await;
+        if let (Some(tx), Some(entry)) = (notice_tx, updated) {
+            if entry.notify_on_exit {
+                let content = build_completion_content(&process_id, exit_code, &output_path);
+                let _ = tx
+                    .send(ShellCompletion {
+                        session_id,
+                        process_id,
+                        content,
+                    })
+                    .await;
+            }
         }
     });
 }
@@ -308,8 +407,9 @@ fn spawn_owned_reaper(
 /// `/proc` instead. The exit code of an orphan we didn't reap is not
 /// retrievable, so this only ever records that it finished, not how.
 ///
-/// `notify` mirrors `spawn_owned_reaper`: `Some` only for a `background:
-/// true` spawn that survived the hot switch (issue #129).
+/// `notice_tx` mirrors `spawn_owned_reaper`: whether a notice actually fires
+/// is decided from the live entry's `notify_on_exit` at exit time, not a
+/// value captured at adopt time (issue #131 decision 2).
 #[allow(clippy::too_many_arguments)]
 fn spawn_adopted_reaper(
     registry: ShellRegistry,
@@ -317,14 +417,14 @@ fn spawn_adopted_reaper(
     process_id: String,
     session_id: String,
     output_path: PathBuf,
-    notify: Option<mpsc::Sender<ShellCompletion>>,
+    notice_tx: Option<mpsc::Sender<ShellCompletion>>,
     pid: i32,
     pid_start_ticks: Option<u64>,
 ) {
     tokio::spawn(async move {
         loop {
             if !pid_still_this_process(pid, pid_start_ticks) {
-                set_state(
+                let updated = set_state(
                     &registry,
                     sessions_dir.as_deref(),
                     &process_id,
@@ -332,15 +432,17 @@ fn spawn_adopted_reaper(
                     None,
                 )
                 .await;
-                if let Some(tx) = notify {
-                    let content = build_completion_content(&process_id, None, &output_path);
-                    let _ = tx
-                        .send(ShellCompletion {
-                            session_id,
-                            process_id,
-                            content,
-                        })
-                        .await;
+                if let (Some(tx), Some(entry)) = (notice_tx, updated) {
+                    if entry.notify_on_exit {
+                        let content = build_completion_content(&process_id, None, &output_path);
+                        let _ = tx
+                            .send(ShellCompletion {
+                                session_id,
+                                process_id,
+                                content,
+                            })
+                            .await;
+                    }
                 }
                 break;
             }
@@ -411,7 +513,7 @@ pub async fn adopt_after_restart(
                     entry.process_id.clone(),
                     entry.session_id.clone(),
                     PathBuf::from(&entry.output_path),
-                    entry.notify_on_exit.then(|| notice_tx.clone()).flatten(),
+                    notice_tx.clone(),
                     entry.pid,
                     entry.pid_start_ticks,
                 );
@@ -506,7 +608,8 @@ pub fn latest_entry_summary(sessions_dir: &Path, session_id: &str) -> Option<Str
         "running" => format!(
             "This shell command is still running (process_id={}, command={:?}) — it \
              survived the restart and was NOT re-executed to avoid running it twice. \
-             Use shell_poll to check on it or shell_kill to stop it.",
+             Call sessions_yield to suspend and be woken when it finishes, shell_poll for \
+             an instant peek, or shell_kill to stop it.",
             entry.process_id, entry.command
         ),
         "lost_on_restart" => format!(
@@ -638,7 +741,7 @@ impl ShellTool {
             process_id.clone(),
             session_id.to_string(),
             output_path,
-            background.then(|| self.notice_tx.clone()).flatten(),
+            self.notice_tx.clone(),
             child,
         );
 
@@ -661,11 +764,12 @@ impl Tool for ShellTool {
          Multi-line commands (heredocs, if/for/while/case blocks) run exactly \
          as they would in a real shell — the command is never split or rewritten. \
          On timeout the command is NOT killed: it keeps running, and you get back \
-         a process_id plus whatever output has been produced so far — use \
-         shell_poll to keep checking it and shell_kill to terminate it. \
+         a process_id plus whatever output has been produced so far — you'll be \
+         notified automatically when it finishes; call sessions_yield to suspend \
+         and wait for that (never poll in a loop), or shell_kill to terminate it. \
          Set `background: true` to skip waiting entirely and get the process_id \
-         immediately — you'll be notified automatically when it finishes (no need \
-         to poll); shell_poll still works if you want to check sooner. Large output \
+         immediately, same wake-on-completion semantics. shell_poll still works \
+         for an instant peek if you want to check sooner. Large output \
          (>30K chars) is truncated: the first 30K is returned inline and the full \
          output is available via full_output_path."
     }
@@ -721,7 +825,7 @@ impl Tool for ShellTool {
             return Ok(ToolResult {
                 success: true,
                 output: format!(
-                    "state=running\nprocess_id={}\ncommand={}\nuse shell_poll to check status and collect output\n",
+                    "state=running\nprocess_id={}\ncommand={}\nstarted in background — call sessions_yield to suspend and be woken automatically when it finishes (zero cost, no polling); shell_poll(process_id) still works for an instant peek if you want to check sooner.\n",
                     process_id, command
                 ),
                 error: None,
@@ -747,10 +851,26 @@ impl Tool for ShellTool {
         let output_truncated = tail_truncated || inline_truncated;
 
         if entry.state == "running" {
-            // Timed out, still going — NOT killed. Report and hand back the
-            // process_id; shell_poll/shell_kill take it from here.
+            // Timed out, still going — NOT killed. issue #131 decision 2:
+            // this call already reported "still running" with no terminal
+            // result, so from here on it's treated the same as an explicit
+            // `background: true` spawn — armed for a completion notice.
+            //
+            // Narrow race (xiaoer-bot review, #139): the process can exit
+            // between the deadline snapshot above and this flip acquiring
+            // the write lock — if the reaper wins, it already recorded a
+            // terminal state with `notify_on_exit` still false, and the flip
+            // below correctly no-ops (nothing "running" left to arm). No
+            // notice will ever fire for it then, so detect that case via the
+            // returned live state and report the terminal result inline
+            // instead of promising a notify that would never come.
+            if let Some(live) = mark_notify_on_exit(&self.registry, self.sessions_dir.as_deref(), &process_id).await {
+                if live.state != "running" {
+                    return Ok(terminal_result(&live, &process_id, &display, output_truncated));
+                }
+            }
             let output = format!(
-                "state=running\nprocess_id={}\ncommand={}\ntimeout_secs={}\nnote=command is still running, it was NOT killed; use shell_poll(process_id) to keep checking or shell_kill(process_id) to terminate it\n\noutput_so_far{}:\n{}",
+                "state=running\nprocess_id={}\ncommand={}\ntimeout_secs={}\nnote=command is still running, it was NOT killed; you'll be notified automatically when it finishes — call sessions_yield to suspend and wait for that, or shell_kill(process_id) to terminate it\n\noutput_so_far{}:\n{}",
                 process_id,
                 command,
                 timeout_secs,
@@ -764,25 +884,7 @@ impl Tool for ShellTool {
             });
         }
 
-        let exit_code = entry.exit_code.unwrap_or(-1);
-        let success = entry.state == "exited" && exit_code == 0;
-        let output = format!(
-            "state={}\nexit_code={}\nprocess_id={}\n\noutput{}:\n{}",
-            entry.state,
-            entry.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),
-            process_id,
-            if output_truncated { " (truncated)" } else { "" },
-            display
-        );
-        Ok(ToolResult {
-            success,
-            output,
-            error: if success {
-                None
-            } else {
-                Some(format!("exit code {}", exit_code))
-            },
-        })
+        Ok(terminal_result(&entry, &process_id, &display, output_truncated))
     }
 }
 
@@ -856,12 +958,14 @@ impl Tool for ShellPollTool {
 
     fn description(&self) -> &str {
         "Check on a shell process by process_id (from `shell`, foreground or background). \
-         Returns accumulated output and machine-readable state (running/exited/killed/lost_on_restart) \
-         and exit_code. Set `wait_secs` to wait for completion before returning. Set `remove: true` \
-         to clean up the process entry after reading — if it's still running this also terminates it \
-         (equivalent to shell_kill) before removing. `lost_on_restart` means the daemon restarted \
-         through a path that does not preserve child processes; the output shown is everything \
-         captured before that happened."
+         Instant peek only — returns accumulated output and machine-readable state \
+         (running/exited/killed/lost_on_restart) and exit_code without waiting. To wait for \
+         completion, call sessions_yield instead (you're woken automatically when it finishes; \
+         never poll shell_poll in a loop). Set `remove: true` to clean up the process entry \
+         after reading — if it's still running this also terminates it (equivalent to \
+         shell_kill) before removing. `lost_on_restart` means the daemon restarted through a \
+         path that does not preserve child processes; the output shown is everything captured \
+         before that happened."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -869,8 +973,7 @@ impl Tool for ShellPollTool {
             "type": "object",
             "properties": {
                 "process_id": { "type": "string", "description": "The process_id returned by `shell`." },
-                "remove": { "type": "boolean", "description": "If true, remove the process entry after reading output (default: false). If the process is still running, this kills it first." },
-                "wait_secs": { "type": "integer", "description": "Optional seconds to wait for the process to finish before returning (default 0, max 300)." }
+                "remove": { "type": "boolean", "description": "If true, remove the process entry after reading output (default: false). If the process is still running, this kills it first." }
             },
             "required": ["process_id"]
         })
@@ -889,9 +992,7 @@ impl Tool for ShellPollTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'process_id' is required"))?;
         let remove = args["remove"].as_bool().unwrap_or(false);
-        let wait_secs = args["wait_secs"].as_u64().unwrap_or(0).min(300);
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs);
         let found = self.registry.read().await.get(process_id).cloned();
         let mut entry = match found {
             Some(e) => e,
@@ -909,13 +1010,6 @@ impl Tool for ShellPollTool {
                 });
             }
         };
-        while entry.state == "running" && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            entry = match self.registry.read().await.get(process_id).cloned() {
-                Some(e) => e,
-                None => break,
-            };
-        }
 
         if remove && entry.state == "running" {
             unsafe {
@@ -1291,12 +1385,13 @@ mod tests {
         }
     }
 
-    /// issue #129: a plain (non-background) call that merely outran
-    /// `timeout_secs` goes through the exact same reaper as a `background:
-    /// true` spawn — it must NOT get a completion notice once it finally
-    /// exits, only the explicit background path should.
+    /// issue #131 decision 2 (reverses #129/#130's original behavior): a
+    /// plain (non-background) call that outran `timeout_secs` is forced into
+    /// the same "notify on exit" semantics as an explicit `background: true`
+    /// spawn — the synchronous return already reported no terminal result,
+    /// so the eventual completion must still wake the session.
     #[tokio::test]
-    async fn timeout_path_sends_no_completion_notice() {
+    async fn timeout_path_now_sends_completion_notice() {
         let (tx, mut rx) = mpsc::channel::<ShellCompletion>(8);
         let tool = ShellTool::new_with_notice_sender(None, tx);
         let session = crate::agents::session::Session::new("s1".to_string());
@@ -1309,13 +1404,77 @@ mod tests {
             .unwrap();
         assert!(result.output.contains("state=running"));
 
-        // Give the command time to actually finish (past the 1s sleep).
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let notice = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timeout-forced-background process must send a completion notice")
+            .expect("channel not closed");
+        assert_eq!(notice.session_id, "s1");
+        assert!(notice.content.contains("done"));
+    }
+
+    /// issue #131 decision 2's other half: a plain foreground call that
+    /// finishes WITHIN `timeout_secs` already delivered its terminal result
+    /// synchronously — it must NOT also fire an async completion notice
+    /// (that would just duplicate what the model already saw in this turn).
+    #[tokio::test]
+    async fn fast_foreground_completion_sends_no_duplicate_notice() {
+        let (tx, mut rx) = mpsc::channel::<ShellCompletion>(8);
+        let tool = ShellTool::new_with_notice_sender(None, tx);
+        let session = crate::agents::session::Session::new("s1".to_string());
+        let result = tool
+            .execute(
+                json!({ "command": "echo done", "timeout_secs": 5 }),
+                &session,
+            )
+            .await
+            .unwrap();
+        assert!(result.output.contains("state=exited"));
+
         assert!(
-            tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            tokio::time::timeout(Duration::from_millis(300), rx.recv())
                 .await
                 .is_err(),
-            "timeout path must never send a completion notice"
+            "a foreground call that finished within timeout_secs must not send a completion notice"
+        );
+    }
+
+    /// issue #131 review (xiaoer-bot, #139): `mark_notify_on_exit` flips a
+    /// still-running entry and returns its live (now-armed) state.
+    #[tokio::test]
+    async fn mark_notify_on_exit_flips_running_entry() {
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        registry
+            .write()
+            .await
+            .insert("sh_x".to_string(), test_entry("running"));
+
+        let live = mark_notify_on_exit(&registry, None, "sh_x")
+            .await
+            .expect("entry present");
+        assert_eq!(live.state, "running");
+        assert!(live.notify_on_exit);
+    }
+
+    /// issue #131 review (xiaoer-bot, #139): the narrow race this guards —
+    /// if the process has already reached a terminal state by the time
+    /// `mark_notify_on_exit` gets the write lock (the reaper won), it must
+    /// no-op (nothing "running" to arm) and hand back the terminal state so
+    /// `execute()` can report it inline instead of promising a notify that
+    /// will never fire.
+    #[tokio::test]
+    async fn mark_notify_on_exit_is_a_noop_once_already_terminal() {
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let mut entry = test_entry("exited");
+        entry.exit_code = Some(0);
+        registry.write().await.insert("sh_x".to_string(), entry);
+
+        let live = mark_notify_on_exit(&registry, None, "sh_x")
+            .await
+            .expect("entry present");
+        assert_eq!(live.state, "exited");
+        assert!(
+            !live.notify_on_exit,
+            "a terminal entry must not be armed — the reaper already decided notify_on_exit for it"
         );
     }
 
