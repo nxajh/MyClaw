@@ -1,0 +1,71 @@
+{
+  "files": [
+    {
+      "file": "src/agents/agent/exec_marker.rs",
+      "total_lines": 110,
+      "pub_symbols": 7,
+      "private_fns": 1,
+      "struct_pub_fields": 2,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ExecMarkerGuard",
+        "exec_marker_clear",
+        "exec_marker_read",
+        "exec_marker_write",
+        "last_user_text",
+        "llm_usage",
+        "persist_last"
+      ]
+    },
+    {
+      "file": "src/agents/agent/mod.rs",
+      "total_lines": 1718,
+      "pub_symbols": 2,
+      "private_fns": 40,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "Agent",
+        "new"
+      ]
+    },
+    {
+      "file": "src/agents/agent/retry.rs",
+      "total_lines": 44,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "backoff_duration",
+        "is_transient_llm_error"
+      ]
+    },
+    {
+      "file": "src/agents/agent/stream_collect.rs",
+      "total_lines": 443,
+      "pub_symbols": 1,
+      "private_fns": 1,
+      "struct_pub_fields": 8,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "CollectedResponse"
+      ]
+    },
+    {
+      "file": "src/agents/agent/tool_filter.rs",
+      "total_lines": 310,
+      "pub_symbols": 5,
+      "private_fns": 6,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "allowed_tools",
+        "filter_modality_redundant_tools",
+        "filter_turn_scoped_tools",
+        "fold_absent_tool",
+        "native_media_availability"
+      ]
+    }
+  ]
+}

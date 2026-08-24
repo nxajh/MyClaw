@@ -1,0 +1,17 @@
+{
+  "files": [
+    {
+      "file": "src/agents/agent.rs",
+      "total_lines": 2529,
+      "pub_symbols": 3,
+      "private_fns": 56,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "Agent",
+        "fold_absent_tool",
+        "new"
+      ]
+    }
+  ]
+}
