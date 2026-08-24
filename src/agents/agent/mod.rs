@@ -1166,7 +1166,6 @@ mod tests {
     use crate::agents::{AgentRegistry, LoopBreaker, LoopBreakerConfig};
     use crate::config::agent::{PermissionMode, RunMode};
     use crate::config::sub_agent::SubAgentConfig;
-    use crate::providers::ToolCall;
     use crate::providers::{
         ChatModelConfig, ChatProvider, EmbeddingProvider, ImageGenerationProvider,
         ProviderSummary, SearchFallbackEntry, SearchProvider, SttProvider, Tool, ToolCall,
