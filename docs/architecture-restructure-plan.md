@@ -13,10 +13,10 @@ MyClaw 单 crate 内逻辑分层（无编译器边界，靠依赖方向断言维
 | 层 | 模块 | 允许依赖 | 断言 |
 |---|---|---|---|
 | **L0 契约层** | api（新建） | 零 `use crate::` | `grep -r "use crate::" src/api/` 输出空 |
-| **L1 基础层** | ids, config, str_utils, storage（纯存储部分）, scheduling-types | L0 + 基础内部 | `grep -r "use crate::" src/{ids,config,str_utils,scheduling_types}/` 仅匹配 L0/L1 模块 |
+| **L1 基础层** | ids, config, str_utils, storage（纯存储部分）, scheduling_types | L0 + 基础内部 | `grep -r "use crate::" src/{ids,config,str_utils,scheduling_types}/` 仅匹配 L0/L1 模块 |
 | **L2 服务层** | providers, memory, identity | L0 + L1 | `grep -r "use crate::" src/{providers,memory,identity}/` 仅匹配 L0/L1 |
 | **L3 工具层** | tools | L0 + L1 + L2（不引 L4/L5） | `grep -r "use crate::" src/tools/` 不匹配 agents/scheduling/commands/channels |
-| **L4 运行时层** | agents（runtime 核心）, scheduling-runtime, commands | L0-L3 | `grep -r "use crate::" src/{agents,scheduling,commands}/` 不匹配 channels/daemon |
+| **L4 运行时层** | agents（runtime 核心）, scheduling_runtime, commands | L0-L3 | `grep -r "use crate::" src/{agents,scheduling_runtime,commands}/` 不匹配 channels/daemon |
 | **L5 渠道层** | channels | L0-L4（顶层驱动） | `grep -r "use crate::" src/channels/` 仅匹配 L0-L4 |
 | **L6 组合根** | daemon, cli, webui | 全引 | 唯一合法的"全知"点 |
 
@@ -58,14 +58,14 @@ for mod in providers memory identity; do
 done
 
 # L3 工具层：不引 L4/L5
-if grep -rq "use crate::\(agents\|scheduling\|commands\|channels\)" src/tools/ 2>/dev/null; then
+if grep -rq "use crate::\(agents\|scheduling_runtime\|commands\|channels\)" src/tools/ 2>/dev/null; then
   echo "❌ L3 tools 违规引用 L4/L5："
-  grep -rn "use crate::\(agents\|scheduling\|commands\|channels\)" src/tools/
+  grep -rn "use crate::\(agents\|scheduling_runtime\|commands\|channels\)" src/tools/
   violations=$((violations + 1))
 fi
 
 # L4 运行时层：不引 L5/L6
-for mod in agents scheduling commands; do
+for mod in agents scheduling_runtime commands; do
   if grep -rq "use crate::\(channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null; then
     echo "❌ L4 $mod 违规引用 L5/L6："
     grep -rn "use crate::\(channels\|daemon\|cli\|webui\)" src/$mod/
@@ -120,10 +120,10 @@ fi
 | providers | 10321 | 顶层 | **留** | L2 | 厂商接入 + capability trait；微文件合并 |
 | memory | 775 | 顶层 | **留** | L2 | 纯文件 wiki，零内部依赖 |
 | identity | 0 | 不存在 | **新建** | L2 | 从 agents 迁出：known_users/user_registry/user_profile/user_messages（3063 行），tools 和 agents 都消费 |
-| scheduling-types | 0 | 不存在 | **新建** | L1 | 从 agents/scheduling 迁出：cron_types.rs（291 行纯类型），tools 和 runtime 都消费 |
+| scheduling_types | 0 | 不存在 | **新建** | L1 | 从 agents/scheduling 迁出：cron_types.rs（291 行纯类型），tools 和 runtime 都消费 |
 | tools | 16784 | 顶层 | **留** | L3 | 内置工具实现；Tool trait 移到 api |
 | agents | 38157 | 顶层 | **拆** | L4 | 借居域迁出（identity/scheduling/commands） |
-| scheduling-runtime | 0 | 不存在 | **新建** | L4 | 从 agents 迁出：scheduler.rs 等运行时（4291 行），需回调 agent turn |
+| scheduling_runtime | 0 | 不存在 | **新建** | L4 | 从 agents 迁出：scheduler.rs 等运行时（4291 行），需回调 agent turn |
 | commands | 0 | 不存在 | **新建** | L4 | 从 agents 迁出：commands/（2433 行） |
 | channels | 15597 | 顶层 | **留** | L5 | 渠道适配层；client.rs 迁 webui；Channel trait 迁 api |
 | webui | 0 | 不存在 | **新建** | L6 | 从 channels 迁出：client.rs（2852 行 WebUI API 后端） |
@@ -136,7 +136,7 @@ fi
 | hot_switch/update_state/signal/sys_info | ~673 | 顶层 | **留** | L6 | 小工具，daemon+cli 双端共用 |
 
 **处置汇总**：
-- 新建 5 模块：api（L0）、identity（L2）、scheduling-types（L1）、scheduling-runtime/commands（L4）、webui（L6）
+- 新建 5 模块：api（L0）、identity（L2）、scheduling_types（L1）、scheduling_runtime/commands（L4）、webui（L6）
 - 拆 1 模块：agents（借居域迁出）
 - 并入 1 模块：registry→providers
 - 留 15 模块（部分内部调整）
@@ -265,14 +265,14 @@ fi
 - 更新 agents/commands/tools/daemon 引用路径
 - 验收：`verify-layering.sh` L2 合规；agents 行数 < 35000
 
-2b. **scheduling-types 迁出到 L1**（1 PR）
+2b. **scheduling_types 迁出到 L1**（1 PR）
 - 新建 `src/scheduling_types/` 模块（L1）
 - 移动 `agents/scheduling/cron_types.rs`（291 行纯类型）
 - 更新 tools/cronjob_tool.rs 引用路径（从 `agents::scheduling::cron_types` 改为 `scheduling_types`）
 - 验收：`verify-layering.sh` L1 合规；tools→agents scheduling 依赖归零
 
-2c. **scheduling-runtime 迁出到 L4**（1 PR）
-- 新建 `src/scheduling/` 模块（L4）
+2c. **scheduling_runtime 迁出到 L4**（1 PR）
+- 新建 `src/scheduling_runtime/` 模块（L4）
 - 移动 scheduler.rs/work_unit.rs/cron_loader.rs（4291 行运行时）
 - 更新 daemon 引用路径
 - 验收：`verify-layering.sh` L4 合规；agents 行数 < 31000
