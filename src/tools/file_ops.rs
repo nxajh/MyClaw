@@ -115,7 +115,7 @@ impl Tool for FileReadTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
@@ -517,7 +517,7 @@ impl Tool for FileWriteTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
@@ -621,7 +621,7 @@ impl Tool for FileEditTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()

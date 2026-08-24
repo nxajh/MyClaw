@@ -1082,9 +1082,9 @@ impl Tool for MemoryManageTool {
         let user_id = user_id_for(ctx, &self.resolver);
 
         let result = match action {
-            "add" => self.action_add(name, &args, &user_id, session),
-            "replace" => self.action_replace(name, &args, &user_id, session),
-            "remove" => self.action_remove(name, &args, &user_id, session),
+            "add" => self.action_add(name, &args, &user_id, ctx),
+            "replace" => self.action_replace(name, &args, &user_id, ctx),
+            "remove" => self.action_remove(name, &args, &user_id, ctx),
             _ => Err(format!(
                 "Unknown action '{}'. Use: add, replace, remove",
                 action
@@ -1181,7 +1181,7 @@ impl MemoryManageTool {
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
         append_memory_audit(
             &self.base_dir,
-            session,
+            ctx,
             MemoryAudit {
                 user_id,
                 scope,
@@ -1289,7 +1289,7 @@ impl MemoryManageTool {
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
         append_memory_audit(
             &self.base_dir,
-            session,
+            ctx,
             MemoryAudit {
                 user_id,
                 scope,
@@ -1338,7 +1338,7 @@ impl MemoryManageTool {
             .map_err(|e| format!("Failed to remove memory file: {}", e))?;
         append_memory_audit(
             &self.base_dir,
-            session,
+            ctx,
             MemoryAudit {
                 user_id,
                 scope,

@@ -66,7 +66,7 @@ impl Tool for SessionsYieldTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let note = args["message"].as_str().unwrap_or_default();
         let output = if note.is_empty() {

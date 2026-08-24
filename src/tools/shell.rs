@@ -899,7 +899,7 @@ impl Tool for ShellTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let command = args["command"]
             .as_str()
@@ -1090,7 +1090,7 @@ impl Tool for ShellPollTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let process_id = args["process_id"]
             .as_str()
@@ -1223,7 +1223,7 @@ impl Tool for ShellKillTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let process_id = args["process_id"]
             .as_str()

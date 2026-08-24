@@ -297,7 +297,7 @@ impl Tool for TaskCreateTool {
     async fn execute(
         &self,
         args: Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let parent = args["parent"].as_str();
         let description = args["details"].as_str().unwrap_or("");
@@ -431,7 +431,7 @@ impl Tool for TaskListTool {
     async fn execute(
         &self,
         args: Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let parent = args["parent"].as_str();
         let board = self.boards.board(&ctx.session_id);
@@ -510,7 +510,7 @@ impl Tool for TaskUpdateTool {
     async fn execute(
         &self,
         args: Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let task_id = args["task_id"]
             .as_str()
@@ -600,7 +600,7 @@ impl Tool for TaskDeleteTool {
     async fn execute(
         &self,
         args: Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let task_id = args["task_id"]
             .as_str()

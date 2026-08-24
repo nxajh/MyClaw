@@ -42,7 +42,7 @@ impl Tool for SkillsListTool {
     async fn execute(
         &self,
         _args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let skills = self.skills.read();
 

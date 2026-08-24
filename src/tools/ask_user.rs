@@ -64,7 +64,7 @@ impl Tool for AskUserTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let question = args["question"]
             .as_str()

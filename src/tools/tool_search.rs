@@ -55,7 +55,7 @@ impl Tool for ToolSearchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let query = args["query"]
             .as_str()
@@ -148,7 +148,7 @@ mod tests {
         async fn execute(
             &self,
             _args: serde_json::Value,
-            _session: &crate::agents::session::Session,
+            _ctx: &crate::api::tool::ToolContext,
         ) -> anyhow::Result<ToolResult> {
             unreachable!("not exercised by tool_search tests")
         }

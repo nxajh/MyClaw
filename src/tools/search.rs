@@ -152,7 +152,7 @@ impl Tool for GlobSearchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let pattern = args["pattern"]
             .as_str()
@@ -459,7 +459,7 @@ impl Tool for ContentSearchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let pattern = args["regex"]
             .as_str()

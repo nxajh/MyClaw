@@ -155,7 +155,7 @@ impl Tool for SymbolCheckTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let symbols_val = args["symbols"]
             .as_array()

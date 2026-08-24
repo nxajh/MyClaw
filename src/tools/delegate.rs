@@ -126,7 +126,7 @@ impl Tool for AgentDelegateTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let agent_name = args["agent"]
             .as_str()
@@ -233,7 +233,7 @@ mod tests {
             &self,
             _agent_name: &str,
             _task: &str,
-            _parent_session: &crate::agents::session::Session,
+            _parent_ctx: &crate::api::tool::ToolContext,
             _timeout: Option<u64>,
             _allowed_tools: Option<Vec<String>>,
             _workspace: Option<&str>,

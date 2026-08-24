@@ -100,7 +100,7 @@ impl Tool for AgentResumeTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let sub_session_id = args["sub_session_id"]
             .as_str()
