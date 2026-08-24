@@ -39,9 +39,9 @@
     },
     {
       "file": "src/agents/agent/mod.rs",
-      "total_lines": 803,
+      "total_lines": 480,
       "pub_symbols": 2,
-      "private_fns": 7,
+      "private_fns": 0,
       "struct_pub_fields": 1,
       "pub_use_reexports": 1,
       "pub_symbol_names": [
@@ -62,6 +62,15 @@
       ]
     },
     {
+      "file": "src/agents/agent/run_recovery.rs",
+      "total_lines": 180,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
       "file": "src/agents/agent/stream_collect.rs",
       "total_lines": 443,
       "pub_symbols": 1,
@@ -74,9 +83,9 @@
     },
     {
       "file": "src/agents/agent/tests.rs",
-      "total_lines": 96,
+      "total_lines": 231,
       "pub_symbols": 2,
-      "private_fns": 16,
+      "private_fns": 25,
       "struct_pub_fields": 0,
       "pub_use_reexports": 0,
       "pub_symbol_names": [

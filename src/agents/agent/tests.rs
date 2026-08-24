@@ -94,3 +94,138 @@ pub(super) fn bailing_runtime() -> AgentRuntime {
         loop_breaker,
     )
 }
+
+// ── Skeleton-level tests (moved from `mod.rs` batch 6; RFC §2) ─────────────
+// run/run_recovery end-to-end via bailing_runtime; symbol-level tests live
+// beside their implementation; shared fixtures above.
+
+use super::tool_filter::filter_turn_scoped_tools;
+use super::Agent;
+use crate::agents::session::Session;
+use crate::agents::turn::TurnContext;
+use crate::config::agent::{PermissionMode, RunMode};
+use crate::providers::{Tool, ToolResult};
+
+/// Regression guard for the v4 recovery refactor: `Agent::run` must
+/// pre-check `run_recovery`, and `run_recovery`'s Cases B/C must fall
+/// through to `run_inner` — NOT back into `run` (that would re-enter
+/// `run_recovery` and recurse until the stack overflows).
+///
+/// Case C (trailing user message, no LLM response) exercises the full
+/// `run → run_recovery → run_inner` chain; the stub registry makes the
+/// first provider lookup fail with "test stub", which is exactly what
+/// we assert. A regression to `run_recovery` calling `run()` would
+/// abort the test with a stack overflow instead of returning Err.
+#[tokio::test]
+async fn run_prechecks_recovery_without_recursing() {
+    let mut session = Session::new("sess-1".into());
+    session.add_user("pending question".into());
+    let agent = Agent::new(empty_config());
+    let runtime = bailing_runtime();
+    let turn_ctx = TurnContext {
+        system_prompt: "",
+        model_id: None,
+        thinking: None,
+        permission_mode: PermissionMode::Default,
+        run_mode: RunMode::Interactive,
+    };
+    let err = match agent.run(&mut session, turn_ctx, &runtime).await {
+        Ok(_) => panic!("expected recovery to run the LLM and hit the stub registry"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("test stub"),
+        "expected stub registry error, got: {err}"
+    );
+}
+
+struct NamedTool(&'static str);
+
+#[async_trait]
+impl Tool for NamedTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn description(&self) -> &str {
+        self.0
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _session: &Session,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult {
+            success: true,
+            output: String::new(),
+            error: None,
+        })
+    }
+}
+
+fn tool_names(tools: &[Arc<dyn Tool>]) -> Vec<String> {
+    tools.iter().map(|tool| tool.name().to_string()).collect()
+}
+
+#[test]
+fn turn_tool_allowlist_narrows_to_intersection() {
+    // Some(["shell"]) → only "shell" survives (intersection with
+    // whatever was already in the list).
+    let mut session = Session::new("s".into());
+    session.turn_tool_allowlist = Some(vec!["shell".into()]);
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(NamedTool("shell")),
+        Arc::new(NamedTool("file_read")),
+        Arc::new(NamedTool("calculator")),
+    ];
+    filter_turn_scoped_tools(&mut tools, &session);
+    assert_eq!(tool_names(&tools), vec!["shell"]);
+}
+
+#[test]
+fn turn_tool_allowlist_empty_forbids_all() {
+    // Some([]) → explicitly disable all tools.
+    let mut session = Session::new("s".into());
+    session.turn_tool_allowlist = Some(vec![]);
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(NamedTool("shell")),
+        Arc::new(NamedTool("file_read")),
+    ];
+    filter_turn_scoped_tools(&mut tools, &session);
+    assert!(tools.is_empty());
+}
+
+#[test]
+fn turn_tool_allowlist_none_preserves_existing() {
+    // None → no extra filtering beyond the normal scoped filter.
+    let mut session = Session::new("s".into());
+    session.turn_tool_allowlist = None;
+    let mut tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(NamedTool("shell")),
+        Arc::new(NamedTool("calculator")),
+    ];
+    filter_turn_scoped_tools(&mut tools, &session);
+    assert_eq!(tool_names(&tools), vec!["shell", "calculator"]);
+}
+
+#[test]
+fn agent_holds_config() {
+    let cfg = empty_config();
+    let agent = Agent::new(cfg);
+    assert_eq!(agent.config.name, "test");
+}
+
+#[test]
+fn session_persist_field_default_none() {
+    let session = Session::new("s".into());
+    assert!(session.persist.is_none());
+    assert!(session.channels.is_none());
+    assert!(session.channel_account.is_none());
+    assert!(!session.turn_headless);
+    assert!(session.resolve_channel().is_none());
+}
