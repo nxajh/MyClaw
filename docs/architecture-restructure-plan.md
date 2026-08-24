@@ -1,7 +1,7 @@
 # MyClaw 架构重构方案（决策层）
 
-> 状态：方案待审。批准后按迁移序列执行，每步独立 PR，可单独回滚。
-> 基准：origin/master @ a9529f0（含 #151 分析修正）。
+> 状态：方案待审（已根据评审意见修正）。批准后按迁移序列执行，每步独立 PR，可单独回滚。
+> 基准：origin/master @ 7cf5f9c（含 #151 分析修正 + 传播修正）。
 > 关联：#151（分析）、#146（agent.rs 拆分待合并）、#144/#141（修复，delegation 整合应在 #144 修复后做）。
 
 ## 1. 目标分层（可断言化）
@@ -40,32 +40,32 @@ if grep -rq "use crate::" src/api/ 2>/dev/null; then
 fi
 
 # L1 基础层：仅引 L0 + 基础内部
-for mod in ids config str_utils; do
-  if grep -rq "use crate::\(providers\|memory\|tools\|agents\|scheduling\|identity\|channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null; then
+for mod in ids config str_utils scheduling_types; do
+  if grep -rq "use crate::\(providers\|memory\|identity\|tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null; then
     echo "❌ L1 $mod 违规引用："
-    grep -rn "use crate::\(providers\|memory\|tools\|agents\|scheduling\|identity\|channels\|daemon\|cli\|webui\)" src/$mod/
+    grep -rn "use crate::\(providers\|memory\|identity\|tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/$mod/
     violations=$((violations + 1))
   fi
 done
 
 # L2 服务层：仅引 L0 + L1
-for mod in providers memory; do
-  if grep -rq "use crate::\(tools\|agents\|scheduling\|identity\|channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null; then
+for mod in providers memory identity; do
+  if grep -rq "use crate::\(tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null; then
     echo "❌ L2 $mod 违规引用："
-    grep -rn "use crate::\(tools\|agents\|scheduling\|identity\|channels\|daemon\|cli\|webui\)" src/$mod/
+    grep -rn "use crate::\(tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/$mod/
     violations=$((violations + 1))
   fi
 done
 
 # L3 工具层：不引 L4/L5
-if grep -rq "use crate::\(agents\|scheduling\|identity\|channels\)" src/tools/ 2>/dev/null; then
+if grep -rq "use crate::\(agents\|scheduling\|commands\|channels\)" src/tools/ 2>/dev/null; then
   echo "❌ L3 tools 违规引用 L4/L5："
-  grep -rn "use crate::\(agents\|scheduling\|identity\|channels\)" src/tools/
+  grep -rn "use crate::\(agents\|scheduling\|commands\|channels\)" src/tools/
   violations=$((violations + 1))
 fi
 
 # L4 运行时层：不引 L5/L6
-for mod in agents scheduling identity; do
+for mod in agents scheduling commands; do
   if grep -rq "use crate::\(channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null; then
     echo "❌ L4 $mod 违规引用 L5/L6："
     grep -rn "use crate::\(channels\|daemon\|cli\|webui\)" src/$mod/
@@ -77,6 +77,13 @@ done
 if grep -rq "use crate::\(daemon\|cli\|webui\)" src/channels/ 2>/dev/null; then
   echo "❌ L5 channels 违规引用 L6："
   grep -rn "use crate::\(daemon\|cli\|webui\)" src/channels/
+  violations=$((violations + 1))
+fi
+
+# L2 mcp：不引 L4/L5/L6
+if grep -rq "use crate::\(agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/mcp/ 2>/dev/null; then
+  echo "❌ L2 mcp 违规引用 L4+："
+  grep -rn "use crate::\(agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/mcp/
   violations=$((violations + 1))
 fi
 
@@ -105,22 +112,23 @@ fi
 
 | 模块 | 行数 | 现状 | 处置 | 去向 | 理由 |
 |---|---:|---|---|---|---|
-| api | 0 | 不存在 | **新建** | L0 | 契约层：Tool/Session/Channel/Message trait + 类型 |
+| api | 0 | 不存在 | **新建** | L0 | 契约层：Tool/Session/Channel/MessageSender/MessageReceiver trait + 类型 + LoopBreakerConfig |
 | ids | 209 | 底层 | **留** | L1 | 教科书式底层（被 13 文件引用零反向） |
-| config | 2780 | 顶层 | **留** | L1 | 配置面该顶层；LoopBreakerConfig 下沉 api |
+| config | 2780 | 顶层 | **留** | L1 | 配置面该顶层；LoopBreakerConfig 移到 api |
 | str_utils | 477 | 顶层 | **留** | L1 | 纯工具；YAML frontmatter 部分随 skill 域走 |
 | storage | 3477 | 顶层 | **部分留** | L1 | 纯存储留；completion_queue/inbound_spool 迁 L4 orchestrator |
 | providers | 10321 | 顶层 | **留** | L2 | 厂商接入 + capability trait；微文件合并 |
 | memory | 775 | 顶层 | **留** | L2 | 纯文件 wiki，零内部依赖 |
+| identity | 0 | 不存在 | **新建** | L2 | 从 agents 迁出：known_users/user_registry/user_profile/user_messages（3063 行），tools 和 agents 都消费 |
+| scheduling-types | 0 | 不存在 | **新建** | L1 | 从 agents/scheduling 迁出：cron_types.rs（291 行纯类型），tools 和 runtime 都消费 |
 | tools | 16784 | 顶层 | **留** | L3 | 内置工具实现；Tool trait 移到 api |
 | agents | 38157 | 顶层 | **拆** | L4 | 借居域迁出（identity/scheduling/commands） |
-| identity | 0 | 不存在 | **新建** | L4 | 从 agents 迁出：known_users/user_registry/user_profile/user_messages（3063 行） |
-| scheduling | 0 | 不存在 | **新建** | L4 | 从 agents 迁出：scheduling/（4582 行） |
+| scheduling-runtime | 0 | 不存在 | **新建** | L4 | 从 agents 迁出：scheduler.rs 等运行时（4291 行），需回调 agent turn |
 | commands | 0 | 不存在 | **新建** | L4 | 从 agents 迁出：commands/（2433 行） |
-| channels | 15597 | 顶层 | **留** | L5 | 渠道适配层；client.rs 迁 webui |
+| channels | 15597 | 顶层 | **留** | L5 | 渠道适配层；client.rs 迁 webui；Channel trait 迁 api |
 | webui | 0 | 不存在 | **新建** | L6 | 从 channels 迁出：client.rs（2852 行 WebUI API 后端） |
 | registry | 768 | 顶层 | **并入 providers** | L2 | 实为 providers facade（26 处 providers 引用），消假分层边 |
-| mcp | 2923 | 顶层 | **留** | L2 | MCP server 生命周期；tool_trait.rs 7 行 re-export 佐证 Tool trait 错位 |
+| mcp | 2923 | 顶层 | **留** | L2 | MCP server 生命周期；mcp→agents::session 违规在 Phase 1.5 修复 |
 | cli | 1826 | 顶层 | **留** | L6 | bin 侧；重复组合根逻辑与 daemon 对齐 |
 | daemon | 2024 | 顶层 | **留** | L6 | 合法组合根但超载：run() 1005 行拆 builder；热切换/sd_notify 下沉 lifecycle 模块 |
 | migration | 1619 | 顶层 | **留** | L6 | plan-based 迁移引擎，唯一耦合 ids，干净 |
@@ -128,7 +136,7 @@ fi
 | hot_switch/update_state/signal/sys_info | ~673 | 顶层 | **留** | L6 | 小工具，daemon+cli 双端共用 |
 
 **处置汇总**：
-- 新建 4 模块：api（L0）、identity/scheduling/commands（L4）、webui（L6）
+- 新建 5 模块：api（L0）、identity（L2）、scheduling-types（L1）、scheduling-runtime/commands（L4）、webui（L6）
 - 拆 1 模块：agents（借居域迁出）
 - 并入 1 模块：registry→providers
 - 留 15 模块（部分内部调整）
@@ -221,26 +229,56 @@ fi
 3. **改 Tool trait 签名**：`execute(&self, args, ctx: &ToolContext)` 替代 `session: &Session`
 4. **改 29 文件工具实现**：A 类 8 文件纯签名改；B 类 ~19 文件从 Session 读字段改为从 ToolContext 读
 5. **daemon 构造 ToolContext**：daemon.rs build_tools 时构造 ToolContext 注入
-6. **验收**：`verify-layering.sh` L0/L2/L3 合规；tools→agents 归零；CI 全绿
+6. **验收**：`verify-layering.sh` L0/L2/L3 合规；tools→agents Session 依赖归零；CI 全绿
 
 **冲突窗口**：无。与 #144/#146/#147-149 无依赖。
 
-### Phase 2：agents 借居域迁出（3 PR）
+### Phase 1.5：消息契约迁移（1 PR）
 
-2a. **identity 域迁出**（1 PR）
-- 新建 `src/identity/` 模块
+1. **移动 Channel trait + 消息类型到 api**：`channels/message.rs` 中的 `Channel` trait、`MessageSender`、`MessageReceiver`、`ChannelInboundMessage`、`ChannelOutboundMessage` 等移到 `api/channel.rs` + `api/message.rs`
+2. **更新所有引用路径**：agents/channels/tools/storage 等模块的 `use crate::channels::Channel` 改为 `use crate::api::Channel`
+3. **channels/message.rs 保留**：分块算法（`split_message_chunk` 等）留在 channels，作为共享文本引擎
+4. **验收**：`verify-layering.sh` L5 合规；agents→channels 归零（除实现 Channel trait 的文件）；CI 全绿
+
+**冲突窗口**：无。Phase 1 之后、Phase 2 之前。
+
+### Phase 1.6：mcp→agents 违规修复（1 PR）
+
+1. **收窄 mcp 对 agents::session 的依赖**：`mcp/tool.rs:71` 和 `mcp/deferred.rs` 的 `use crate::agents::session::Session` 改为使用 api 层的 Session trait 或 ToolContext
+2. **验收**：`verify-layering.sh` L2 合规；mcp→agents 归零；CI 全绿
+
+**冲突窗口**：无。
+
+### Phase 1.7：LoopBreakerConfig 下沉（1 PR）
+
+1. **移动 LoopBreakerConfig 到 api**：`config/loop_breaker.rs` 中的 `LoopBreakerConfig` 移到 `api/loop_breaker.rs`
+2. **更新引用路径**：`config/mod.rs:79` 和 agents 的引用改为 `use crate::api::LoopBreakerConfig`
+3. **验收**：`verify-layering.sh` L1 合规；config→agents 归零；CI 全绿
+
+**冲突窗口**：无。
+
+### Phase 2：agents 借居域迁出（4 PR）
+
+2a. **identity 域迁出到 L2**（1 PR）
+- 新建 `src/identity/` 模块（L2，和 providers/memory 同级）
 - 移动 known_users/user_registry/user_profile/user_messages（3063 行）
 - 更新 agents/commands/tools/daemon 引用路径
-- 验收：`verify-layering.sh` L4 合规；agents 行数 < 35000
+- 验收：`verify-layering.sh` L2 合规；agents 行数 < 35000
 
-2b. **scheduling 域迁出**（1 PR）
-- 新建 `src/scheduling/` 模块（从 agents/scheduling/ 移出）
-- 移动 scheduling/（4582 行）
-- 更新 tools/cronjob_tool.rs 引用路径
+2b. **scheduling-types 迁出到 L1**（1 PR）
+- 新建 `src/scheduling_types/` 模块（L1）
+- 移动 `agents/scheduling/cron_types.rs`（291 行纯类型）
+- 更新 tools/cronjob_tool.rs 引用路径（从 `agents::scheduling::cron_types` 改为 `scheduling_types`）
+- 验收：`verify-layering.sh` L1 合规；tools→agents scheduling 依赖归零
+
+2c. **scheduling-runtime 迁出到 L4**（1 PR）
+- 新建 `src/scheduling/` 模块（L4）
+- 移动 scheduler.rs/work_unit.rs/cron_loader.rs（4291 行运行时）
+- 更新 daemon 引用路径
 - 验收：`verify-layering.sh` L4 合规；agents 行数 < 31000
 
-2c. **commands 域迁出**（1 PR）
-- 新建 `src/commands/` 模块（从 agents/commands/ 移出）
+2d. **commands 域迁出到 L4**（1 PR）
+- 新建 `src/commands/` 模块（L4）
 - 移动 commands/（2433 行）
 - 更新 agents/channels 引用路径
 - 验收：`verify-layering.sh` L4 合规；agents 行数 < 29000
@@ -328,6 +366,14 @@ fi
 4. **验收**：providers 文件数 -6；CI 全绿
 
 **冲突窗口**：无。
+
+### Phase 11：CI 门禁接入（1 PR）
+
+1. **提交 verify-layering.sh 到 scripts/**：修复脚本遗漏（mcp 检查）
+2. **修改 .github/workflows/build.yml**：在 Check 步骤后加 `./scripts/verify-layering.sh`
+3. **验收**：CI 必跑分层检查；新 PR 无法破坏分层
+
+**冲突窗口**：无。所有 Phase 完成后接入，作为长期防腐蚀手段。
 
 ## 5. 验收清单
 
