@@ -7,7 +7,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use crate::agents::session::Session;
+use crate::api::tool::ToolContext;
 use crate::agents::{
     AgentMail, AgentMessage, AgentMessenger, KnownUsersRegistry, MessageKind, UserRegistry,
 };
@@ -98,7 +98,7 @@ impl SendMessageTool {
         args: &SendMessageArgs,
         text: &str,
         is_sub_agent: bool,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         if !args.files.is_empty() {
             return Ok(ToolResult {
@@ -145,7 +145,7 @@ impl SendMessageTool {
             // §3.3: the sub-agent's identity is its own session id — always
             // present, so no Option dance (unlike the parent link, which a
             // malformed session could lack).
-            let Some(parent_session_id) = session.parent_session_id.clone() else {
+            let Some(parent_session_id) = ctx.parent_session_id.clone() else {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -154,8 +154,8 @@ impl SendMessageTool {
             };
             let event = AgentMessage {
                 msg_id: Fqid::new(&self.namespace, TYPE_MSG).to_string(),
-                sender_name: session.agent_name.clone(),
-                sub_session_id: session.id.clone(),
+                sender_name: ctx.agent_name.clone(),
+                sub_session_id: ctx.session_id.clone(),
                 parent_session_id,
                 text: text.to_string(),
                 kind: match args.kind.as_deref() {
@@ -223,7 +223,7 @@ impl SendMessageTool {
         args: &SendMessageArgs,
         text: &str,
         recipient: &str,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         if !args.files.is_empty() {
             return Ok(ToolResult {
@@ -261,7 +261,7 @@ impl SendMessageTool {
             });
         };
 
-        let owner = session.owner.clone();
+        let owner = ctx.owner.clone();
         // P3/P4 身份折叠: 发送者经 resolver 归一到 FQID user.id。
         let owner_uid = known_users.resolve_uid(&owner);
         let peer = match crate::agents::commands::register::parse_target(user_registry, recipient)
@@ -418,7 +418,7 @@ impl Tool for SendMessageTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let args: SendMessageArgs = match serde_json::from_value(args) {
             Ok(args) => args,
@@ -457,7 +457,7 @@ impl Tool for SendMessageTool {
         // RFC agent-messaging §3.1/§3.3: agent-to-agent path. A sub-agent's
         // only legal target is its parent ("parent" or omitted); the main
         // agent targets a running async sub-agent by session id.
-        let is_sub_agent = session.parent_session_id.is_some();
+        let is_sub_agent = ctx.parent_session_id.is_some();
         // RFC §3.5: cross-user path first — `recipient=u/uid`/邮箱（`@昵称`
         // 第二波）in the main agent context targets another user through the
         // friend contacts table (delivered to their user-level mailbox, not
@@ -480,7 +480,7 @@ impl Tool for SendMessageTool {
         // key maps to a real channel — sending an intermediate notice from a
         // background turn is a legitimate capability (the coupling that used
         // to disable it was the bug, cf. RFC §0).
-        let channel = match session.resolve_channel() {
+        let channel = match ctx.channel.clone() {
             Some(c) => c,
             None => {
                 return Ok(ToolResult {
@@ -493,7 +493,7 @@ impl Tool for SendMessageTool {
             }
         };
 
-        let reply_target = match session.reply_target() {
+        let reply_target = match ctx.reply_target.as_deref() {
             Some(rt) => rt.to_string(),
             None => {
                 return Ok(ToolResult {
@@ -521,7 +521,7 @@ impl Tool for SendMessageTool {
         }
 
         let mut receiver = MessageReceiver::new(reply_target);
-        if let Some(ref last_msg) = session.last_message {
+        if let Some(ref last_msg) = ctx.last_message {
             // Prefer the inbound receiver's reply_to_message_id (set by
             // QQBot INTERACTION_CREATE for button callbacks) over the
             // generic message id (used by C2C/group passive replies).
@@ -615,7 +615,7 @@ async fn infer_mime(file_name: &str, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::session::Session;
+    use crate::api::tool::ToolContext;
 
     /// Records agent-to-agent deliveries; always succeeds.
     #[derive(Default)]
@@ -650,18 +650,35 @@ mod tests {
         r.error.clone().unwrap_or_default()
     }
 
-    fn sub_agent_session() -> Session {
-        let mut session = Session::new("sub_session".into());
-        session.parent_session_id = Some("parent_session".into());
-        session.agent_name = "coder".into();
-        session
+    fn sub_agent_session() -> ToolContext {
+        ToolContext {
+            owner: "test".to_string(),
+            session_id: "sub_session".to_string(),
+            reply_target: None,
+            last_message: None,
+            parent_session_id: Some("parent_session".to_string()),
+            agent_name: "coder".to_string(),
+            turn_silenced: false,
+            turn_headless: false,
+            channel: None,
+        }
     }
 
     #[tokio::test]
     async fn main_sends_to_sub_agent_by_session_id() {
         let mock = Arc::new(MockMessenger::default());
         let tool = tool_with_messenger(&mock);
-        let session = Session::new("main".into());
+        let session = ToolContext {
+            owner: "test".to_string(),
+            session_id: "main".to_string(),
+            reply_target: None,
+            last_message: None,
+            parent_session_id: None,
+            agent_name: "main".to_string(),
+            turn_silenced: false,
+            turn_headless: false,
+            channel: None,
+        };
 
         let r = tool
             .execute(
@@ -748,7 +765,17 @@ mod tests {
     async fn recipient_without_messenger_errors() {
         // Single-agent mode: no messenger installed → clear error.
         let tool = SendMessageTool::new();
-        let session = Session::new("main".into());
+        let session = ToolContext {
+            owner: "test".to_string(),
+            session_id: "main".to_string(),
+            reply_target: None,
+            last_message: None,
+            parent_session_id: None,
+            agent_name: "main".to_string(),
+            turn_silenced: false,
+            turn_headless: false,
+            channel: None,
+        };
 
         let r = tool
             .execute(
@@ -830,10 +857,18 @@ mod tests {
         tool
     }
 
-    fn alice_session() -> Session {
-        let mut session = Session::new("s_alice".into());
-        session.owner = ALICE.to_string();
-        session
+    fn alice_session() -> ToolContext {
+        ToolContext {
+            owner: ALICE.to_string(),
+            session_id: "s_alice".to_string(),
+            reply_target: None,
+            last_message: None,
+            parent_session_id: None,
+            agent_name: "main".to_string(),
+            turn_silenced: false,
+            turn_headless: false,
+            channel: None,
+        }
     }
 
     #[tokio::test]
@@ -909,8 +944,17 @@ mod tests {
         let (reg, users) = registered_friends();
         let tool = tool_for(&reg, &users);
         let alice_session = alice_session();
-        let mut bob_session = Session::new("s_bob".into());
-        bob_session.owner = BOB.to_string();
+        let bob_session = ToolContext {
+            owner: BOB.to_string(),
+            session_id: "s_bob".to_string(),
+            reply_target: None,
+            last_message: None,
+            parent_session_id: None,
+            agent_name: "main".to_string(),
+            turn_silenced: false,
+            turn_headless: false,
+            channel: None,
+        };
 
         // alice → bob
         let r = tool
@@ -948,8 +992,17 @@ mod tests {
             .unwrap()
             .set("telegram:default:alice_tg", user_id_of(&users, "alice"));
         let tool = tool_for(&reg, &users);
-        let mut session = Session::new("s_tg".into());
-        session.owner = "telegram:default:alice_tg".to_string();
+        let session = ToolContext {
+            owner: "telegram:default:alice_tg".to_string(),
+            session_id: "s_tg".to_string(),
+            reply_target: None,
+            last_message: None,
+            parent_session_id: None,
+            agent_name: "main".to_string(),
+            turn_silenced: false,
+            turn_headless: false,
+            channel: None,
+        };
 
         let r = tool
             .execute(

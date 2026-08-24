@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::agents::session::Session;
+use crate::api::tool::ToolContext;
 use crate::agents::user_profile::UserResolver;
 use crate::providers::{Tool, ToolResult};
 use crate::storage::{SessionBackend, SessionInfo};
@@ -101,7 +101,7 @@ impl Tool for SessionQueryTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let action = match args["action"].as_str() {
             Some(a) => a,
@@ -117,7 +117,7 @@ impl Tool for SessionQueryTool {
         match action {
             "list" => {
                 let limit = args["limit"].as_u64().unwrap_or(50) as usize;
-                let sessions = self.backend.list_sessions_for_owner(&session.owner);
+                let sessions = self.backend.list_sessions_for_owner(&ctx.owner);
                 let entries: Vec<serde_json::Value> = sessions
                     .iter()
                     .take(limit)
@@ -135,7 +135,7 @@ impl Tool for SessionQueryTool {
                     output: json!({
                         "success": true,
                         "sessions": entries,
-                        "current_session": session.id,
+                        "current_session": ctx.session_id,
                     })
                     .to_string(),
                     error: None,
@@ -154,7 +154,7 @@ impl Tool for SessionQueryTool {
                 };
 
                 // Security: verify the target session belongs to the same user.
-                let sessions = self.backend.list_sessions_for_owner(&session.owner);
+                let sessions = self.backend.list_sessions_for_owner(&ctx.owner);
                 if !sessions.iter().any(|s| s.id == target_id) {
                     return Ok(ToolResult {
                         success: false,

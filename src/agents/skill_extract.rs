@@ -16,7 +16,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::agents::session::Session;
+
 use crate::agents::tool_registry::ToolRegistry;
 use crate::channels::{Channel, ChannelOutboundMessage};
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ToolSpec};
@@ -166,10 +166,18 @@ async fn notify_drafts_written(
 }
 
 async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<Vec<String>> {
-    // Build a minimal Session shell.
-    let mut session_shell = Session::new("skill_extract".to_string());
-    session_shell.owner = "skill_extract".to_string();
-    session_shell.id = input.session_id.clone();
+    // Build a minimal ToolContext for tool execution.
+    let session_shell = crate::api::tool::ToolContext {
+        owner: "skill_extract".to_string(),
+        session_id: input.session_id.clone(),
+        reply_target: None,
+        last_message: None,
+        parent_session_id: None,
+        agent_name: "main".to_string(),
+        turn_silenced: false,
+        turn_headless: false,
+        channel: None,
+    };
 
     // Build existing skills index for dedup.
     let existing_index = build_existing_skills_index(&input.base_dir);

@@ -13,6 +13,7 @@ pub fn is_shutting_down() -> bool {
     SHUTDOWN_FLAG.load(Ordering::SeqCst) || TERMINATING_FLAG.load(Ordering::SeqCst)
 }
 
+pub mod api;
 pub mod agents;
 pub mod channels;
 pub mod config;

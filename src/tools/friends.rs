@@ -20,7 +20,7 @@ use tracing::warn;
 
 use crate::agents::commands::friends::rk_for;
 use crate::agents::commands::register::parse_target;
-use crate::agents::session::Session;
+use crate::api::tool::ToolContext;
 use crate::agents::{ContactStatus, KnownUsersRegistry, RequestOutcome, UserMail, UserRegistry};
 use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::ids::{DEFAULT_NAMESPACE, Fqid, TYPE_MSG};
@@ -95,8 +95,8 @@ impl FriendToolsCtx {
     }
 
     /// 当前用户的显示名（实时昵称）。
-    fn self_display(&self, session: &Session) -> String {
-        let uid = self.known_users.resolve_uid(&session.owner);
+    fn self_display(&self, ctx: &ToolContext) -> String {
+        let uid = self.known_users.resolve_uid(&ctx.owner);
         self.user_registry.display(&uid)
     }
 }
@@ -160,7 +160,7 @@ impl Tool for FriendRequestTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let args: FriendRequestArgs = match serde_json::from_value(args) {
             Ok(a) => a,
@@ -182,7 +182,7 @@ impl Tool for FriendRequestTool {
                 });
             }
         };
-        let owner = session.owner.clone();
+        let owner = ctx.owner.clone();
         if peer == self.ctx.known_users.resolve_uid(&owner) {
             return Ok(ToolResult {
                 success: false,
@@ -192,7 +192,7 @@ impl Tool for FriendRequestTool {
         }
         match self.ctx.known_users.request_friend(&owner, &peer) {
             RequestOutcome::New => {
-                let me = self.ctx.self_display(session);
+                let me = self.ctx.self_display(ctx);
                 if let Some(peer_rk) = rk_for(&self.ctx.known_users, &peer) {
                     self.ctx
                         .notify_peer(
@@ -289,7 +289,7 @@ impl Tool for FriendAcceptTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let args: FriendTargetArgs = match serde_json::from_value(args) {
             Ok(a) => a,
@@ -311,7 +311,7 @@ impl Tool for FriendAcceptTool {
                 });
             }
         };
-        let owner = session.owner.clone();
+        let owner = ctx.owner.clone();
         let contacts = self.ctx.known_users.list_contacts(&owner);
         let Some(peer) = find_peer(&contacts, &target).map(str::to_string) else {
             return Ok(ToolResult {
@@ -333,7 +333,7 @@ impl Tool for FriendAcceptTool {
                 )),
             });
         }
-        let me = self.ctx.self_display(session);
+        let me = self.ctx.self_display(ctx);
         let ack = format!("{me} 已接受你的好友请求，现在可以互发消息了");
         if let Some(peer_rk) = rk_for(&self.ctx.known_users, &peer) {
             self.ctx.notify_peer(&peer_rk, &ack).await;
@@ -403,7 +403,7 @@ impl Tool for FriendDeclineTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let args: FriendTargetArgs = match serde_json::from_value(args) {
             Ok(a) => a,
@@ -425,7 +425,7 @@ impl Tool for FriendDeclineTool {
                 });
             }
         };
-        let owner = session.owner.clone();
+        let owner = ctx.owner.clone();
         let contacts = self.ctx.known_users.list_contacts(&owner);
         let Some(peer) = find_peer(&contacts, &target).map(str::to_string) else {
             return Ok(ToolResult {
@@ -447,7 +447,7 @@ impl Tool for FriendDeclineTool {
                 )),
             });
         }
-        let me = self.ctx.self_display(session);
+        let me = self.ctx.self_display(ctx);
         let ack = format!("{me} 拒绝了你的好友请求（24 小时内请勿重复发送）");
         if let Some(peer_rk) = rk_for(&self.ctx.known_users, &peer) {
             self.ctx.notify_peer(&peer_rk, &ack).await;
@@ -507,9 +507,9 @@ impl Tool for FriendListTool {
     async fn execute(
         &self,
         _args: serde_json::Value,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        let owner = session.owner.clone();
+        let owner = ctx.owner.clone();
         let contacts = self.ctx.known_users.list_contacts(&owner);
         if contacts.is_empty() {
             return Ok(ToolResult {

@@ -16,7 +16,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use tokio::sync::Semaphore;
 
-use crate::agents::session::Session;
+
 use crate::agents::tool_registry::ToolRegistry;
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ToolSpec};
 use crate::providers::capability_tool::ToolResult;
@@ -484,9 +484,18 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
         return Ok(0);
     }
 
-    // Build a minimal Session shell — memory tools only need `owner`.
-    let mut session_shell = Session::new("memory_distill".to_string());
-    session_shell.owner = "memory_distill".to_string();
+    // Build a minimal ToolContext for tool execution — memory tools only need `owner`.
+    let session_shell = crate::api::tool::ToolContext {
+        owner: "memory_distill".to_string(),
+        session_id: "memory_distill".to_string(),
+        reply_target: None,
+        last_message: None,
+        parent_session_id: None,
+        agent_name: "main".to_string(),
+        turn_silenced: false,
+        turn_headless: false,
+        channel: None,
+    };
 
     // Resolve thinking config from model config.
     let thinking = input
@@ -573,7 +582,7 @@ async fn run_distill_rounds(
     model_id: &str,
     tool_specs: &[ToolSpec],
     tool_registry: Arc<ToolRegistry>,
-    session_shell: &Session,
+    session_shell: &crate::api::tool::ToolContext,
     thinking: &Option<ThinkingConfig>,
     workspace_dir: &str,
 ) -> Result<usize> {

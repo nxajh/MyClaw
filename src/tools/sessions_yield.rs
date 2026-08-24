@@ -85,7 +85,21 @@ impl Tool for SessionsYieldTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::session::Session;
+    use crate::api::tool::ToolContext;
+
+    fn test_ctx(id: &str) -> ToolContext {
+        ToolContext {
+            owner: "test".to_string(),
+            session_id: id.to_string(),
+            reply_target: None,
+            last_message: None,
+            parent_session_id: None,
+            agent_name: "main".to_string(),
+            turn_silenced: false,
+            turn_headless: false,
+            channel: None,
+        }
+    }
 
     #[test]
     fn schema_message_is_optional() {
@@ -99,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn execute_returns_yielded_without_message() {
         let tool = SessionsYieldTool::new();
-        let session = Session::new("yield-test".into());
+        let session = test_ctx("yield-test");
         let result = tool
             .execute(json!({}), &session)
             .await
@@ -111,7 +125,7 @@ mod tests {
     #[tokio::test]
     async fn execute_echoes_message() {
         let tool = SessionsYieldTool::new();
-        let session = Session::new("yield-test".into());
+        let session = test_ctx("yield-test");
         let result = tool
             .execute(json!({"message": "waiting for coder"}), &session)
             .await

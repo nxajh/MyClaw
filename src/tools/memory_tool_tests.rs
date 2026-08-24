@@ -6,15 +6,23 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use crate::agents::session::Session;
+    use crate::api::tool::ToolContext;
     use crate::agents::user_profile::UserResolver;
     use crate::providers::Tool;
     use crate::tools::{MemoryListTool, MemoryManageTool, MemorySearchTool};
 
-    fn session() -> Session {
-        let mut session = Session::new("test-session".to_string());
-        session.owner = "test-user".to_string();
-        session
+    fn session() -> ToolContext {
+        ToolContext {
+            owner: "test-user".to_string(),
+            session_id: "test-session".to_string(),
+            reply_target: None,
+            last_message: None,
+            parent_session_id: None,
+            agent_name: "main".to_string(),
+            turn_silenced: false,
+            turn_headless: false,
+            channel: None,
+        }
     }
 
     fn write_memory(
@@ -244,8 +252,8 @@ mod tests {
 
     // ── two-tier memory scope tests (P0) ──────────────────────────────────
 
-    async fn manage(tool: &MemoryManageTool, args: Value, session: &Session) -> Value {
-        let result = tool.execute(args, session).await.unwrap();
+    async fn manage(tool: &MemoryManageTool, args: Value, ctx: &ToolContext) -> Value {
+        let result = tool.execute(args, ctx).await.unwrap();
         serde_json::from_str(&result.output).unwrap()
     }
 
@@ -480,10 +488,18 @@ mod tests {
 
     // ── P1-B2 scope-by-frontmatter isolation (acceptance) ─────────────────
 
-    fn session_for(owner: &str) -> Session {
-        let mut session = Session::new(format!("session-{owner}"));
-        session.owner = owner.to_string();
-        session
+    fn session_for(owner: &str) -> ToolContext {
+        ToolContext {
+            owner: owner.to_string(),
+            session_id: format!("session-{owner}"),
+            reply_target: None,
+            last_message: None,
+            parent_session_id: None,
+            agent_name: "main".to_string(),
+            turn_silenced: false,
+            turn_headless: false,
+            channel: None,
+        }
     }
 
     #[tokio::test]
