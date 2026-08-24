@@ -61,18 +61,18 @@ Tarjan 结果：**{agents, channels, tools, providers, config, storage, mcp} 全
 
 ### 3.3 反向边符号级明细（双源验证）
 
-**tools → agents（42 use / 19 文件）** 引用符号归类：
+**tools → agents（26 use / 19 文件）** 引用符号归类：
 - `agents::session`（91 处引用，19 文件几乎全体）——工具执行上下文需要 Session
 - 运行时服务具体类型：DelegationCoordinator(3 文件)、SessionManager(shell.rs)、SkillManager+Skill(3 文件)、SharedScheduler(cronjob_tool)、AgentDelegator(delegate.rs)、ChannelRegistry(friends.rs)、KnownUsersRegistry/UserRegistry/UserResolver(friends/send_message)、ToolRegistry(tool_search.rs)
 - 常量：SUB_AGENT_TIMEOUT_MAX_SECS(delegate.rs)
 
 → tools 引的不是抽象，是 agents 的具体服务对象。结构性根因见 3.4。
 
-**agents → channels（32 use / 14 文件）** 引用符号：MessageReceiver(17)/ChannelMessageContent(16)/ChannelInboundMessage(14)/Channel(13)——agent 引擎的消息模型直接使用渠道层类型（无中间消息契约层）。
+**agents → channels（14 use / 14 文件）** 引用符号：MessageReceiver(13)/ChannelMessageContent(12)/ChannelInboundMessage(10)/TurnStream(9)/MessageSender(9)/Channel(8)/ChannelOutboundMessage(5) 等——agent 引擎的消息模型直接使用渠道层类型（无中间消息契约层）。
 
-**channels → agents（8 use / 3 文件）**：client.rs、telegram/channel.rs、turn_stream.rs（符号明细待子代理 C）。
+**channels → agents（5 use / 3 文件）**：client.rs、telegram/channel.rs、turn_stream.rs（符号明细待子代理 C）。
 
-**storage → channels（5 use / 1 文件）**：inbound_spool.rs 持久化入站消息直接用渠道类型——存储层与消息模型耦合。
+**storage → channels（1 use / 1 文件）**：inbound_spool.rs 持久化入站消息直接用渠道类型——存储层与消息模型耦合。
 
 **config → agents（1）**：LoopBreakerConfig。**agents → tools（1）**：runtime.rs:26 SearchProviderCooldown + TaskBoards（runtime 上下文持有任务板）。**providers → agents（1）**：见 3.4。
 
@@ -82,7 +82,7 @@ Tarjan 结果：**{agents, channels, tools, providers, config, storage, mcp} 全
 - 其方法签名需要 `agents::session::Session`（capability_tool.rs:6）
 - 工具实现在 tools/，实现 Tool 必须同时引 providers（trait 本体）+ agents（Session 类型）
 
-一条 trait 错位同时制造三条违规边：providers→agents、tools→providers（70 use 中 Tool/ToolResult 占大头）、tools→agents。**修这一处的收益 > 修零散 N 处**（方案层定夺，此处仅记录事实链）。
+一条 trait 错位同时制造三条违规边：providers→agents、tools→providers（39 use 中 Tool/ToolResult 占大头）、tools→agents。**修这一处的收益 > 修零散 N 处**（方案层定夺，此处仅记录事实链）。
 
 ### 3.5 daemon.rs 组合根事实
 
@@ -239,8 +239,8 @@ daemon.rs（2024 行）use 仅引 agents/channels，但 inline 引用覆盖 11 �
 | 决策点 | zeroclaw | MyClaw 现状 |
 |---|---|---|
 | Tool trait 宿主 | tools 层只依赖 api 契约+providers 能力，不知道 runtime | Tool trait 在 providers 且签名需要 agents::Session（3.4 死结） |
-| 渠道与引擎方向 | channels → runtime 单向（渠道驱动引擎） | agents → channels 32 use + channels → agents 8 use 双向纠缠 |
-| 消息契约 | api crate 零依赖承载 | MessageReceiver/ChannelInboundMessage 等在 channels，被 agents 32 处引用 |
+| 渠道与引擎方向 | channels → runtime 单向（渠道驱动引擎） | agents → channels 14 use + channels → agents 5 use 双向纠缠 |
+| 消息契约 | api crate 零依赖承载 | MessageReceiver/ChannelInboundMessage 等在 channels，被 agents 14 处引用 |
 | 存储与消息模型 | —（memory 独立 crate） | storage/inbound_spool 直接存 channels 类型 |
 
 ### 7.2 codex（~90+ crate，实测）
@@ -320,7 +320,7 @@ daemon.rs（2024 行）use 仅引 agents/channels，但 inline 引用覆盖 11 �
 ### 8.6 重构杠杆点排序（事实层，方案层定夺）
 
 1. **第一杠杆：Tool trait 宿主错位**——收窄 Session 为 ToolContext 值对象，一次改动消 29 文件引用根
-2. **第二杠杆：agents 借居域迁出**——身份域 3424 行（零内聚）+ scheduling 4582 行（仅一根线相连）+ commands 2433 行 → 独立顶层模块
+2. **第二杠杆：agents 借居域迁出**——身份域 3063 行（零内聚）+ scheduling 4582 行（仅一根线相连）+ commands 2433 行 → 独立顶层模块
 3. **第三杠杆：client.rs 迁出渠道层**——WebUI API 后端独立 webui/ 模块
 4. **第四杠杆：session 家族聚拢**——trait(SessionBackend)从 storage 迁到 agents/session 或独立 session crate
 5. **第五杠杆：registry 并入 providers**——消假分层边
