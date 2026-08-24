@@ -14,10 +14,12 @@ use std::sync::Arc;
 use anyhow::Result;
 
 mod exec_marker;
+mod finalize;
 mod injections;
 mod retry;
 mod stream_collect;
 mod tool_filter;
+mod tool_phase;
 mod turn_state;
 
 use crate::agents::AgentRuntime;
@@ -25,16 +27,16 @@ use crate::agents::AgentRuntime;
 pub(crate) use tool_filter::fold_absent_tool;
 
 use exec_marker::{
-    ExecMarkerGuard, exec_marker_clear, exec_marker_read, exec_marker_write, llm_usage,
-    last_user_text, persist_last,
+    exec_marker_clear, exec_marker_read, exec_marker_write, last_user_text, persist_last,
+    ExecMarkerGuard,
 };
 use retry::chat_with_retry;
 use stream_collect::push_or_drop;
 use tool_filter::{filter_modality_redundant_tools, filter_turn_scoped_tools};
+use finalize::OverflowRecovery;
+use tool_phase::ToolBatchOutcome;
 use turn_state::TurnState;
 
-use crate::agents::error::AgentError;
-use crate::agents::loop_breaker::{LoopBreak, LoopBreakReason};
 use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
@@ -50,6 +52,8 @@ use crate::providers::{Capability, ContentPart, ProviderRegistry};
 // injections.rs     reinject_after_compaction + inject_per_round (transient <system-reminder> injections)
 // retry.rs          is_transient_llm_error + backoff_duration + chat_with_retry
 // turn_state.rs     TurnState: loop-carried retry counters + turn flags (+ has_pending)
+// finalize.rs       finalize_turn: Done event → persist → memory/skill forks → TurnResult (batch 4)
+// tool_phase.rs     execute_tool_batch: tool-batch for-loop + 4 flow-control detectors + ToolBatchOutcome (batch 4)
 
 /// "An agent" — just its config (name, system prompt fragment, three
 /// capability filters, optional model override). Everything else lives
@@ -103,110 +107,20 @@ impl Agent {
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
     ) -> Result<TurnResult> {
-        // Resolve filtered tool view from runtime + per-agent config.
-        let mut allowed_tools = self.allowed_tools(runtime);
-        filter_turn_scoped_tools(&mut allowed_tools, session);
-
-        // Resolve provider + model.
-        //
-        // - No override → the Chat fallback wrapper (fans out across the
-        //   configured chain on retryable / fallbackable errors).
-        // - Override (`/model`) → the raw per-model provider only. Same-model
-        //   short retries (short RateLimit / 5xx / timeout) may sleep and retry
-        //   here. We intentionally NEVER fall back to a different model or to
-        //   the routing Fallback chain — the user pinned this model. On
-        //   Billing / long model_cooldown / Auth / ModelNotFound the turn fails
-        //   with an actionable message (switch via `/model` or `/model off`).
-        let (provider, model_id) = match turn_ctx.model_id {
-            Some(m) => {
-                let result = runtime
-                    .providers
-                    .get_chat_provider_by_model(m)
-                    .ok_or_else(|| anyhow::anyhow!("model '{}' not found in registry", m))?;
-                tracing::info!(
-                    model = %result.1,
-                    reason = "session_override",
-                    "model resolved (no auto-degrade to fallback)"
-                );
-                result
-            }
-            None => {
-                let result = runtime.providers.get_chat_provider(Capability::Chat)?;
-                tracing::info!(
-                    model = %result.1,
-                    reason = "routing_default",
-                    "model resolved"
-                );
-                result
-            }
-        };
-
-        // Shared ToolExecutor singleton — per the target architecture,
-        // the executor is stateless w.r.t. which tools the agent may
-        // call; the `allowed_tools` slice computed above is passed
-        // explicitly on every `execute` call.
-        let tool_executor = &runtime.tool_executor;
-
-        // Per-turn loop breaker counter — allocated fresh each turn by
-        // the shared `runtime.loop_breaker` singleton. Per-agent
-        // `SubAgentConfig.max_tool_calls` overrides the runtime default;
-        // when None, the shared config wins.
-        let mut loop_breaker = match self.config.max_tool_calls {
-            Some(n) => runtime.loop_breaker.new_counter_with_max(n),
-            None => runtime.loop_breaker.new_counter(),
-        };
+        // Turn setup (tool view, provider+model, loop breaker, token tracker
+        // seed, request prefix, spec conversion, orphan-tool folding) —
+        // extracted to `prepare_turn` below (batch 4).
+        let (provider, model_id, allowed_tools, tool_specs, mut messages, mut loop_breaker) =
+            self.prepare_turn(session, &turn_ctx, runtime).await?;
 
         // Shared ContextEngine singleton — RFC v2 target shape. Token
         // tracking lives solely on `Session.token_tracker`; ContextEngine
         // only carries threshold/retain_units + summarizer state.
         let context = &runtime.context_engine;
-        // Seed Session.token_tracker from history when fresh (display/usage only).
-        // The compaction decision does NOT read the tracker — it uses a direct
-        // per-request estimate in `maybe_compact` — so a stale tracker restored on
-        // restart can no longer suppress compaction.
-        if session.token_tracker.is_fresh() {
-            session
-                .token_tracker
-                .seed_from_history(turn_ctx.system_prompt, &session.history);
-        }
-
-        // Assemble the LLM request prefix once. Subsequent rebuilds re-clone
-        // the session's growing history.
-        let system_msg = ChatMessage::system_text(turn_ctx.system_prompt);
-        let mut messages: Vec<ChatMessage> = std::iter::once(system_msg.clone())
-            .chain(session.history.iter().cloned())
-            .collect();
-        crate::agents::session::sanitize_history(&mut messages);
-
-        if let Some(policy) = runtime.providers.get_chat_media_policy(&model_id) {
-            filter_modality_redundant_tools(&mut allowed_tools, &messages, policy, &model_id);
-        }
-        // Convert capability_tool::ToolSpec → capability_chat::ToolSpec
-        // (the LLM request type). Same fields, different module homes —
-        // a unification candidate for a separate cleanup.
-        let tool_specs: Vec<ToolSpec> = allowed_tools
-            .iter()
-            .map(|t| {
-                let s = t.spec();
-                ToolSpec {
-                    name: s.name,
-                    description: Some(s.description),
-                    input_schema: s.parameters,
-                }
-            })
-            .collect();
-
-        let permission_mode = turn_ctx.permission_mode;
-        // Loop-carried turn state (see `turn_state::TurnState`): retry
-        // counters (bounded by MAX_EMPTY_RETRIES / MAX_OVERFLOW_RETRIES)
-        // and the turn-scoped flags threaded through the loop body.
+        // Loop-carried turn state (see `turn_state::TurnState`).
         let mut turn_state = TurnState::default();
         const MAX_EMPTY_RETRIES: usize = 3;
         const MAX_OVERFLOW_RETRIES: usize = 3;
-        // Send tools are not always declared (loaded on demand), so fold any
-        // prior references that would become orphan tool calls.
-        fold_absent_tool(&mut messages, &tool_specs, "send_message", "消息发送结果");
-        fold_absent_tool(&mut messages, &tool_specs, "send_media", "媒体发送结果");
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -294,57 +208,28 @@ impl Agent {
                 }
             }
 
-            // Context-overflow backstop. The provider rejected the request as
-            // too large (empty body, mapped to `ContextOverflow` instead of a
-            // misleading `EndTurn`). This only happens if the pre-send guard's
-            // estimate undershot the real token count; force a compaction and
-            // retry rather than blindly re-sending the same over-window request.
-            if response.stop_reason == StopReason::ContextOverflow {
-                turn_state.overflow_retries += 1;
-                let recovered = if turn_state.overflow_retries <= MAX_OVERFLOW_RETRIES {
-                    context.compact_until_fit(
-                        session,
-                        turn_ctx.system_prompt,
-                        &model_id,
-                        Arc::clone(&provider),
-                        &tool_specs,
-                        runtime.task_boards.as_ref(),
-                        true, // force: bypass the threshold, we know it overflowed
-                    )
-                    .await
-                } else {
-                    None
-                };
-                match recovered {
-                    Some(compacted) => {
-                        messages = compacted;
-                        tracing::warn!(
-                            attempt = turn_state.overflow_retries,
-                            "context overflow reported by provider; compacted and retrying"
-                        );
-                        continue;
-                    }
-                    None => {
-                        // Can't reduce further (history already minimal) or out of
-                        // attempts — surface a clear message instead of silently
-                        // giving up like the empty-response path would.
-                        tracing::warn!(
-                            attempt = turn_state.overflow_retries,
-                            "context overflow and compaction could not recover; giving up"
-                        );
-                        let msg = "⚠️ 当前对话已超出该模型的上下文上限，压缩后仍无法容纳。\
-                            请使用 /new 开启新会话，或精简后重试。"
-                            .to_string();
-                        session.add_assistant(msg.clone());
-                        persist_last(session);
-                        return Ok(TurnResult {
-                            text: msg,
-                            stop_reason: StopReason::ContextOverflow,
-                            pending_retry: None,
-                            has_pending: false,
-                        });
-                    }
+            // Context-overflow backstop — extracted to finalize.rs (batch 4).
+            match self
+                .handle_context_overflow(
+                    session,
+                    &turn_ctx,
+                    &provider,
+                    &model_id,
+                    &tool_specs,
+                    context,
+                    runtime,
+                    response.stop_reason == StopReason::ContextOverflow,
+                    &mut turn_state,
+                    MAX_OVERFLOW_RETRIES,
+                )
+                .await?
+            {
+                OverflowRecovery::Compacted(compacted) => {
+                    messages = compacted;
+                    continue;
                 }
+                OverflowRecovery::GiveUp(tr) => return Ok(tr),
+                OverflowRecovery::NotOverflow => {}
             }
 
             // No tool calls → final response. Persist + return.
@@ -422,385 +307,175 @@ impl Agent {
                     // No Done yet — we will re-call the model.
                     continue;
                 }
-                // Emit Done before persisting so streaming UI gets final text.
-                // 单 preview (2026-08-12): the ORIGIN turn that spawned async
-                // delegations must keep its preview in progress form — with
-                // ordinary-turn semantics `Done` collapses it into the one-line
-                // summary right away, and the suspension's notice turns would
-                // then take over a collapsed summary instead of the live
-                // progress ("先 summary 再 progress", user-confirmed). Marking
-                // the stream `defer_collapse` appends this turn's final
-                // commentary as a 💬 line and KEEPS the preview; only the
-                // FINAL resume turn collapses it (final_takeover → summary
-                // line; the final answer is delivered as a separate message
-                // by the fallback — user-confirmed shape: 2 messages).
-                // Silenced resume turns already
-                // get `defer_collapse` from `process_turn`; the final loud
-                // resume turn has `async_delegation_spawned == false`, so
-                // neither flag applies there. issue #140: a shell background
-                // spawn is an origin turn exactly like a delegation spawn —
-                // same preview treatment.
-                if (turn_state.async_delegation_spawned || turn_state.shell_pending_spawned) && !session.turn_silenced {
-                    if let Some(stream) = session.turn_stream.as_mut() {
-                        stream.defer_collapse();
-                    }
-                }
-                push_or_drop(
-                    &mut session.turn_stream,
-                    TurnEvent::Done {
-                        text: response.text.clone(),
-                    },
-                )
-                .await;
-                let mut msg = ChatMessage::assistant_text(response.text.clone());
-                let effective_model: &str =
-                    response.actual_model.as_deref().unwrap_or(&model_id);
-                msg.model = Some(effective_model.to_string());
-                msg.usage = llm_usage(
+                // Final response path — extracted to finalize.rs (batch 4).
+                // (Done event → defer_collapse → persist → memory/skill
+                // forks → TurnResult; statement order per RFC §4.5.)
+                return self
+                    .finalize_turn(
+                        session,
+                        &response,
+                        &messages,
+                        &tool_specs,
+                        runtime,
+                        &model_id,
+                        &provider,
+                        &turn_state,
+                        loop_breaker.total_calls(),
+                    )
+                    .await;
+            }
+
+            // Tool-batch execution — extracted to tool_phase.rs (batch 4).
+            // (assistant append + persist → per-call loop with events, exec
+            // marker, execute, 4 flow-control detectors, hard limit →
+            // ToolBatchOutcome.)
+            match self
+                .execute_tool_batch(
+                    session,
                     &response,
-                    runtime
-                        .providers
-                        .get_chat_provider_id_by_model(effective_model),
-                    effective_model,
-                );
-                session.history.push(msg.clone());
-                session.message_ids.push(0);
-                persist_last(session);
-
-                // Fire-and-forget memory extraction fork (claude-code pattern).
-                // Skipped when the main agent already called memory_manage this
-                // turn (mutual exclusion) or when this is a sub-agent session.
-                if !turn_state.turn_called_memory && session.parent_session_id.is_none() {
-                    let mut fork_messages = messages.clone();
-                    fork_messages.push(msg.clone());
-                    let fork_input = crate::agents::memory_fork::ForkInput {
-                        messages: fork_messages,
-                        model_id: model_id.clone(),
-                        provider: Arc::clone(&provider),
-                        tool_specs: tool_specs.clone(),
-                        tool_registry: Arc::clone(&runtime.tools),
-                        session_owner: session.owner.clone(),
-                        session_id: session.id.clone(),
-                        memory_root: runtime.defaults.prompt.memory_root.clone(),
-                        registry: Arc::clone(&runtime.providers) as Arc<dyn ProviderRegistry>,
-                    };
-                    tokio::spawn(async move {
-                        crate::agents::memory_fork::run_memory_fork(fork_input).await;
-                    });
-                }
-
-                // Fire-and-forget skill extraction fork.
-                // Fires once per session when the turn had enough tool calls
-                // (>= 5) and no errors — indicating a substantive, successful
-                // interaction that may contain reusable procedures.
-                if !turn_state.turn_had_error
-                    && loop_breaker.total_calls() >= 5
-                    && session.parent_session_id.is_none()
-                {
-                    let mut skill_messages = messages.clone();
-                    skill_messages.push(msg.clone());
-                    let skill_input = crate::agents::skill_extract::SkillExtractInput {
-                        messages: skill_messages,
-                        model_id: model_id.clone(),
-                        provider: Arc::clone(&provider),
-                        tool_specs: tool_specs.clone(),
-                        tool_registry: Arc::clone(&runtime.tools),
-                        session_id: session.id.clone(),
-                        base_dir: runtime.defaults.prompt.base_dir.clone(),
-                        channel: session.resolve_channel(),
-                        reply_target: session.reply_target().map(str::to_string),
-                    };
-                    tokio::spawn(async move {
-                        crate::agents::skill_extract::run_skill_extract(skill_input).await;
-                    });
-                }
-
-                return Ok(TurnResult {
-                    text: response.text,
-                    stop_reason: response.stop_reason,
-                    pending_retry: None,
-                    // 单 preview (2026-08-12): an EndTurn on a turn that spawned
-                    // async delegations is the ORIGIN turn of a suspension
-                    // sequence — `has_pending` marks it as such so the
-                    // dispatcher suspends instead of ending. The model may have
-                    // continued with other work after the spawn (the old forced
-                    // truncation is gone); its output is the preview content.
-                    // issue #140: a shell background spawn is the same kind of
-                    // origin turn.
-                    has_pending: turn_state.has_pending(),
-                });
-            }
-
-            // Tool calls present — append assistant message with the calls
-            // (preserving thinking content for re-send), execute each tool,
-            // append tool_result messages, then loop for the next LLM call.
-            let mut assistant_msg = ChatMessage::assistant_text(&response.text);
-            assistant_msg.tool_calls = Some(response.tool_calls.clone());
-            if let Some(ref thinking_text) = response.reasoning_content {
-                assistant_msg.parts.insert(
-                    0,
-                    ContentPart::Thinking {
-                        thinking: thinking_text.clone(),
-                        signature: response.thinking_signature.clone(),
-                    },
-                );
-            }
-            let effective_model: &str = response.actual_model.as_deref().unwrap_or(&model_id);
-            let usage = llm_usage(
-                &response,
-                runtime
-                    .providers
-                    .get_chat_provider_id_by_model(effective_model),
-                effective_model,
-            );
-            messages.push(assistant_msg);
-            session.add_assistant_with_tools(
-                response.text.clone(),
-                response.tool_calls.clone(),
-                response.reasoning_content.clone(),
-                response.thinking_signature.clone(),
-                Some(effective_model.to_string()),
-                usage,
-            );
-            persist_last(session);
-
-            for (i, call) in response.tool_calls.iter().enumerate() {
-                // Track memory_manage calls for fork mutual exclusion.
-                if call.name == "memory_manage" {
-                    turn_state.turn_called_memory = true;
-                }
-                // Execute the tool call first, then check the limit.
-                // Checking before execution would leave orphan tool_calls
-                // (assistant declares a call but no result is appended).
-
-                // Emit ToolCall event before execution (streaming UIs show
-                // the call spinner).
-                {
-                    let args: serde_json::Value =
-                        serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
-                    push_or_drop(
-                        &mut session.turn_stream,
-                        TurnEvent::ToolCall {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            args,
-                        },
-                    )
-                    .await;
-                }
-
-                // Notify channel of tool call start (for reply progress).
-                // RFC channel-role-split §1.2: resolved from the live
-                // registry, not a turn-installed handle.
-                if let (Some(ch), Some(rt)) =
-                    (session.resolve_channel(), session.reply_target())
-                {
-                    ch.on_tool_event(
-                        rt,
-                        crate::channels::ToolEvent::Start {
-                            tool_name: call.name.clone(),
-                            tool_call_id: call.id.clone(),
-                        },
-                    )
-                    .await;
-                }
-
-                // Write exec marker before execution so recovery can detect
-                // a tool that killed the daemon (e.g. `myclaw update`).
-                exec_marker_write(
-                    runtime.sessions_dir.as_deref(),
-                    &session.id,
-                    &call.id,
-                );
-
-                let result = tool_executor
-                    .execute(call, session, Some(&permission_mode), &allowed_tools)
-                    .await;
-
-                // Clear the marker now that execute() returned — the tool
-                // completed (or errored), so re-execution by recovery is
-                // no longer the concern. Guard ensures cleanup on any path.
-                let _marker_guard = ExecMarkerGuard {
-                    sessions_dir: runtime.sessions_dir.clone(),
-                    session_id: session.id.clone(),
-                };
-
-                let (result_content, is_error) = match &result {
-                    Ok(r) => {
-                        let mut out = r.output.clone();
-                        if let Some(ref err) = r.error {
-                            if out.is_empty() {
-                                out = format!("error: {}", err);
-                            }
-                        }
-                        (out, !r.success)
-                    }
-                    Err(e) => (format!("error: {}", e), true),
-                };
-                if is_error {
-                    turn_state.turn_had_error = true;
-                }
-
-                // issue #140: detect a shell call that just armed itself for
-                // a future completion notice — `state=running` is the header
-                // ONLY `background: true`'s immediate return and the
-                // timeout-conversion return use (checked via `starts_with`,
-                // not `contains`, so a command's own echoed output — which
-                // always comes AFTER this header, never before — can't spoof
-                // a false match). The race-recovery path (`terminal_result`
-                // in shell.rs) and the plain fast-completion path both start
-                // with a different `state=` value, so neither is armed.
-                if call.name == "shell" && !is_error && result_content.starts_with("state=running") {
-                    turn_state.shell_pending_spawned = true;
-                }
-
-                match loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
-                    LoopBreak::Detected(reason) => {
-                        tracing::warn!(
-                            session = %session.id,
-                            tool = %call.name,
-                            reason = ?reason,
-                            "loop breaker triggered"
-                        );
-                        // Record-and-check triggered: append the result for
-                        // this call so the pair is complete, then strip any
-                        // remaining unexecuted tool_calls and abort.
-                        let mut tool_msg = ChatMessage::text("tool", &result_content);
-                        tool_msg.tool_call_id = Some(call.id.clone());
-                        tool_msg.is_error = Some(is_error);
-                        messages.push(tool_msg);
-                        session.add_tool_result(
-                            call.id.clone(),
-                            &call.name,
-                            result_content.clone(),
-                            is_error,
-                        );
-
-                        let remaining = response.tool_calls.len() - i - 1;
-                        if remaining > 0 {
-                            session.strip_trailing_tool_calls(remaining);
-                        }
-                        persist_last(session);
-                        return Err(AgentError::LoopBreak { reason }.into());
-                    }
-                    LoopBreak::None => {}
-                }
-
-                let mut tool_msg = ChatMessage::text("tool", &result_content);
-                tool_msg.tool_call_id = Some(call.id.clone());
-                tool_msg.is_error = Some(is_error);
-                messages.push(tool_msg);
-
-                // Persist the tool result to disk BEFORE any async
-                // notification. persist_last is synchronous (no await
-                // points), so once execute() returns we can write the
-                // result immediately without risk of task cancellation
-                // at a later await point (push_or_drop, on_tool_event).
-                // If the task is cancelled during a downstream await,
-                // the result is already safe on disk.
-                session.add_tool_result(call.id.clone(), &call.name, result_content.clone(), is_error);
-                persist_last(session);
-
-                // Emit ToolResult event after the result is persisted.
-                push_or_drop(
-                    &mut session.turn_stream,
-                    TurnEvent::ToolResult {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        output: result_content,
-                        is_error,
-                    },
+                    &mut messages,
+                    runtime,
+                    &model_id,
+                    &turn_ctx.permission_mode,
+                    &allowed_tools,
+                    &tool_specs,
+                    &mut turn_state,
+                    &mut loop_breaker,
                 )
-                .await;
-
-                // Notify channel of tool call completion (for reply progress).
-                // RFC channel-role-split §1.2: resolved from the live
-                // registry, not a turn-installed handle.
-                if let (Some(ch), Some(rt)) =
-                    (session.resolve_channel(), session.reply_target())
-                {
-                    ch.on_tool_event(
-                        rt,
-                        crate::channels::ToolEvent::End {
-                            tool_name: call.name.clone(),
-                            tool_call_id: call.id.clone(),
-                            success: !is_error,
-                        },
-                    )
-                    .await;
-                }
-
-                // Detect successful async delegation only after this result has
-                // been persisted. Continue executing the rest of the provider
-                // batch; the boundary is checked after the batch below.
-                if call.name == "agent_delegate" && !is_error {
-                    let mode = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                        .ok()
-                        .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(str::to_owned));
-                    if mode.as_deref() == Some("async") {
-                        turn_state.async_delegation_spawned = true;
-                    }
-                }
-
-                // sessions_yield (docs/delegation-notice-queue-rfc.md §3.2):
-                // explicit hand-off — deterministic EndTurn, discard remaining
-                // tool_calls. has_pending reuses async_delegation_spawned (and,
-                // issue #140, shell_pending_spawned) so suspension proceeds
-                // normally when sub-agents or background shell work were
-                // spawned.
-                if call.name == "sessions_yield" && !is_error {
-                    let remaining = response.tool_calls.len() - i - 1;
-                    if remaining > 0 {
-                        session.strip_trailing_tool_calls(remaining);
-                    }
-                    tracing::info!(
-                        session = %session.id,
-                        "sessions_yield called; ending turn deterministically"
-                    );
-                    return Ok(TurnResult {
-                        text: response.text.clone(),
-                        stop_reason: StopReason::EndTurn,
-                        pending_retry: None,
-                        has_pending: turn_state.has_pending(),
-                    });
-                }
-
-                // After executing this call, check if we've hit the hard
-                // limit. If so, strip remaining unexecuted tool_calls and
-                // abort — avoids orphan tool_calls in history.
-                if loop_breaker.total_calls() >= loop_breaker.max_tool_calls() {
-                    let remaining = response.tool_calls.len() - i - 1;
-                    if remaining > 0 {
-                        session.strip_trailing_tool_calls(remaining);
-                    }
-                    tracing::warn!(
-                        session = %session.id,
-                        total_calls = loop_breaker.total_calls(),
-                        max = loop_breaker.max_tool_calls(),
-                        "loop breaker triggered: max tool calls exceeded"
-                    );
-                    return Err(AgentError::LoopBreak {
-                        reason: LoopBreakReason::MaxCalls {
-                            count: loop_breaker.total_calls(),
-                            limit: loop_breaker.max_tool_calls(),
-                        },
-                    }
-                    .into());
-                }
-            }
-
-            if turn_state.async_delegation_spawned || turn_state.shell_pending_spawned {
-                tracing::debug!(
-                    session = %session.id,
-                    parent = session.parent_session_id.as_deref().unwrap_or("none"),
-                    async_delegation_spawned = turn_state.async_delegation_spawned,
-                    shell_pending_spawned = turn_state.shell_pending_spawned,
-                    "async work spawned this turn; has_pending flag set at EndTurn"
-                );
+                .await?
+            {
+                ToolBatchOutcome::Continue => {}
+                ToolBatchOutcome::EndTurn(tr) => return Ok(*tr),
+                ToolBatchOutcome::Abort(err) => return Err(err.into()),
             }
 
             // Loop back to the next LLM call with the appended tool_result messages.
         }
+    }
+
+    /// One-time turn setup for `run_inner`: resolve the filtered tool view,
+    /// provider + model, loop-breaker counter, seed the token tracker, and
+    /// assemble the LLM request prefix (with orphan-tool folding).
+    ///
+    /// Extracted from `run_inner` (batch 4); statement order verbatim.
+    async fn prepare_turn<'a>(
+        &'a self,
+        session: &mut Session,
+        turn_ctx: &TurnContext<'_>,
+        runtime: &'a AgentRuntime,
+    ) -> Result<(
+        std::sync::Arc<dyn crate::providers::ChatProvider>,
+        String,
+        Vec<std::sync::Arc<dyn crate::providers::Tool>>,
+        Vec<ToolSpec>,
+        Vec<ChatMessage>,
+        crate::agents::loop_breaker::LoopBreakerCounter,
+    )> {
+        // Resolve filtered tool view from runtime + per-agent config.
+        let mut allowed_tools = self.allowed_tools(runtime);
+        filter_turn_scoped_tools(&mut allowed_tools, session);
+
+        // Resolve provider + model.
+        //
+        // - No override → the Chat fallback wrapper (fans out across the
+        //   configured chain on retryable / fallbackable errors).
+        // - Override (`/model`) → the raw per-model provider only. Same-model
+        //   short retries (short RateLimit / 5xx / timeout) may sleep and retry
+        //   here. We intentionally NEVER fall back to a different model or to
+        //   the routing Fallback chain — the user pinned this model. On
+        //   Billing / long model_cooldown / Auth / ModelNotFound the turn fails
+        //   with an actionable message (switch via `/model` or `/model off`).
+        let (provider, model_id) = match turn_ctx.model_id {
+            Some(m) => {
+                let result = runtime
+                    .providers
+                    .get_chat_provider_by_model(m)
+                    .ok_or_else(|| anyhow::anyhow!("model '{}' not found in registry", m))?;
+                tracing::info!(
+                    model = %result.1,
+                    reason = "session_override",
+                    "model resolved (no auto-degrade to fallback)"
+                );
+                result
+            }
+            None => {
+                let result = runtime.providers.get_chat_provider(Capability::Chat)?;
+                tracing::info!(
+                    model = %result.1,
+                    reason = "routing_default",
+                    "model resolved"
+                );
+                result
+            }
+        };
+
+        // Shared ToolExecutor singleton — per the target architecture,
+        // the executor is stateless w.r.t. which tools the agent may
+        // call; the `allowed_tools` slice computed above is passed
+        // explicitly on every `execute` call. Consumed by
+        // `execute_tool_batch` (tool_phase.rs, batch 4).
+
+        // Per-turn loop breaker counter — allocated fresh each turn by
+        // the shared `runtime.loop_breaker` singleton. Per-agent
+        // `SubAgentConfig.max_tool_calls` overrides the runtime default;
+        // when None, the shared config wins.
+        let mut loop_breaker = match self.config.max_tool_calls {
+            Some(n) => runtime.loop_breaker.new_counter_with_max(n),
+            None => runtime.loop_breaker.new_counter(),
+        };
+
+        // Seed Session.token_tracker from history when fresh (display/usage only).
+        // The compaction decision does NOT read the tracker — it uses a direct
+        // per-request estimate in `maybe_compact` — so a stale tracker restored on
+        // restart can no longer suppress compaction.
+        if session.token_tracker.is_fresh() {
+            session
+                .token_tracker
+                .seed_from_history(turn_ctx.system_prompt, &session.history);
+        }
+
+        // Assemble the LLM request prefix once. Subsequent rebuilds re-clone
+        // the session's growing history.
+        let system_msg = ChatMessage::system_text(turn_ctx.system_prompt);
+        let mut messages: Vec<ChatMessage> = std::iter::once(system_msg.clone())
+            .chain(session.history.iter().cloned())
+            .collect();
+        crate::agents::session::sanitize_history(&mut messages);
+
+        if let Some(policy) = runtime.providers.get_chat_media_policy(&model_id) {
+            filter_modality_redundant_tools(&mut allowed_tools, &messages, policy, &model_id);
+        }
+        // Convert capability_tool::ToolSpec → capability_chat::ToolSpec
+        // (the LLM request type). Same fields, different module homes —
+        // a unification candidate for a separate cleanup.
+        let tool_specs: Vec<ToolSpec> = allowed_tools
+            .iter()
+            .map(|t| {
+                let s = t.spec();
+                ToolSpec {
+                    name: s.name,
+                    description: Some(s.description),
+                    input_schema: s.parameters,
+                }
+            })
+            .collect();
+
+        // Loop-carried turn state (see `turn_state::TurnState`): retry
+        // counters (bounded by MAX_EMPTY_RETRIES / MAX_OVERFLOW_RETRIES)
+        // and the turn-scoped flags threaded through the loop body.
+        // Send tools are not always declared (loaded on demand), so fold any
+        // prior references that would become orphan tool calls.
+        fold_absent_tool(&mut messages, &tool_specs, "send_message", "消息发送结果");
+        fold_absent_tool(&mut messages, &tool_specs, "send_media", "媒体发送结果");
+
+        Ok((
+            provider,
+            model_id,
+            allowed_tools,
+            tool_specs,
+            messages,
+            loop_breaker,
+        ))
     }
 
     /// Resume a session whose history ends mid-turn (process crash,
