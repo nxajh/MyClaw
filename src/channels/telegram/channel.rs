@@ -42,6 +42,29 @@ fn is_edit_not_modified(status: reqwest::StatusCode, body: &str) -> bool {
     status == reqwest::StatusCode::BAD_REQUEST && body.contains("message is not modified")
 }
 
+/// Build the `sendMessage` request body for [`TelegramChannel::send_plain_message`].
+/// Deliberately carries no `parse_mode` key — see that function's doc comment
+/// (issue #144): this is the true last-resort tier and must not be able to
+/// fail on Markdown entity parsing.
+fn plain_message_body(
+    chat_id: &str,
+    text: &str,
+    thread_id: Option<&str>,
+    reply_markup: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "chat_id": chat_id,
+        "text": text,
+    });
+    if let Some(tid) = thread_id {
+        body["message_thread_id"] = serde_json::Value::from(tid);
+    }
+    if let Some(markup) = reply_markup {
+        body["reply_markup"] = markup;
+    }
+    body
+}
+
 /// A GFM table delimiter row, e.g. `| --- | :--: |`.
 fn is_table_delimiter_local(line: &str) -> bool {
     let t = line.trim();
@@ -557,6 +580,14 @@ impl TelegramChannel {
     }
 
     /// Plain-text fallback using standard `sendMessage` (no rich formatting).
+    /// Last-resort delivery via the standard `sendMessage` API, invoked when
+    /// `sendRichMessage` has already failed. Deliberately sends NO
+    /// `parse_mode`: issue #144 traced a production message loss to this
+    /// function still requesting legacy Markdown parsing despite its name —
+    /// arbitrary text can carry an odd number of unescaped `_`/`*` (e.g. a
+    /// bare `sessions_yield` in prose), which Telegram's legacy Markdown
+    /// parser rejects with "can't find end of the entity", so even the
+    /// fallback silently failed. Plain text can't fail to parse.
     async fn send_plain_message(
         &self,
         chat_id: &str,
@@ -565,17 +596,7 @@ impl TelegramChannel {
         reply_markup: Option<serde_json::Value>,
     ) -> anyhow::Result<Option<i64>> {
         let client = self.http_client();
-        let mut body = serde_json::json!({
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-        });
-        if let Some(tid) = thread_id {
-            body["message_thread_id"] = serde_json::Value::from(tid);
-        }
-        if let Some(ref markup) = reply_markup {
-            body["reply_markup"] = markup.clone();
-        }
+        let body = plain_message_body(chat_id, text, thread_id, reply_markup);
 
         let resp = client
             .post(self.api_url("sendMessage"))
@@ -2979,6 +3000,32 @@ mod tests {
             reqwest::StatusCode::TOO_MANY_REQUESTS,
             "message is not modified"
         ));
+    }
+
+    /// issue #144: `send_plain_message` is the last-resort delivery tier —
+    /// its request body must never carry `parse_mode`, or arbitrary text
+    /// (e.g. an odd number of unescaped underscores, like a bare
+    /// `sessions_yield` in prose) can still fail Telegram's legacy Markdown
+    /// entity parser and silently drop the message even after both fallback
+    /// tiers were exhausted.
+    #[test]
+    fn plain_message_body_carries_no_parse_mode() {
+        let body = plain_message_body("12345", "text with sessions_yield in it", None, None);
+        assert!(
+            body.get("parse_mode").is_none(),
+            "plain-message fallback must not request Markdown parsing: {body}"
+        );
+        assert_eq!(body["chat_id"], "12345");
+        assert_eq!(body["text"], "text with sessions_yield in it");
+    }
+
+    #[test]
+    fn plain_message_body_still_carries_thread_and_markup() {
+        let markup = serde_json::json!({"inline_keyboard": []});
+        let body = plain_message_body("12345", "hi", Some("42"), Some(markup.clone()));
+        assert!(body.get("parse_mode").is_none());
+        assert_eq!(body["message_thread_id"], "42");
+        assert_eq!(body["reply_markup"], markup);
     }
 
     fn make_config() -> TelegramAccountConfig {

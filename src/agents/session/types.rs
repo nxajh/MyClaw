@@ -351,7 +351,18 @@ impl Session {
     /// Store the incoming message context. Converts the runtime
     /// `ChannelInboundMessage` to the serializable `PersistedChannelMessage`
     /// (file bodies are dropped — only text and routing survive).
+    ///
+    /// issue #144: a synthetic no-channel message (scheduled/cron turns,
+    /// sub-agent delegation turns) carries an empty `receiver.id` by design
+    /// — it has nowhere to reply to. Skip persisting those so they don't
+    /// clobber the last *real* delivery target; a later delegation-notice
+    /// turn reads `last_message` to decide where to send its summary, and an
+    /// empty-receiver overwrite here was silently routing that summary
+    /// nowhere (issue #144's "pollution" root cause).
     pub fn record_inbound(&mut self, msg: ChannelInboundMessage) {
+        if msg.receiver.id.is_empty() {
+            return;
+        }
         self.last_message = Some(msg.to_persisted());
     }
 
@@ -622,6 +633,60 @@ impl Session {
         self.history.drain(..boundary);
         self.message_ids.drain(..boundary);
         self.compact_version = version;
+    }
+}
+
+#[cfg(test)]
+mod record_inbound_tests {
+    use super::Session;
+    use crate::channels::{ChannelInboundMessage, MessageReceiver, MessageSender};
+
+    fn msg(receiver_id: &str) -> ChannelInboundMessage {
+        ChannelInboundMessage {
+            id: "m1".to_string(),
+            sender: MessageSender::new("u1".to_string()),
+            receiver: MessageReceiver::new(receiver_id.to_string()),
+            content: crate::channels::ChannelMessageContent::text("hi".to_string()),
+            timestamp: 0,
+            interruption_scope_id: None,
+            silenced_override: None,
+            run_mode: Default::default(),
+        }
+    }
+
+    /// A normal inbound message (non-empty receiver) is persisted as usual.
+    #[test]
+    fn record_inbound_persists_normal_message() {
+        let mut session = Session::new("s1".to_string());
+        session.record_inbound(msg("chat-1"));
+        assert_eq!(session.reply_target(), Some("chat-1"));
+    }
+
+    /// issue #144 root cause A: a synthetic no-channel message (scheduled
+    /// turns, sub-agent delegation turns, or a notice built before this
+    /// issue's fix) carries an empty `receiver.id` by design or by bug — it
+    /// must NOT overwrite a previously recorded real delivery target, or a
+    /// later delegation-notice turn reading `last_message` would silently
+    /// route its summary to nowhere.
+    #[test]
+    fn record_inbound_does_not_clobber_last_message_with_empty_receiver() {
+        let mut session = Session::new("s1".to_string());
+        session.record_inbound(msg("chat-1"));
+        session.record_inbound(msg(""));
+        assert_eq!(
+            session.reply_target(),
+            Some("chat-1"),
+            "empty-receiver synthetic message must not overwrite the last real target"
+        );
+    }
+
+    /// A session that has never seen a real message stays `None` — an
+    /// empty-receiver synthetic message must not fabricate a bogus one.
+    #[test]
+    fn record_inbound_empty_receiver_on_fresh_session_stays_none() {
+        let mut session = Session::new("s1".to_string());
+        session.record_inbound(msg(""));
+        assert_eq!(session.reply_target(), None);
     }
 }
 
