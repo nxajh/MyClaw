@@ -209,7 +209,7 @@ impl Tool for ViewImageTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: &ToolContext,
+        _ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let path = args["path"].as_str().unwrap_or("").trim();
         if path.is_empty() {
