@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 
+use super::Agent;
 use super::exec_marker::{exec_marker_clear, exec_marker_read, persist_last};
 use super::tool_filter::filter_turn_scoped_tools;
 use crate::agents::AgentRuntime;
