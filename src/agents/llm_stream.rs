@@ -11,8 +11,6 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use crate::providers::{BoxStream, StreamEvent};
-// Re-export timeout constants from providers::shared for backward compatibility
-use crate::providers::shared::{REQUEST_SEND_TIMEOUT, ERROR_BODY_TIMEOUT};
 
 /// Time to wait for the first stream chunk before giving up.
 ///
