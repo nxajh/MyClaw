@@ -14,6 +14,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 mod exec_marker;
+mod injections;
 mod retry;
 mod stream_collect;
 mod tool_filter;
@@ -27,8 +28,8 @@ use exec_marker::{
     ExecMarkerGuard, exec_marker_clear, exec_marker_read, exec_marker_write, llm_usage,
     last_user_text, persist_last,
 };
-use retry::{backoff_duration, is_transient_llm_error};
-use stream_collect::{collect_stream, push_or_drop};
+use retry::chat_with_retry;
+use stream_collect::push_or_drop;
 use tool_filter::{filter_modality_redundant_tools, filter_turn_scoped_tools};
 use turn_state::TurnState;
 
@@ -38,7 +39,7 @@ use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::config::sub_agent::SubAgentConfig;
-use crate::providers::capability_chat::{ChatMessage, ChatRequest, StopReason, ToolSpec};
+use crate::providers::capability_chat::{ChatMessage, StopReason, ToolSpec};
 use crate::providers::{Capability, ContentPart, ProviderRegistry};
 
 // ── Module map ──────────────────────────────────────────────────────────────
@@ -46,7 +47,8 @@ use crate::providers::{Capability, ContentPart, ProviderRegistry};
 // exec_marker.rs    persist_last + exec-marker trio + ExecMarkerGuard + last_user_text + llm_usage
 // tool_filter.rs    allowed_tools + filter_turn_scoped_tools + modality filters + fold_absent_tool
 // stream_collect.rs CollectedResponse + push_or_drop + collect_stream
-// retry.rs          is_transient_llm_error + backoff_duration
+// injections.rs     reinject_after_compaction + inject_per_round (transient <system-reminder> injections)
+// retry.rs          is_transient_llm_error + backoff_duration + chat_with_retry
 // turn_state.rs     TurnState: loop-carried retry counters + turn flags (+ has_pending)
 
 /// "An agent" — just its config (name, system prompt fragment, three
@@ -245,208 +247,36 @@ impl Agent {
                 }
             }
 
-            // Pre-send compaction guard: compact BEFORE the request when the
-            // history we're about to send is over threshold. Driven by a direct
-            // history estimate (not the token tracker) so a stale/under-counted
-            // tracker can't let an over-window request through. This is the real
-            // fix for the "974 msgs sent at 31k tracked → context overflow" bug.
-            // Loops until under threshold so a history far over the window
-            // converges within this turn rather than one chunk per user turn.
-            if let Some(compacted) = context.compact_until_fit(
-                session,
-                turn_ctx.system_prompt,
-                &model_id,
-                Arc::clone(&provider),
+            // Pre-send compaction guard + post-compaction re-injection and
+            // the per-round transient injections — extracted to injections.rs (batch 3).
+            messages = self
+                .reinject_after_compaction(
+                    session,
+                    messages,
+                    runtime,
+                    &turn_ctx,
+                    &provider,
+                    &model_id,
+                    &tool_specs,
+                )
+                .await;
+
+            self.inject_per_round(session, &mut messages).await;
+
+            // LLM request with same-model transient-error retry —
+            // extracted to retry.rs as `chat_with_retry` (batch 3).
+            let response = chat_with_retry(
+                &session.id,
+                session.history.len(),
+                &provider,
+                &messages,
                 &tool_specs,
-                runtime.task_boards.as_ref(),
-                false,
+                &model_id,
+                &turn_ctx,
+                &mut session.turn_stream,
+                runtime.user_registry.as_ref(),
             )
-            .await
-            {
-                messages = compacted;
-
-                // Post-compaction re-injection: compaction summarizes away old
-                // <system-reminder> blocks (skills/memory/date/autonomy/agents).
-                // The agent loop bypasses process_turn, so the diff-based
-                // attachment injection in session_context.rs never runs. Re-run
-                // the diffs here against the freshly-compacted history; any
-                // missing reminders are injected as transient messages (not
-                // persisted to history, exactly like sub-agent inbox below).
-                let reminder = {
-                    let skills_snap = runtime.skills.read();
-                    let history_clone = session.history.clone();
-                    session.attachments.diff_skills(&skills_snap, &history_clone);
-                    let agent_list: Vec<(String, String)> = runtime
-                        .agents
-                        .values_cloned()
-                        .into_iter()
-                        .map(|a| {
-                            (
-                                a.config.name.clone(),
-                                a.config.description.clone().unwrap_or_default(),
-                            )
-                        })
-                        .collect();
-                    session.attachments.diff_agents(&agent_list, &history_clone);
-                    session.attachments.diff_date(
-                        runtime.context_engine.timezone_offset(),
-                        &history_clone,
-                    );
-                    session.attachments.diff_autonomy(&permission_mode, &history_clone);
-                    // Daily throttled draft-skill backlog reminder (issue #89,
-                    // layer ②) — best-effort, never blocks the turn.
-                    if let Some(names) = crate::agents::skill_draft_reminder::check_and_arm(
-                        std::path::Path::new(&runtime.defaults.prompt.base_dir),
-                        runtime.context_engine.timezone_offset(),
-                    ) {
-                        session.attachments.push_skill_draft_reminder(names);
-                    }
-                    let memory_root = &runtime.defaults.prompt.memory_root;
-                    let memory_entries: Vec<crate::memory::IndexEntry> =
-                        if !memory_root.is_empty() {
-                            let memory_dir = std::path::Path::new(memory_root);
-                            let files = crate::memory::scan_memory_files(memory_dir);
-                            files.iter().map(crate::memory::IndexEntry::from).collect()
-                        } else {
-                            Vec::new()
-                        };
-                    session.attachments.diff_memory(&memory_entries, &history_clone);
-                    let text = session.attachments.build_text(&skills_snap);
-                    session.attachments.clear_pending();
-                    text
-                };
-                if let Some(reminder_text) = reminder {
-                    tracing::info!(
-                        session = %session.id,
-                        "injected system-reminder snapshot after compaction"
-                    );
-                    let snapshot_msg = ChatMessage::user_text(reminder_text);
-                    if messages.len() > 1 {
-                        messages.insert(1, snapshot_msg);
-                    } else {
-                        messages.push(snapshot_msg);
-                    }
-                }
-            }
-
-            // Time-awareness: sub-agent sessions carry a wall-clock kill
-            // deadline. Inject the remaining budget as a transient
-            // `<system-reminder>` before every LLM request (not persisted —
-            // same consumption model as the inbox below) so the sub-agent
-            // can pace itself and, at ≤20% remaining, is told to wrap up
-            // instead of being killed mid-flight with nothing delivered.
-            if let Some(deadline) = session.delegation_deadline {
-                let remaining = deadline.remaining_secs();
-                if remaining > 0 {
-                    messages.push(ChatMessage::user_text(deadline.render_reminder()));
-                }
-            }
-
-            // RFC agent-messaging §3.4/§3.7: drain the sub-agent inbox before
-            // this LLM request so parent → sub messages are visible on the
-            // next tool round. Injected as a `<system-reminder>` user message
-            // (not persisted to history — the tool-loop alternation stays
-            // clean and injection is consumption). Placement is deliberately
-            // AFTER compaction so a compaction pass cannot drop the batch.
-            // §3.7: if the batch exceeds the per-round budget, only the
-            // newest complete messages are injected and the older remainder
-            // is re-queued for a later round (never dropped, never truncated).
-            if let Some(mailbox) = &session.sub_agent_inbox {
-                let mut pending = Vec::new();
-                {
-                    let mut rx = mailbox.rx.lock().await;
-                    while let Ok(mail) = rx.try_recv() {
-                        pending.push(mail);
-                    }
-                }
-                if !pending.is_empty() {
-                    let (kept, deferred) =
-                        crate::agents::delegation::select_within_injection_budget(pending);
-                    if !deferred.is_empty() {
-                        tracing::warn!(
-                            session = %session.id,
-                            deferred = deferred.len(),
-                            "inbox batch over injection budget; deferring older messages to a later round"
-                        );
-                        for mail in deferred {
-                            let _ = mailbox.tx.send(mail).await;
-                        }
-                    }
-                    if !kept.is_empty() {
-                        tracing::info!(
-                            session = %session.id,
-                            count = kept.len(),
-                            "injecting sub-agent inbox messages before LLM request"
-                        );
-                        messages.push(ChatMessage::user_text(
-                            crate::agents::delegation::render_agent_mail_reminder(&kept),
-                        ));
-                    }
-                }
-            }
-
-            // RFC §3.5/§4.3: per-turn injections (user-level mailbox +
-            // pending friend requests), rendered by `dispatch_turn` and
-            // stashed on the session. 注入即消费 — injected into this first
-            // LLM request then cleared; pending requests are re-rendered
-            // every turn by `dispatch_turn` while they remain.
-            if !session.turn_injections.is_empty() {
-                let injections = std::mem::take(&mut session.turn_injections);
-                for text in injections {
-                    messages.push(ChatMessage::user_text(text));
-                }
-            }
-
-            let response = {
-                tracing::info!(
-                    session = %session.id,
-                    msg_count = messages.len(),
-                    model = %model_id,
-                    history_len = session.history.len(),
-                    "agent: sending LLM request"
-                );
-                const MAX_LLM_RETRIES: usize = 2;
-                let mut attempt: usize = 0;
-                loop {
-                    let thinking = turn_ctx.thinking.cloned();
-                    let req = ChatRequest {
-                        model: &model_id,
-                        messages: &messages,
-                        temperature: None,
-                        max_tokens: None,
-                        thinking,
-                        stop: None,
-                        seed: None,
-                        tools: if tool_specs.is_empty() {
-                            None
-                        } else {
-                            Some(&tool_specs)
-                        },
-                        stream: true,
-                    };
-                    let stream = provider.chat(req)?;
-                    match collect_stream(
-                        stream,
-                        &mut session.turn_stream,
-                        runtime.user_registry.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(resp) => break Ok(resp),
-                        Err(e) if attempt < MAX_LLM_RETRIES && is_transient_llm_error(&e) => {
-                            attempt += 1;
-                            tracing::warn!(
-                                model = %model_id, attempt,
-                                err = %e,
-                                "LLM call failed with transient error, retrying"
-                            );
-                            tokio::time::sleep(backoff_duration(attempt)).await;
-                            continue;
-                        }
-                        Err(e) => break Err(e),
-                    }
-                }
-            }?;
+            .await?;
 
             // Update Session.token_tracker from the API response. The tracker is
             // the source of truth for *usage reporting* (display + persistence,
