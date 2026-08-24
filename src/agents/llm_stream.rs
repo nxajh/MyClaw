@@ -18,7 +18,7 @@ use crate::providers::{BoxStream, StreamEvent};
 /// large prompts (300k+ tokens) behind proxies (CPA) where upstream prefill
 /// + thinking time-to-first-token regularly exceeds the old 60 s bound.
 ///
-/// The pre-stream `send()` is bounded separately by [`REQUEST_SEND_TIMEOUT`],
+/// The pre-stream `send()` is bounded separately by `REQUEST_SEND_TIMEOUT`,
 /// so this timeout only ever applies once the provider has accepted the
 /// request and opened a stream.
 pub const STREAM_FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
