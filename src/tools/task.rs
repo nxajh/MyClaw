@@ -938,7 +938,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let b = boards(&dir);
         let session = make_session("019fe342-6a03-7561-86de-0c2327a8c3de");
-        let path = b.board_path(&ctx.session_id);
+        let path = b.board_path(&session.session_id);
 
         // "Daemon A": create a goal and a child task — both must hit disk.
         let create = TaskCreateTool { boards: b.clone() };
