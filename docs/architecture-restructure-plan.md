@@ -13,10 +13,10 @@ MyClaw 单 crate 内逻辑分层（无编译器边界，靠依赖方向断言维
 | 层 | 模块 | 允许依赖 | 断言 |
 |---|---|---|---|
 | **L0 契约层** | api（新建） | 零 `use crate::` | `grep -r "use crate::" src/api/` 输出空 |
-| **L1 基础层** | ids, config, str_utils, storage（纯存储部分） | L0 + 基础内部 | `grep -r "use crate::" src/{ids,config,str_utils}/` 仅匹配 L0/L1 模块 |
-| **L2 服务层** | providers, memory | L0 + L1 | `grep -r "use crate::" src/{providers,memory}/` 仅匹配 L0/L1 |
-| **L3 工具层** | tools | L0 + L1 + L2（不引 L4/L5） | `grep -r "use crate::" src/tools/` 不匹配 agents/scheduling/channels |
-| **L4 运行时层** | agents（runtime 核心）, scheduling, identity | L0-L3 | `grep -r "use crate::" src/{agents,scheduling,identity}/` 不匹配 channels/daemon |
+| **L1 基础层** | ids, config, str_utils, storage（纯存储部分）, scheduling-types | L0 + 基础内部 | `grep -r "use crate::" src/{ids,config,str_utils,scheduling_types}/` 仅匹配 L0/L1 模块 |
+| **L2 服务层** | providers, memory, identity | L0 + L1 | `grep -r "use crate::" src/{providers,memory,identity}/` 仅匹配 L0/L1 |
+| **L3 工具层** | tools | L0 + L1 + L2（不引 L4/L5） | `grep -r "use crate::" src/tools/` 不匹配 agents/scheduling/commands/channels |
+| **L4 运行时层** | agents（runtime 核心）, scheduling-runtime, commands | L0-L3 | `grep -r "use crate::" src/{agents,scheduling,commands}/` 不匹配 channels/daemon |
 | **L5 渠道层** | channels | L0-L4（顶层驱动） | `grep -r "use crate::" src/channels/` 仅匹配 L0-L4 |
 | **L6 组合根** | daemon, cli, webui | 全引 | 唯一合法的"全知"点 |
 
