@@ -18,7 +18,7 @@ use crate::providers::{BoxStream, StreamEvent};
 /// large prompts (300k+ tokens) behind proxies (CPA) where upstream prefill
 /// + thinking time-to-first-token regularly exceeds the old 60 s bound.
 ///
-/// The pre-stream `send()` is bounded separately by [`REQUEST_SEND_TIMEOUT`],
+/// The pre-stream `send()` is bounded separately by `REQUEST_SEND_TIMEOUT`,
 /// so this timeout only ever applies once the provider has accepted the
 /// request and opened a stream.
 pub const STREAM_FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
@@ -36,22 +36,6 @@ pub const STREAM_CHUNK_INTERVAL_TIMEOUT: Duration = Duration::from_secs(120);
 /// cannot run past a bounded wall-clock budget. 500 s > first-chunk (300 s) +
 /// headroom so a single slow chunk never trips it spuriously.
 pub const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(500);
-
-/// Time to wait for the provider to accept the request (`send()`).
-///
-/// This is the one spot a hung upstream can stall forever: a request that
-/// never completes keeps us in `send().await` with no stream to time out.
-/// Provider-side "no overall request timeout" (see `providers/http.rs`)
-/// means nothing bounds this unless we do. On expiry the request is dropped
-/// and a `StreamEvent::Error` is emitted so the routing fallback chain can
-/// classify the timeout and fail over to the next provider.
-pub const REQUEST_SEND_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// Time to wait for reading an HTTP error body after a non-2xx status.
-///
-/// Only reached after `send()` already succeeded, so this bounds a small
-/// secondary read; 10 s is generous.
-pub const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read the next event from a stream with a timeout.
 ///

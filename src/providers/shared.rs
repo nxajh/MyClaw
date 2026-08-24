@@ -1,5 +1,25 @@
 //! Shared utilities for providers: HTTP auth helpers, streaming UTF-8 decode.
 
+use std::time::Duration;
+
+// ── Timeouts ──────────────────────────────────────────────────────────────────
+
+/// Time to wait for the provider to accept the request (`send()`).
+///
+/// This is the one spot a hung upstream can stall forever: a request that
+/// never completes keeps us in `send().await` with no stream to time out.
+/// Provider-side "no overall request timeout" (see `providers/http.rs`)
+/// means nothing bounds this unless we do. On expiry the request is dropped
+/// and a `StreamEvent::Error` is emitted so the routing fallback chain can
+/// classify the timeout and fail over to the next provider.
+pub const REQUEST_SEND_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Time to wait for reading an HTTP error body after a non-2xx status.
+///
+/// Only reached after `send()` already succeeded, so this bounds a small
+/// secondary read; 10 s is generous.
+pub const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+
 // ── Auth ───────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]

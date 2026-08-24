@@ -77,7 +77,7 @@ impl ChatProvider for GoogleGenerateContentClient {
             }
 
             let resp = match tokio::time::timeout(
-                crate::agents::llm_stream::REQUEST_SEND_TIMEOUT,
+                crate::providers::shared::REQUEST_SEND_TIMEOUT,
                 client.post(&url).headers(headers).json(&body).send(),
             )
             .await
@@ -91,13 +91,13 @@ impl ChatProvider for GoogleGenerateContentClient {
                 Err(_) => {
                     tracing::warn!(
                         url = %url,
-                        timeout_secs = crate::agents::llm_stream::REQUEST_SEND_TIMEOUT.as_secs(),
+                        timeout_secs = crate::providers::shared::REQUEST_SEND_TIMEOUT.as_secs(),
                         "request send timed out — no response from provider"
                     );
                     let _ = tx
                         .send(StreamEvent::Error(format!(
                             "request timed out after {}s",
-                            crate::agents::llm_stream::REQUEST_SEND_TIMEOUT.as_secs()
+                            crate::providers::shared::REQUEST_SEND_TIMEOUT.as_secs()
                         )))
                         .await;
                     return;
@@ -107,7 +107,7 @@ impl ChatProvider for GoogleGenerateContentClient {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = match tokio::time::timeout(
-                    crate::agents::llm_stream::ERROR_BODY_TIMEOUT,
+                    crate::providers::shared::ERROR_BODY_TIMEOUT,
                     resp.text(),
                 )
                 .await
