@@ -146,7 +146,7 @@ impl super::Agent {
 
         Ok(TurnResult {
             text: response.text.clone(),
-            stop_reason: response.stop_reason.clone(),
+            stop_reason: response.stop_reason,
             pending_retry: None,
             // 单 preview (2026-08-12): an EndTurn on a turn that spawned
             // async delegations is the ORIGIN turn of a suspension

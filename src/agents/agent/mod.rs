@@ -38,7 +38,7 @@ use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{ChatMessage, StopReason, ToolSpec};
-use crate::providers::{Capability, ProviderRegistry};
+use crate::providers::Capability;
 
 // ── Module map ──────────────────────────────────────────────────────────────
 // mod.rs            Agent identity + run/run_inner/run_recovery orchestration
