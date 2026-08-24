@@ -9,7 +9,6 @@
 //! (`Chunk` / `Thinking` / `ToolCall` / `ToolResult`) are pushed to the
 //! optional `TurnStream`.
 
-use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -26,10 +25,7 @@ use crate::agents::AgentRuntime;
 
 pub(crate) use tool_filter::fold_absent_tool;
 
-use exec_marker::{
-    exec_marker_clear, exec_marker_read, exec_marker_write, last_user_text, persist_last,
-    ExecMarkerGuard,
-};
+use exec_marker::{exec_marker_clear, exec_marker_read, last_user_text, persist_last};
 use retry::chat_with_retry;
 use stream_collect::push_or_drop;
 use tool_filter::{filter_modality_redundant_tools, filter_turn_scoped_tools};
@@ -42,7 +38,7 @@ use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{ChatMessage, StopReason, ToolSpec};
-use crate::providers::{Capability, ContentPart, ProviderRegistry};
+use crate::providers::{Capability, ProviderRegistry};
 
 // ── Module map ──────────────────────────────────────────────────────────────
 // mod.rs            Agent identity + run/run_inner/run_recovery orchestration
@@ -419,7 +415,7 @@ impl Agent {
         // the shared `runtime.loop_breaker` singleton. Per-agent
         // `SubAgentConfig.max_tool_calls` overrides the runtime default;
         // when None, the shared config wins.
-        let mut loop_breaker = match self.config.max_tool_calls {
+        let loop_breaker = match self.config.max_tool_calls {
             Some(n) => runtime.loop_breaker.new_counter_with_max(n),
             None => runtime.loop_breaker.new_counter(),
         };
@@ -656,6 +652,7 @@ mod tests {
     use crate::agents::{AgentRegistry, LoopBreaker, LoopBreakerConfig};
     use crate::config::agent::{PermissionMode, RunMode};
     use crate::config::sub_agent::SubAgentConfig;
+    use super::exec_marker::{exec_marker_write, ExecMarkerGuard};
     use crate::providers::{
         ChatModelConfig, ChatProvider, EmbeddingProvider, ImageGenerationProvider,
         ProviderSummary, SearchFallbackEntry, SearchProvider, SttProvider, Tool, ToolCall,

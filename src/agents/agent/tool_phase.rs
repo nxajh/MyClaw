@@ -50,7 +50,7 @@ impl Agent {
         model_id: &str,
         permission_mode: &crate::config::agent::PermissionMode,
         allowed_tools: &[Arc<dyn crate::providers::Tool>],
-        tool_specs: &[ToolSpec],
+        _tool_specs: &[ToolSpec],
         turn_state: &mut TurnState,
         loop_breaker: &mut LoopBreakerCounter,
     ) -> anyhow::Result<ToolBatchOutcome> {
