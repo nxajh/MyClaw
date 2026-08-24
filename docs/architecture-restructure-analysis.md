@@ -48,7 +48,7 @@
 | agents → storage | 10 | 6 | |
 | channels → agents | 5 | 3 | **违规**（client.rs / telegram/channel.rs / turn_stream.rs） |
 | storage → channels | 1 | 1 | **违规**（inbound_spool.rs 存渠道类型 ChannelInboundMessage/PersistedChannelMessage） |
-| providers → agents | 1 | 1 | **违规**（capability_tool.rs:6 `use crate::agents::session::Session`） |
+| providers → agents | 5 | 5 | **违规**（capability_tool.rs:6 `use crate::agents::session::Session` + protocols 4 文件 inline 引用 `crate::agents::llm_stream::{REQUEST_SEND_TIMEOUT, ERROR_BODY_TIMEOUT}`） |
 | config → agents | 1 | 1 | 轻微（config/mod.rs:79 引 LoopBreakerConfig） |
 | agents → tools | 1 | 1 | 轻微（runtime.rs 引 SearchProviderCooldown/TaskBoards） |
 | agents ↔ mcp | 1 | 1 |（mcp→agents 仅 inline） |
@@ -131,9 +131,9 @@ daemon.rs（2024 行）use 仅引 agents/channels，但 inline 引用覆盖 11 �
 - **D 类引注册表**：ToolRegistry(tool_search)/SkillManager(3 文件)/DelegationCoordinator(3 文件)/SessionManager(shell OnceLock)
 - **E 类引用户/社交域**：send_message/friends 引 KnownUsersRegistry/UserRegistry/UserMail/DeliveryVerdict/ChannelRegistry——**证明身份/社交域应从 agents 拆出为独立模块，而非 tools 改造**
 
-**providers→agents 实测 5 文件（非 1）**：
-- capability_tool.rs:6 Session（Tool trait 签名）——**第一杠杆点**：收窄为 `ToolContext{owner,session_id,reply_target,...}` 值对象，一次改动消掉 A/B 两类 29 文件引用的根
-- protocols 4 文件（anthropic/google/openai×2）仅引 llm_stream 两个 Duration 常量——搬常量即归零，顺手消 4 份重复超时样板（~40×4 行）
+**providers→agents 实测 5 文件**：
+- capability_tool.rs:6 `use crate::agents::session::Session`（Tool trait 签名）——**第一杠杆点**：收窄为 `ToolContext{owner,session_id,reply_target,...}` 值对象，一次改动消掉 A/B 两类 29 文件引用的根
+- protocols 4 文件（anthropic/messages.rs、google/generate_content.rs、openai/chat_completions.rs、openai/responses.rs）inline 引用 `crate::agents::llm_stream::{REQUEST_SEND_TIMEOUT, ERROR_BODY_TIMEOUT}`——搬常量到 providers 即归零，顺手消 4 份重复超时样板（~40×4 行）
 
 **providers 合并组证据（CCP/深模块判据）**：
 - 微厂商 4 文件（anthropic 53/deepseek 56/qwen 54/kimi 56=219 行，唯一调用方 provider_factory）→ 合一
@@ -281,7 +281,7 @@ daemon.rs（2024 行）use 仅引 agents/channels，但 inline 引用覆盖 11 �
 3. **agents→channels 14 use 的消息模型耦合**是最重双向纠缠边（MessageReceiver/ChannelMessageContent/ChannelInboundMessage/Channel 等）
 4. **storage→channels 1 use 为新发现违规**（inbound_spool.rs 存渠道类型）
 5. **channels→agents 5 use 中 client.rs 占 3**（60%），另两处在 turn_stream.rs/telegram/channel.rs（引用 TurnEvent）——qqbot/wechat 零 agents 依赖
-6. **providers→agents 实测 1 文件**：capability_tool.rs Session
+6. **providers→agents 实测 5 文件**：capability_tool.rs Session（use）+ protocols 4 文件 inline 引用 llm_stream 的 2 个 Duration 常量（搬常量即归零）
 7. **churn 高度集中**：agents 1135 次（3.5x 第二名）——重构收益窗口与风险窗口同在 agents
 
 ### 8.2 模块结构结论
