@@ -654,10 +654,11 @@ mod tests {
     use crate::config::sub_agent::SubAgentConfig;
     use super::exec_marker::{exec_marker_write, ExecMarkerGuard};
     use crate::providers::{
-        ChatModelConfig, ChatProvider, EmbeddingProvider, ImageGenerationProvider,
-        ProviderSummary, SearchFallbackEntry, SearchProvider, SttProvider, Tool, ToolCall,
-        ToolResult, TtsProvider, VideoGenerationProvider,
+        ChatModelConfig, ChatProvider, ContentPart, EmbeddingProvider, ImageGenerationProvider,
+        ProviderRegistry, ProviderSummary, SearchFallbackEntry, SearchProvider, SttProvider,
+        Tool, ToolCall, ToolResult, TtsProvider, VideoGenerationProvider,
     };
+    use std::sync::Arc;
     use async_trait::async_trait;
     use parking_lot::RwLock;
 
