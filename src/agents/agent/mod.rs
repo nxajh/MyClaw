@@ -17,6 +17,7 @@ mod exec_marker;
 mod retry;
 mod stream_collect;
 mod tool_filter;
+mod turn_state;
 
 use crate::agents::AgentRuntime;
 
@@ -29,6 +30,7 @@ use exec_marker::{
 use retry::{backoff_duration, is_transient_llm_error};
 use stream_collect::{collect_stream, push_or_drop};
 use tool_filter::{filter_modality_redundant_tools, filter_turn_scoped_tools};
+use turn_state::TurnState;
 
 use crate::agents::error::AgentError;
 use crate::agents::loop_breaker::{LoopBreak, LoopBreakReason};
@@ -45,6 +47,7 @@ use crate::providers::{Capability, ContentPart, ProviderRegistry};
 // tool_filter.rs    allowed_tools + filter_turn_scoped_tools + modality filters + fold_absent_tool
 // stream_collect.rs CollectedResponse + push_or_drop + collect_stream
 // retry.rs          is_transient_llm_error + backoff_duration
+// turn_state.rs     TurnState: loop-carried retry counters + turn flags (+ has_pending)
 
 /// "An agent" — just its config (name, system prompt fragment, three
 /// capability filters, optional model override). Everything else lives
@@ -192,30 +195,12 @@ impl Agent {
             .collect();
 
         let permission_mode = turn_ctx.permission_mode;
-        let mut empty_response_retries: usize = 0;
+        // Loop-carried turn state (see `turn_state::TurnState`): retry
+        // counters (bounded by MAX_EMPTY_RETRIES / MAX_OVERFLOW_RETRIES)
+        // and the turn-scoped flags threaded through the loop body.
+        let mut turn_state = TurnState::default();
         const MAX_EMPTY_RETRIES: usize = 3;
-        let mut overflow_retries: usize = 0;
         const MAX_OVERFLOW_RETRIES: usize = 3;
-        // Track whether the main agent called memory_manage this turn —
-        // if so, the forked extraction is redundant (mutual exclusion).
-        let mut turn_called_memory = false;
-        // Track whether any tool call errored this turn — skill extraction
-        // only fires on clean turns (no errors).
-        let mut turn_had_error = false;
-        // Async delegation is a turn boundary: after the entire provider batch
-        // has been executed and persisted, return to SessionContext so the
-        // origin turn releases its lock before the completion wake is queued.
-        let mut async_delegation_spawned = false;
-        // issue #140: same turn-boundary role as `async_delegation_spawned`,
-        // but for a `shell` call armed for a future completion notice
-        // (`background: true`, or a foreground call converted mid-flight by
-        // the timeout branch — see `tools::shell`'s `mark_notify_on_exit`).
-        // The shell tool itself registers the pending entry (via a
-        // SessionManager lookup, mirroring how `agent_delegate`'s async path
-        // registers through `DelegationCoordinator`); this flag only decides
-        // whether THIS turn is the origin of a suspension sequence, exactly
-        // like `async_delegation_spawned` does for delegation.
-        let mut shell_pending_spawned = false;
         // Send tools are not always declared (loaded on demand), so fold any
         // prior references that would become orphan tool calls.
         fold_absent_tool(&mut messages, &tool_specs, "send_message", "消息发送结果");
@@ -485,8 +470,8 @@ impl Agent {
             // estimate undershot the real token count; force a compaction and
             // retry rather than blindly re-sending the same over-window request.
             if response.stop_reason == StopReason::ContextOverflow {
-                overflow_retries += 1;
-                let recovered = if overflow_retries <= MAX_OVERFLOW_RETRIES {
+                turn_state.overflow_retries += 1;
+                let recovered = if turn_state.overflow_retries <= MAX_OVERFLOW_RETRIES {
                     context.compact_until_fit(
                         session,
                         turn_ctx.system_prompt,
@@ -504,7 +489,7 @@ impl Agent {
                     Some(compacted) => {
                         messages = compacted;
                         tracing::warn!(
-                            attempt = overflow_retries,
+                            attempt = turn_state.overflow_retries,
                             "context overflow reported by provider; compacted and retrying"
                         );
                         continue;
@@ -514,7 +499,7 @@ impl Agent {
                         // attempts — surface a clear message instead of silently
                         // giving up like the empty-response path would.
                         tracing::warn!(
-                            attempt = overflow_retries,
+                            attempt = turn_state.overflow_retries,
                             "context overflow and compaction could not recover; giving up"
                         );
                         let msg = "⚠️ 当前对话已超出该模型的上下文上限，压缩后仍无法容纳。\
@@ -548,9 +533,9 @@ impl Agent {
                     // returns empty on EndTurn / StopSequence (transient)
                     // or MaxTokens (output budget exhausted). We don't yet
                     // do the boosted-max_tokens retry; we just re-call.
-                    empty_response_retries += 1;
+                    turn_state.empty_response_retries += 1;
                     let tool_use_without_calls = response.stop_reason == StopReason::ToolUse;
-                    if empty_response_retries > MAX_EMPTY_RETRIES {
+                    if turn_state.empty_response_retries > MAX_EMPTY_RETRIES {
                         if tool_use_without_calls {
                             tracing::warn!(
                                 model = %model_id,
@@ -593,13 +578,13 @@ impl Agent {
                         tracing::warn!(
                             model = %model_id,
                             session = %session.id,
-                            attempt = empty_response_retries,
+                            attempt = turn_state.empty_response_retries,
                             tool_call_events = response.tool_call_events,
                             "tool_use stop without tool calls, retrying"
                         );
                     } else {
                         tracing::warn!(
-                            attempt = empty_response_retries,
+                            attempt = turn_state.empty_response_retries,
                             stop = ?response.stop_reason,
                             "empty response, retrying"
                         );
@@ -625,7 +610,7 @@ impl Agent {
                 // neither flag applies there. issue #140: a shell background
                 // spawn is an origin turn exactly like a delegation spawn —
                 // same preview treatment.
-                if (async_delegation_spawned || shell_pending_spawned) && !session.turn_silenced {
+                if (turn_state.async_delegation_spawned || turn_state.shell_pending_spawned) && !session.turn_silenced {
                     if let Some(stream) = session.turn_stream.as_mut() {
                         stream.defer_collapse();
                     }
@@ -655,7 +640,7 @@ impl Agent {
                 // Fire-and-forget memory extraction fork (claude-code pattern).
                 // Skipped when the main agent already called memory_manage this
                 // turn (mutual exclusion) or when this is a sub-agent session.
-                if !turn_called_memory && session.parent_session_id.is_none() {
+                if !turn_state.turn_called_memory && session.parent_session_id.is_none() {
                     let mut fork_messages = messages.clone();
                     fork_messages.push(msg.clone());
                     let fork_input = crate::agents::memory_fork::ForkInput {
@@ -678,7 +663,7 @@ impl Agent {
                 // Fires once per session when the turn had enough tool calls
                 // (>= 5) and no errors — indicating a substantive, successful
                 // interaction that may contain reusable procedures.
-                if !turn_had_error
+                if !turn_state.turn_had_error
                     && loop_breaker.total_calls() >= 5
                     && session.parent_session_id.is_none()
                 {
@@ -712,7 +697,7 @@ impl Agent {
                     // truncation is gone); its output is the preview content.
                     // issue #140: a shell background spawn is the same kind of
                     // origin turn.
-                    has_pending: async_delegation_spawned || shell_pending_spawned,
+                    has_pending: turn_state.has_pending(),
                 });
             }
 
@@ -752,7 +737,7 @@ impl Agent {
             for (i, call) in response.tool_calls.iter().enumerate() {
                 // Track memory_manage calls for fork mutual exclusion.
                 if call.name == "memory_manage" {
-                    turn_called_memory = true;
+                    turn_state.turn_called_memory = true;
                 }
                 // Execute the tool call first, then check the limit.
                 // Checking before execution would leave orphan tool_calls
@@ -823,7 +808,7 @@ impl Agent {
                     Err(e) => (format!("error: {}", e), true),
                 };
                 if is_error {
-                    turn_had_error = true;
+                    turn_state.turn_had_error = true;
                 }
 
                 // issue #140: detect a shell call that just armed itself for
@@ -836,7 +821,7 @@ impl Agent {
                 // in shell.rs) and the plain fast-completion path both start
                 // with a different `state=` value, so neither is armed.
                 if call.name == "shell" && !is_error && result_content.starts_with("state=running") {
-                    shell_pending_spawned = true;
+                    turn_state.shell_pending_spawned = true;
                 }
 
                 match loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
@@ -923,7 +908,7 @@ impl Agent {
                         .ok()
                         .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(str::to_owned));
                     if mode.as_deref() == Some("async") {
-                        async_delegation_spawned = true;
+                        turn_state.async_delegation_spawned = true;
                     }
                 }
 
@@ -946,7 +931,7 @@ impl Agent {
                         text: response.text.clone(),
                         stop_reason: StopReason::EndTurn,
                         pending_retry: None,
-                        has_pending: async_delegation_spawned || shell_pending_spawned,
+                        has_pending: turn_state.has_pending(),
                     });
                 }
 
@@ -974,12 +959,12 @@ impl Agent {
                 }
             }
 
-            if async_delegation_spawned || shell_pending_spawned {
+            if turn_state.async_delegation_spawned || turn_state.shell_pending_spawned {
                 tracing::debug!(
                     session = %session.id,
                     parent = session.parent_session_id.as_deref().unwrap_or("none"),
-                    async_delegation_spawned,
-                    shell_pending_spawned,
+                    async_delegation_spawned = turn_state.async_delegation_spawned,
+                    shell_pending_spawned = turn_state.shell_pending_spawned,
                     "async work spawned this turn; has_pending flag set at EndTurn"
                 );
             }
