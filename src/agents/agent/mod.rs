@@ -9,7 +9,6 @@
 //! (`Chunk` / `Thinking` / `ToolCall` / `ToolResult`) are pushed to the
 //! optional `TurnStream`.
 
-
 use anyhow::Result;
 
 mod exec_marker;
@@ -20,6 +19,9 @@ mod stream_collect;
 mod tool_filter;
 mod tool_phase;
 mod turn_state;
+
+#[cfg(test)]
+mod tests;
 
 use crate::agents::AgentRuntime;
 
@@ -227,7 +229,6 @@ impl Agent {
                 OverflowRecovery::GiveUp(tr) => return Ok(tr),
                 OverflowRecovery::NotOverflow => {}
             }
-
             // No tool calls → final response. Persist + return.
             if response.tool_calls.is_empty() {
                 tracing::debug!(
@@ -643,166 +644,21 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {
+mod skeleton_tests {
+    // Skeleton-level tests only (run/run_recovery end-to-end via
+    // bailing_runtime). Symbol-level tests live beside their implementation;
+    // shared fixtures live in `tests.rs` (batch 5, RFC §2).
     use super::*;
-    use crate::agents::context_engine::ContextEngine;
-    use crate::agents::resource_provider::ResourceProvider;
     use crate::agents::session::Session;
-    use crate::agents::tool_executor::ToolExecutor;
-    use crate::agents::{AgentRegistry, LoopBreaker, LoopBreakerConfig};
     use crate::config::agent::{PermissionMode, RunMode};
-    use crate::config::sub_agent::SubAgentConfig;
-    use super::exec_marker::{exec_marker_write, ExecMarkerGuard};
-    use crate::providers::{
-        ChatModelConfig, ChatProvider, ContentPart, EmbeddingProvider, ImageGenerationProvider,
-        ProviderRegistry, ProviderSummary, SearchFallbackEntry, SearchProvider, SttProvider,
-        Tool, ToolCall, ToolResult, TtsProvider, VideoGenerationProvider,
-    };
-    use std::sync::Arc;
+    use crate::providers::{Tool, ToolResult};
     use async_trait::async_trait;
-    use parking_lot::RwLock;
+    use std::sync::Arc;
 
-    #[test]
-    fn fold_view_image_inlines_results_when_tool_absent() {
-        let mut asst = ChatMessage::assistant_text("让我看看");
-        asst.tool_calls = Some(vec![ToolCall {
-            id: "c1".into(),
-            name: "view_image".into(),
-            arguments: "{}".into(),
-        }]);
-        let mut tool_res = ChatMessage::text("tool", "一只红色的猫");
-        tool_res.tool_call_id = Some("c1".into());
-        let mut messages = vec![ChatMessage::user_text("这是什么"), asst, tool_res];
-
-        // No view_image in tool_specs → fold.
-        fold_absent_tool(&mut messages, &[], "view_image", "图片查看结果");
-
-        assert!(
-            !messages.iter().any(|m| m.role == "tool"),
-            "tool-result message must be dropped"
-        );
-        assert!(
-            messages.iter().all(|m| m
-                .tool_calls
-                .as_ref()
-                .map(|tcs| tcs.iter().all(|tc| tc.name != "view_image"))
-                .unwrap_or(true)),
-            "no view_image tool call may survive"
-        );
-        let folded = messages
-            .iter()
-            .flat_map(|m| &m.parts)
-            .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .any(|t| t.contains("一只红色的猫"));
-        assert!(
-            folded,
-            "result text must be inlined onto the assistant message"
-        );
-    }
-
-    #[test]
-    fn fold_view_image_is_noop_when_tool_present() {
-        let mut asst = ChatMessage::assistant_text("");
-        asst.tool_calls = Some(vec![ToolCall {
-            id: "c1".into(),
-            name: "view_image".into(),
-            arguments: "{}".into(),
-        }]);
-        let mut messages = vec![asst];
-        let specs = vec![ToolSpec {
-            name: "view_image".into(),
-            description: None,
-            input_schema: serde_json::json!({}),
-        }];
-        fold_absent_tool(&mut messages, &specs, "view_image", "图片查看结果");
-        // Tool declared → calls preserved untouched.
-        assert!(
-            messages[0]
-                .tool_calls
-                .as_ref()
-                .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == "view_image"))
-        );
-    }
+    use super::tests::{bailing_runtime, empty_config};
 
     // (Image placeholdering moved to `providers::media::lower_media_for`, which
     // owns its own unit tests; the agent no longer renders images.)
-
-    fn empty_config() -> SubAgentConfig {
-        SubAgentConfig {
-            name: "test".into(),
-            system_prompt: String::new(),
-            tools: Default::default(),
-            skills: Default::default(),
-            mcp: Default::default(),
-            max_tool_calls: None,
-            description: None,
-            model: None,
-            isolation: Default::default(),
-            timeout: None,
-        }
-    }
-
-    /// A `ProviderRegistry` that errors on everything — enough to satisfy
-    /// `AgentRuntime`'s type, never enough to run a real turn.
-    struct BailingRegistry;
-
-    #[rustfmt::skip]
-    impl ProviderRegistry for BailingRegistry {
-        fn get_chat_provider(&self, _c: Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> { anyhow::bail!("test stub") }
-        fn get_chat_provider_with_hint(&self, _c: Capability, _h: Option<&str>) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> { anyhow::bail!("test stub") }
-        fn get_chat_fallback_chain(&self, _c: Capability) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>> { anyhow::bail!("test stub") }
-        fn get_embedding_provider(&self) -> anyhow::Result<(Arc<dyn EmbeddingProvider>, String)> { anyhow::bail!("test stub") }
-        fn get_image_provider(&self) -> anyhow::Result<(Arc<dyn ImageGenerationProvider>, String)> { anyhow::bail!("test stub") }
-        fn get_tts_provider(&self) -> anyhow::Result<(Arc<dyn TtsProvider>, String)> { anyhow::bail!("test stub") }
-        fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn VideoGenerationProvider>, String)> { anyhow::bail!("test stub") }
-        fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn SearchProvider>, String)> { anyhow::bail!("test stub") }
-        fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<SearchFallbackEntry>> { anyhow::bail!("test stub") }
-        fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)> { anyhow::bail!("test stub") }
-        fn get_chat_model_config(&self, _m: &str) -> anyhow::Result<&ChatModelConfig> { anyhow::bail!("test stub") }
-        fn get_chat_provider_by_model(&self, _m: &str) -> Option<(Arc<dyn ChatProvider>, String)> { None }
-        fn get_chat_provider_id_by_model(&self, _m: &str) -> Option<String> { None }
-        fn get_chat_media_policy(&self, _m: &str) -> Option<crate::providers::MediaPolicy> { None }
-        fn get_chat_routing_models(&self) -> Vec<String> { Vec::new() }
-        fn get_all_provider_summaries(&self) -> Vec<ProviderSummary> { Vec::new() }
-    }
-
-    /// An `AgentRuntime` whose provider registry always bails — the turn
-    /// under test must fail with "test stub" before touching any real LLM.
-    fn bailing_runtime() -> AgentRuntime {
-        let providers: Arc<dyn ProviderRegistry> = Arc::new(BailingRegistry);
-        let tools = Arc::new(crate::agents::ToolRegistry::new());
-        let skills = Arc::new(RwLock::new(crate::agents::SkillManager::new()));
-        let agents = Arc::new(AgentRegistry::default());
-        let resources = ResourceProvider::new(
-            Arc::clone(&skills),
-            Arc::clone(&agents),
-            Vec::new(),
-            std::path::PathBuf::new(),
-            std::path::PathBuf::new(),
-            String::new(),
-            0,
-        );
-        let context_engine = Arc::new(ContextEngine::new(
-            &crate::config::agent::ContextConfig::default(),
-            Arc::clone(&providers),
-            resources,
-            Arc::clone(&tools),
-        ));
-        let tool_executor = Arc::new(ToolExecutor::new(30));
-        let loop_breaker = Arc::new(LoopBreaker::new(LoopBreakerConfig::default()));
-        AgentRuntime::new(
-            providers,
-            tools,
-            skills,
-            agents,
-            context_engine,
-            tool_executor,
-            loop_breaker,
-        )
-    }
 
     /// Regression guard for the v4 recovery refactor: `Agent::run` must
     /// pre-check `run_recovery`, and `run_recovery`'s Cases B/C must fall
@@ -912,175 +768,6 @@ mod tests {
     }
 
     #[test]
-    fn async_delegation_mode_detection() {
-        // The boundary logic in Agent::run detects a successful async
-        // agent_delegate by parsing the call arguments. This test
-        // verifies the JSON parsing logic in isolation (the inline
-        // detection mirrors this exactly).
-        fn is_async_delegate(name: &str, is_error: bool, arguments: &str) -> bool {
-            if name != "agent_delegate" || is_error {
-                return false;
-            }
-            serde_json::from_str::<serde_json::Value>(arguments)
-                .ok()
-                .and_then(|v| {
-                    v.get("mode").and_then(|m| m.as_str()).map(str::to_owned)
-                })
-                .map(|m| m == "async")
-                .unwrap_or(false)
-        }
-
-        // async mode → detected
-        assert!(is_async_delegate(
-            "agent_delegate",
-            false,
-            r#"{"agent":"coder","task":"x","mode":"async"}"#
-        ));
-        // sync mode (explicit) → not detected
-        assert!(!is_async_delegate(
-            "agent_delegate",
-            false,
-            r#"{"agent":"coder","task":"x","mode":"sync"}"#
-        ));
-        // mode omitted → not detected (tool rejects missing mode since
-        // 2026-08-14 — it became required; the parser treats it as non-async)
-        assert!(!is_async_delegate(
-            "agent_delegate",
-            false,
-            r#"{"agent":"coder","task":"x"}"#
-        ));
-        // error result → not detected even with async mode
-        assert!(!is_async_delegate(
-            "agent_delegate",
-            true,
-            r#"{"agent":"coder","task":"x","mode":"async"}"#
-        ));
-        // different tool → not detected
-        assert!(!is_async_delegate(
-            "file_read",
-            false,
-            r#"{"path":"x"}"#
-        ));
-    }
-
-    /// issue #140: mirrors the inline `shell_pending_spawned` check exactly
-    /// — a shell call is armed for a future completion notice iff it's
-    /// `shell` (not `shell_poll`/`shell_kill`), didn't error, and its output
-    /// starts with `state=running` (the header only `background: true`'s
-    /// immediate return and the timeout-conversion return use).
-    #[test]
-    fn shell_pending_spawned_detection_logic() {
-        fn is_shell_armed(name: &str, is_error: bool, output: &str) -> bool {
-            name == "shell" && !is_error && output.starts_with("state=running")
-        }
-
-        // background: true's immediate return → armed
-        assert!(is_shell_armed(
-            "shell",
-            false,
-            "state=running\nprocess_id=sh_x\ncommand=echo hi\n..."
-        ));
-        // timeout-conversion return → armed
-        assert!(is_shell_armed(
-            "shell",
-            false,
-            "state=running\nprocess_id=sh_x\ncommand=echo hi\ntimeout_secs=0\nnote=..."
-        ));
-        // fast completion within timeout_secs → NOT armed (already delivered
-        // its terminal result synchronously)
-        assert!(!is_shell_armed(
-            "shell",
-            false,
-            "state=exited\nexit_code=0\nprocess_id=sh_x\n..."
-        ));
-        // error result → not armed even if the output happens to start with
-        // the marker
-        assert!(!is_shell_armed("shell", true, "state=running\n..."));
-        // different tool → not armed regardless of output shape
-        assert!(!is_shell_armed("shell_poll", false, "state=running\n..."));
-        assert!(!is_shell_armed("shell_kill", false, "state=running\n..."));
-    }
-
-    #[test]
-    fn sessions_yield_detection_logic() {
-        // The yield detection in Agent::run (RFC delegation-notice-queue §3.2)
-        // triggers a deterministic EndTurn when the model calls sessions_yield
-        // without error. has_pending follows async_delegation_spawned. This
-        // test verifies the condition logic in isolation (mirrors the inline
-        // check exactly).
-        fn is_yield(name: &str, is_error: bool) -> bool {
-            name == "sessions_yield" && !is_error
-        }
-
-        // Normal call → yields EndTurn
-        assert!(is_yield("sessions_yield", false));
-
-        // Error result → NOT detected (tool errored, don't truncate)
-        assert!(!is_yield("sessions_yield", true));
-
-        // Different tool → not detected
-        assert!(!is_yield("calculator", false));
-        assert!(!is_yield("agent_delegate", false));
-
-        // When yield triggers without prior async delegation, has_pending is
-        // false — plain EndTurn, no suspension. When agent_delegate(async)
-        // ran earlier in the same batch, async_delegation_spawned is true, so
-        // has_pending is true (suspension proceeds normally).
-        let mut async_delegation_spawned = false;
-        assert_eq!(async_delegation_spawned, false); // pre-condition
-
-        // Simulate agent_delegate(async) running before sessions_yield
-        async_delegation_spawned = true;
-        // yield with prior delegation → has_pending = true
-        assert_eq!(async_delegation_spawned, true);
-    }
-
-    #[test]
-    fn fold_send_message_inlines_results_when_tool_absent() {
-        let mut asst = ChatMessage::assistant_text("发送一下");
-        asst.tool_calls = Some(vec![ToolCall {
-            id: "s1".into(),
-            name: "send_message".into(),
-            arguments: "{}".into(),
-        }]);
-        let mut tool_res = ChatMessage::text("tool", "已发送消息。");
-        tool_res.tool_call_id = Some("s1".into());
-        let mut messages = vec![ChatMessage::user_text("发给我"), asst, tool_res];
-
-        fold_absent_tool(&mut messages, &[], "send_message", "消息发送结果");
-
-        assert!(!messages.iter().any(|m| m.role == "tool"));
-        assert!(messages.iter().all(|m| {
-            m.tool_calls
-                .as_ref()
-                .map(|tcs| tcs.iter().all(|tc| tc.name != "send_message"))
-                .unwrap_or(true)
-        }));
-        assert!(messages.iter().flat_map(|m| &m.parts).any(|p| match p {
-            ContentPart::Text { text } => text.contains("已发送消息"),
-            _ => false,
-        }));
-    }
-
-    #[test]
-    fn fold_send_media_legacy_calls_when_tool_absent() {
-        let mut asst = ChatMessage::assistant_text("发媒体");
-        asst.tool_calls = Some(vec![ToolCall {
-            id: "m1".into(),
-            name: "send_media".into(),
-            arguments: "{}".into(),
-        }]);
-        let mut tool_res = ChatMessage::text("tool", "已发送媒体。");
-        tool_res.tool_call_id = Some("m1".into());
-        let mut messages = vec![asst, tool_res];
-
-        fold_absent_tool(&mut messages, &[], "send_media", "媒体发送结果");
-
-        assert!(!messages.iter().any(|m| m.role == "tool"));
-        assert!(messages[0].tool_calls.is_none());
-    }
-
-    #[test]
     fn agent_holds_config() {
         let cfg = empty_config();
         let agent = Agent::new(cfg);
@@ -1097,109 +784,4 @@ mod tests {
         assert!(session.resolve_channel().is_none());
     }
 
-
-    // ── Exec marker tests ─────────────────────────────────────────────────
-
-    #[test]
-    fn exec_marker_write_read_clear_roundtrip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let sessions_dir = tmp.path();
-        let session_id = "test_session_abc";
-
-        // Initially no marker.
-        assert!(exec_marker_read(Some(sessions_dir), session_id).is_none());
-
-        // Write a marker.
-        std::fs::create_dir_all(sessions_dir.join(crate::ids::bare_dir_name(session_id))).unwrap();
-        exec_marker_write(Some(sessions_dir), session_id, "call_xyz");
-
-        // Read it back.
-        assert_eq!(
-            exec_marker_read(Some(sessions_dir), session_id).as_deref(),
-            Some("call_xyz")
-        );
-
-        // Clear it.
-        exec_marker_clear(Some(sessions_dir), session_id);
-        assert!(exec_marker_read(Some(sessions_dir), session_id).is_none());
-    }
-
-    #[test]
-    fn exec_marker_none_sessions_dir_is_noop() {
-        // When sessions_dir is None (tests / CLI), all operations silently
-        // do nothing — no panic, no file system access.
-        exec_marker_write(None, "any_session", "any_call");
-        assert!(exec_marker_read(None, "any_session").is_none());
-        exec_marker_clear(None, "any_session");
-    }
-
-    #[test]
-    fn exec_marker_guard_clears_on_drop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let sessions_dir = tmp.path();
-        let session_id = "test_guard_session";
-
-        std::fs::create_dir_all(sessions_dir.join(crate::ids::bare_dir_name(session_id))).unwrap();
-        exec_marker_write(Some(sessions_dir), session_id, "call_guard");
-
-        {
-            let _guard = ExecMarkerGuard {
-                sessions_dir: Some(sessions_dir.to_path_buf()),
-                session_id: session_id.to_string(),
-            };
-            // Marker still present inside the scope.
-            assert!(exec_marker_read(Some(sessions_dir), session_id).is_some());
-        }
-        // Guard dropped — marker cleared.
-        assert!(exec_marker_read(Some(sessions_dir), session_id).is_none());
-    }
-
-    /// issue #106: the reported "interrupted by a daemon restart" wording
-    /// only appears in `run_recovery`'s Case A when `exec_marker_read`
-    /// returns a value matching the pending tool_call's id — the
-    /// hypothesis was that a delegation-timeout cancellation (via
-    /// `tokio::time::timeout` dropping the sub-agent's turn future
-    /// mid-tool-execution) might leave a stale marker behind, same as an
-    /// actual daemon crash, and wrongly trigger that wording.
-    ///
-    /// This test exercises the ACTUAL cancellation mechanism a delegation
-    /// timeout uses (not just ordinary scope exit, which
-    /// `exec_marker_guard_clears_on_drop` already covers) — the guard is
-    /// held across an await inside a future that `tokio::time::timeout`
-    /// cuts off. If Drop still runs correctly under real async
-    /// cancellation, the marker must be gone afterward — ruling out this
-    /// code path as the source of the mislabeling.
-    #[tokio::test]
-    async fn exec_marker_guard_clears_on_timeout_cancellation() {
-        let tmp = tempfile::tempdir().unwrap();
-        let sessions_dir = tmp.path().to_path_buf();
-        let session_id = "test_timeout_cancel_session".to_string();
-
-        std::fs::create_dir_all(sessions_dir.join(crate::ids::bare_dir_name(&session_id)))
-            .unwrap();
-        exec_marker_write(Some(&sessions_dir), &session_id, "call_timeout");
-        assert!(exec_marker_read(Some(&sessions_dir), &session_id).is_some());
-
-        let sd = sessions_dir.clone();
-        let sid = session_id.clone();
-        let result = tokio::time::timeout(std::time::Duration::from_millis(20), async move {
-            let _guard = ExecMarkerGuard {
-                sessions_dir: Some(sd),
-                session_id: sid,
-            };
-            // A tool call that outlives the timeout, same shape as a
-            // sub-agent's turn future being cut off by DelegationTimeout.
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        })
-        .await;
-
-        assert!(result.is_err(), "expected the timeout to fire first");
-        assert!(
-            exec_marker_read(Some(&sessions_dir), &session_id).is_none(),
-            "exec marker must be cleared even when the guard's scope is exited via \
-             tokio::time::timeout cancellation, not just ordinary drop — if this holds, \
-             a delegation timeout can never leave a stale marker behind, so run_recovery's \
-             \"daemon restart\" wording is unreachable via this path for a timed-out delegation"
-        );
-    }
 }

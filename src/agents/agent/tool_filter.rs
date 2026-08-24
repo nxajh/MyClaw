@@ -274,6 +274,8 @@ mod tests {
 
 
     use crate::providers::{Tool, ToolResult};
+    use crate::providers::capability_chat::ToolCall;
+    use crate::providers::ContentPart;
 
     struct NamedTool(&'static str);
 
@@ -307,4 +309,111 @@ mod tests {
     fn tool_names(tools: &[Arc<dyn Tool>]) -> Vec<String> {
         tools.iter().map(|tool| tool.name().to_string()).collect()
     }
+
+#[test]
+fn fold_view_image_inlines_results_when_tool_absent() {
+    let mut asst = ChatMessage::assistant_text("让我看看");
+    asst.tool_calls = Some(vec![ToolCall {
+        id: "c1".into(),
+        name: "view_image".into(),
+        arguments: "{}".into(),
+    }]);
+    let mut tool_res = ChatMessage::text("tool", "一只红色的猫");
+    tool_res.tool_call_id = Some("c1".into());
+    let mut messages = vec![ChatMessage::user_text("这是什么"), asst, tool_res];
+
+    // No view_image in tool_specs → fold.
+    fold_absent_tool(&mut messages, &[], "view_image", "图片查看结果");
+
+    assert!(
+        !messages.iter().any(|m| m.role == "tool"),
+        "tool-result message must be dropped"
+    );
+    assert!(
+        messages.iter().all(|m| m
+            .tool_calls
+            .as_ref()
+            .map(|tcs| tcs.iter().all(|tc| tc.name != "view_image"))
+            .unwrap_or(true)),
+        "no view_image tool call may survive"
+    );
+    let folded = messages
+        .iter()
+        .flat_map(|m| &m.parts)
+        .filter_map(|p| match p {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .any(|t| t.contains("一只红色的猫"));
+    assert!(
+        folded,
+        "result text must be inlined onto the assistant message"
+    );
+}
+#[test]
+fn fold_view_image_is_noop_when_tool_present() {
+    let mut asst = ChatMessage::assistant_text("");
+    asst.tool_calls = Some(vec![ToolCall {
+        id: "c1".into(),
+        name: "view_image".into(),
+        arguments: "{}".into(),
+    }]);
+    let mut messages = vec![asst];
+    let specs = vec![ToolSpec {
+        name: "view_image".into(),
+        description: None,
+        input_schema: serde_json::json!({}),
+    }];
+    fold_absent_tool(&mut messages, &specs, "view_image", "图片查看结果");
+    // Tool declared → calls preserved untouched.
+    assert!(
+        messages[0]
+            .tool_calls
+            .as_ref()
+            .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == "view_image"))
+    );
+}
+#[test]
+fn fold_send_message_inlines_results_when_tool_absent() {
+    let mut asst = ChatMessage::assistant_text("发送一下");
+    asst.tool_calls = Some(vec![ToolCall {
+        id: "s1".into(),
+        name: "send_message".into(),
+        arguments: "{}".into(),
+    }]);
+    let mut tool_res = ChatMessage::text("tool", "已发送消息。");
+    tool_res.tool_call_id = Some("s1".into());
+    let mut messages = vec![ChatMessage::user_text("发给我"), asst, tool_res];
+
+    fold_absent_tool(&mut messages, &[], "send_message", "消息发送结果");
+
+    assert!(!messages.iter().any(|m| m.role == "tool"));
+    assert!(messages.iter().all(|m| {
+        m.tool_calls
+            .as_ref()
+            .map(|tcs| tcs.iter().all(|tc| tc.name != "send_message"))
+            .unwrap_or(true)
+    }));
+    assert!(messages.iter().flat_map(|m| &m.parts).any(|p| match p {
+        ContentPart::Text { text } => text.contains("已发送消息"),
+        _ => false,
+    }));
+}
+#[test]
+fn fold_send_media_legacy_calls_when_tool_absent() {
+    let mut asst = ChatMessage::assistant_text("发媒体");
+    asst.tool_calls = Some(vec![ToolCall {
+        id: "m1".into(),
+        name: "send_media".into(),
+        arguments: "{}".into(),
+    }]);
+    let mut tool_res = ChatMessage::text("tool", "已发送媒体。");
+    tool_res.tool_call_id = Some("m1".into());
+    let mut messages = vec![asst, tool_res];
+
+    fold_absent_tool(&mut messages, &[], "send_media", "媒体发送结果");
+
+    assert!(!messages.iter().any(|m| m.role == "tool"));
+    assert!(messages[0].tool_calls.is_none());
+}
 }

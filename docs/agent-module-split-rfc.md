@@ -1,6 +1,6 @@
 # RFC: agent.rs 模块拆分 — 2529 行巨文件的目录化
 
-- **状态**: 实施中（批 4/5，2026-08-24）
+- **状态**: 实施完成（待 PR review，2026-08-24）
 - **日期**: 2026-08-24
 - **来源**: 无提示 RED 基线（子代理裸做拆分方案）+ 三处流程修正
 - **关联**: issue #140（has_pending 语义，已合并）、在途 issue #141/#144（冲突窗口见 §4.3）
@@ -128,13 +128,13 @@ coder-subagent-worktree-crash-recovery 抢救。
 
 ## 5. 验收标准
 
-- [ ] CI 编译零新增警告、全量测试通过
-- [ ] `run_inner` 本体 ≤ 250 行；单文件 ≤ 500 行（tests.rs 除外）
-- [ ] §4.6 三闸全过（逐文件符号表 + A/B 实测数进 PR 描述）
-- [ ] git diff 路径仅 `src/agents/agent*` + `src/agents/context_engine.rs`
-- [ ] 公共 API 不变：`agents::Agent` re-export、`run`/`run_recovery` 签名
-- [ ] PR 管线部署后 smoke：daemon 启动 + 基本 turn 正常
-- [ ] mod.rs 处保留一行模块地图注释（11 文件职责一行一个）
+- [ ] CI 编译零新增警告、全量测试通过（本批 CI 绿后在 PR 勾选）
+- [x] `run_inner` 本体 ≤ 250 行；单文件 ≤ 500 行（tests.rs 除外）
+- [x] §4.6 三闸全过（逐文件符号表 + A/B 实测数进 PR 描述）
+- [x] git diff 路径仅 `src/agents/agent*` + `src/agents/context_engine.rs`
+- [x] 公共 API 不变：`agents::Agent` re-export、`run`/`run_recovery` 签名
+- [ ] PR 管线部署后 smoke：daemon 启动 + 基本 turn 正常（合并部署阶段勾选）
+- [x] mod.rs 处保留一行模块地图注释（11 文件职责一行一个）
 
 ## 6. 风险
 

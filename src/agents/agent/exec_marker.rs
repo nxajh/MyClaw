@@ -108,3 +108,110 @@ pub(super) fn llm_usage(
         stop_reason: Some(format!("{:?}", response.stop_reason)),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        exec_marker_clear, exec_marker_read, exec_marker_write, ExecMarkerGuard,
+    };
+
+#[test]
+fn exec_marker_write_read_clear_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sessions_dir = tmp.path();
+    let session_id = "test_session_abc";
+
+    // Initially no marker.
+    assert!(exec_marker_read(Some(sessions_dir), session_id).is_none());
+
+    // Write a marker.
+    std::fs::create_dir_all(sessions_dir.join(crate::ids::bare_dir_name(session_id))).unwrap();
+    exec_marker_write(Some(sessions_dir), session_id, "call_xyz");
+
+    // Read it back.
+    assert_eq!(
+        exec_marker_read(Some(sessions_dir), session_id).as_deref(),
+        Some("call_xyz")
+    );
+
+    // Clear it.
+    exec_marker_clear(Some(sessions_dir), session_id);
+    assert!(exec_marker_read(Some(sessions_dir), session_id).is_none());
+}
+#[test]
+fn exec_marker_none_sessions_dir_is_noop() {
+    // When sessions_dir is None (tests / CLI), all operations silently
+    // do nothing — no panic, no file system access.
+    exec_marker_write(None, "any_session", "any_call");
+    assert!(exec_marker_read(None, "any_session").is_none());
+    exec_marker_clear(None, "any_session");
+}
+#[test]
+fn exec_marker_guard_clears_on_drop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sessions_dir = tmp.path();
+    let session_id = "test_guard_session";
+
+    std::fs::create_dir_all(sessions_dir.join(crate::ids::bare_dir_name(session_id))).unwrap();
+    exec_marker_write(Some(sessions_dir), session_id, "call_guard");
+
+    {
+        let _guard = ExecMarkerGuard {
+            sessions_dir: Some(sessions_dir.to_path_buf()),
+            session_id: session_id.to_string(),
+        };
+        // Marker still present inside the scope.
+        assert!(exec_marker_read(Some(sessions_dir), session_id).is_some());
+    }
+    // Guard dropped — marker cleared.
+    assert!(exec_marker_read(Some(sessions_dir), session_id).is_none());
+}
+/// issue #106: the reported "interrupted by a daemon restart" wording
+/// only appears in `run_recovery`'s Case A when `exec_marker_read`
+/// returns a value matching the pending tool_call's id — the
+/// hypothesis was that a delegation-timeout cancellation (via
+/// `tokio::time::timeout` dropping the sub-agent's turn future
+/// mid-tool-execution) might leave a stale marker behind, same as an
+/// actual daemon crash, and wrongly trigger that wording.
+///
+/// This test exercises the ACTUAL cancellation mechanism a delegation
+/// timeout uses (not just ordinary scope exit, which
+/// `exec_marker_guard_clears_on_drop` already covers) — the guard is
+/// held across an await inside a future that `tokio::time::timeout`
+/// cuts off. If Drop still runs correctly under real async
+/// cancellation, the marker must be gone afterward — ruling out this
+/// code path as the source of the mislabeling.
+#[tokio::test]
+async fn exec_marker_guard_clears_on_timeout_cancellation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sessions_dir = tmp.path().to_path_buf();
+    let session_id = "test_timeout_cancel_session".to_string();
+
+    std::fs::create_dir_all(sessions_dir.join(crate::ids::bare_dir_name(&session_id)))
+        .unwrap();
+    exec_marker_write(Some(&sessions_dir), &session_id, "call_timeout");
+    assert!(exec_marker_read(Some(&sessions_dir), &session_id).is_some());
+
+    let sd = sessions_dir.clone();
+    let sid = session_id.clone();
+    let result = tokio::time::timeout(std::time::Duration::from_millis(20), async move {
+        let _guard = ExecMarkerGuard {
+            sessions_dir: Some(sd),
+            session_id: sid,
+        };
+        // A tool call that outlives the timeout, same shape as a
+        // sub-agent's turn future being cut off by DelegationTimeout.
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    })
+    .await;
+
+    assert!(result.is_err(), "expected the timeout to fire first");
+    assert!(
+        exec_marker_read(Some(&sessions_dir), &session_id).is_none(),
+        "exec marker must be cleared even when the guard's scope is exited via \
+         tokio::time::timeout cancellation, not just ordinary drop — if this holds, \
+         a delegation timeout can never leave a stale marker behind, so run_recovery's \
+         \"daemon restart\" wording is unreachable via this path for a timed-out delegation"
+    );
+}
+}
