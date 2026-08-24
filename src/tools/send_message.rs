@@ -465,13 +465,13 @@ impl Tool for SendMessageTool {
         if !is_sub_agent {
             if let Some(r) = args.recipient.as_deref() {
                 if is_cross_user_target(r) {
-                    return self.execute_cross_user(&args, &text, r, session).await;
+                    return self.execute_cross_user(&args, &text, r, ctx).await;
                 }
             }
         }
         if is_sub_agent || args.recipient.is_some() {
             return self
-                .execute_agent_message(&args, &text, is_sub_agent, session)
+                .execute_agent_message(&args, &text, is_sub_agent, ctx)
                 .await;
         }
 

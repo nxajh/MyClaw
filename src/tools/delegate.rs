@@ -146,7 +146,7 @@ impl Tool for AgentDelegateTool {
         tracing::info!(agent = %agent_name, task_len = task.len(), mode = %mode, timeout = ?timeout, "delegating task to sub-agent");
 
         if mode == "async" {
-            match self.delegator.delegate_async(agent_name, task, session, timeout, allowed_tools.clone(), workspace) {
+            match self.delegator.delegate_async(agent_name, task, ctx, timeout, allowed_tools.clone(), workspace) {
                 Ok(sub_session_id) => Ok(ToolResult {
                     success: true,
                     output: json!({
@@ -167,7 +167,7 @@ impl Tool for AgentDelegateTool {
         } else {
             match self
                 .delegator
-                .delegate(agent_name, task, session, timeout, allowed_tools, workspace)
+                .delegate(agent_name, task, ctx, timeout, allowed_tools, workspace)
                 .await
             {
                 Ok(result) => Ok(ToolResult {

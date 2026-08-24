@@ -54,7 +54,7 @@ impl Tool for McpToolWrapper {
         self.input_schema.clone()
     }
 
-    fn source(&self) -> crate::providers::ToolSource {
+    fn source(&self) -> crate::api::tool::ToolSource {
         // prefixed_name is "<server>__<tool>" — strip suffix to recover the
         // server name for the McpFilter check.
         let server = self
@@ -62,13 +62,13 @@ impl Tool for McpToolWrapper {
             .split_once("__")
             .map(|(s, _)| s.to_string())
             .unwrap_or_else(|| self.prefixed_name.clone());
-        crate::providers::ToolSource::Mcp { server }
+        crate::api::tool::ToolSource::Mcp { server }
     }
 
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         // Strip the `approved` field before forwarding to the MCP server.
         // ZeroClaw's security model injects `approved: bool` into built-in tool
@@ -247,7 +247,17 @@ mod tests {
             let result = wrapper
                 .execute(
                     non_obj.clone(),
-                    &crate::agents::session::Session::new("test".to_string()),
+                    &crate::api::tool::ToolContext {
+                        owner: "test".to_string(),
+                        session_id: "test".to_string(),
+                        reply_target: None,
+                        last_message: None,
+                        parent_session_id: None,
+                        agent_name: "test".to_string(),
+                        turn_silenced: false,
+                        turn_headless: false,
+                        channel: None,
+                    },
                 )
                 .await
                 .expect("non-object args must not propagate Err");
