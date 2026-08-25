@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 
 use crate::agents::delegation::{AgentMail, AgentMessage};
-use crate::agents::session::Session;
+
 
 /// Invokes sub-agents on demand.
 #[async_trait]
@@ -25,7 +25,7 @@ pub trait AgentDelegator: Send + Sync {
         &self,
         agent_name: &str,
         task: &str,
-        parent_session: &Session,
+        parent_ctx: &crate::api::tool::ToolContext,
         timeout: Option<u64>,
         allowed_tools: Option<Vec<String>>,
         workspace: Option<&str>,
@@ -40,7 +40,7 @@ pub trait AgentDelegator: Send + Sync {
         &self,
         _agent_name: &str,
         _task: &str,
-        _parent_session: &Session,
+        _parent_ctx: &crate::api::tool::ToolContext,
         _timeout: Option<u64>,
         _allowed_tools: Option<Vec<String>>,
         _workspace: Option<&str>,

@@ -50,7 +50,7 @@ impl Tool for CalculatorTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let expr = args["expression"]
             .as_str()

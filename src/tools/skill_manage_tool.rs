@@ -101,7 +101,7 @@ impl Tool for SkillManageTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let action = args["action"]
             .as_str()
@@ -596,7 +596,7 @@ mod tests {
         let result = tool.execute(json!({
             "action": "create", "name": "mys",
             "content": "---\nname: mys\ndescription: \"My skill\"\n---\n# My Skill\n\nDo stuff."
-        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        }), &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None }).await.unwrap();
         assert!(result.success, "{}", result.output);
         assert!(mgr.read().get("mys").is_some());
     }
@@ -615,7 +615,7 @@ mod tests {
                     "action": "create", "name": "self",
                     "content": "---\nname: self\ndescription: \"x\"\n---\n# x\n\nBody."
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -630,7 +630,7 @@ mod tests {
         let result = tool.execute(json!({
             "action": "create", "name": "existing",
             "content": "---\nname: existing\ndescription: \"Exists\"\n---\n# Exists\n\nAlready here."
-        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        }), &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None }).await.unwrap();
         assert!(!result.success);
         assert!(result.output.contains("already exists"));
     }
@@ -649,7 +649,7 @@ mod tests {
                     "action": "create", "name": "myskill",
                     "content": "---\nname: other\ndescription: \"Test\"\n---\n# Body\n\nContent."
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -668,7 +668,7 @@ mod tests {
                     "action": "patch", "name": "myskill",
                     "old_string": "Do stuff.", "new_string": "Do something better."
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -688,7 +688,7 @@ mod tests {
                     "action": "patch", "name": "myskill",
                     "old_string": "this does not exist", "new_string": "x"
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -704,7 +704,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({"action": "delete", "name": "myskill"}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -740,7 +740,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({"action": "delete", "name": "sharedskill"}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -770,7 +770,7 @@ mod tests {
                     "action": "patch", "name": "sharedskill",
                     "old_string": "Do stuff.", "new_string": "Do something else."
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -800,7 +800,7 @@ mod tests {
                     "action": "write_file", "name": "sharedskill",
                     "file_path": "references/notes.md", "file_content": "hi"
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -823,7 +823,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({"action": "delete", "name": "self"}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -842,7 +842,7 @@ mod tests {
                     "action": "write_file", "name": "myskill",
                     "file_path": "references/api.md", "file_content": "# API"
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -854,7 +854,7 @@ mod tests {
                 json!({
                     "action": "remove_file", "name": "myskill", "file_path": "references/api.md"
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -873,7 +873,7 @@ mod tests {
                     "action": "write_file", "name": "myskill",
                     "file_path": "references/../../evil.sh", "file_content": "evil"
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();

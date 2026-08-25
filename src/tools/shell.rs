@@ -899,7 +899,7 @@ impl Tool for ShellTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let command = args["command"]
             .as_str()
@@ -909,7 +909,7 @@ impl Tool for ShellTool {
         let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(120).min(300);
 
         let process_id = match self
-            .spawn_tracked(command, workdir, &session.id, background)
+            .spawn_tracked(command, workdir, &ctx.session_id, background)
             .await
         {
             Ok(id) => id,
@@ -972,7 +972,7 @@ impl Tool for ShellTool {
             }
             // issue #140: successfully armed (still running) — register now,
             // same moment as the `background: true` spawn-time case above.
-            self.register_pending(&session.id, &process_id);
+            self.register_pending(&ctx.session_id, &process_id);
             let output = format!(
                 "state=running\nprocess_id={}\ncommand={}\ntimeout_secs={}\nnote=command is still running, it was NOT killed; you'll be notified automatically when it finishes — call sessions_yield to suspend and wait for that, or shell_kill(process_id) to terminate it\n\noutput_so_far{}:\n{}",
                 process_id,
@@ -1090,7 +1090,7 @@ impl Tool for ShellPollTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let process_id = args["process_id"]
             .as_str()
@@ -1106,7 +1106,7 @@ impl Tool for ShellPollTool {
                 // structure to sanity-check) — list this session's live
                 // process-table entries so the model can self-correct in
                 // one turn instead of guessing again.
-                let listing = format_unknown_process_listing(&*self.registry.read().await, &session.id);
+                let listing = format_unknown_process_listing(&*self.registry.read().await, &ctx.session_id);
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -1223,7 +1223,7 @@ impl Tool for ShellKillTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let process_id = args["process_id"]
             .as_str()
@@ -1241,7 +1241,7 @@ impl Tool for ShellKillTool {
                 // issue #129: same self-correction aid as shell_poll — a
                 // wrong process_id here is the same transcription-error
                 // shape, just aimed at killing instead of checking.
-                let listing = format_unknown_process_listing(&*self.registry.read().await, &session.id);
+                let listing = format_unknown_process_listing(&*self.registry.read().await, &ctx.session_id);
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -1442,7 +1442,7 @@ mod tests {
     #[tokio::test]
     async fn multiline_heredoc_runs_unmodified() {
         let tool = ShellTool::new(None);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(
                 json!({
@@ -1461,7 +1461,7 @@ mod tests {
     #[tokio::test]
     async fn multiline_if_block_runs_unmodified() {
         let tool = ShellTool::new(None);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(
                 json!({
@@ -1515,7 +1515,7 @@ mod tests {
     #[tokio::test]
     async fn nonzero_exit_code_is_tool_success_end_to_end() {
         let tool = ShellTool::new(None);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(json!({ "command": "exit 8", "timeout_secs": 5 }), &session)
             .await
@@ -1529,7 +1529,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_does_not_kill_process() {
         let tool = ShellTool::new(None);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(
                 json!({ "command": "sleep 1 && echo done", "timeout_secs": 0 }),
@@ -1569,7 +1569,7 @@ mod tests {
     async fn timeout_path_now_sends_completion_notice() {
         let (tx, mut rx) = mpsc::channel::<ShellCompletion>(8);
         let tool = ShellTool::new_with_notice_sender(None, tx);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(
                 json!({ "command": "sleep 1 && echo done", "timeout_secs": 0 }),
@@ -1595,7 +1595,7 @@ mod tests {
     async fn fast_foreground_completion_sends_no_duplicate_notice() {
         let (tx, mut rx) = mpsc::channel::<ShellCompletion>(8);
         let tool = ShellTool::new_with_notice_sender(None, tx);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(
                 json!({ "command": "echo done", "timeout_secs": 5 }),
@@ -1659,7 +1659,7 @@ mod tests {
     async fn background_completion_sends_notice_with_exit_code_and_output() {
         let (tx, mut rx) = mpsc::channel::<ShellCompletion>(8);
         let tool = ShellTool::new_with_notice_sender(None, tx);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(
                 json!({ "command": "echo hello-from-bg", "background": true }),
@@ -1699,7 +1699,7 @@ mod tests {
 
         let tool = ShellTool::new(None);
         tool.set_session_manager(Arc::clone(&sm));
-        let session = crate::agents::session::Session::new(sid.clone());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: sid.clone(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(json!({ "command": "sleep 30", "background": true }), &session)
             .await
@@ -1734,7 +1734,7 @@ mod tests {
 
         let tool = ShellTool::new(None);
         tool.set_session_manager(Arc::clone(&sm));
-        let session = crate::agents::session::Session::new(sid.clone());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: sid.clone(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(
                 json!({ "command": "sleep 1 && echo done", "timeout_secs": 0 }),
@@ -1761,7 +1761,7 @@ mod tests {
     #[tokio::test]
     async fn background_spawn_without_session_manager_does_not_panic() {
         let tool = ShellTool::new(None);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(json!({ "command": "echo hi", "background": true }), &session)
             .await
@@ -1778,7 +1778,7 @@ mod tests {
     async fn multiple_background_completions_all_arrive() {
         let (tx, mut rx) = mpsc::channel::<ShellCompletion>(8);
         let tool = ShellTool::new_with_notice_sender(None, tx);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         for i in 0..3 {
             tool.execute(
                 json!({ "command": format!("echo run-{i}"), "background": true }),
@@ -1802,7 +1802,7 @@ mod tests {
     #[tokio::test]
     async fn shell_kill_terminates_running_process() {
         let tool = ShellTool::new(None);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = tool
             .execute(
                 json!({ "command": "sleep 30", "background": true }),
@@ -1842,8 +1842,8 @@ mod tests {
         // ends, and cancelling the delegation's future alone would not have
         // touched it (see kill_processes_for_session's doc comment).
         let tool = ShellTool::new(None);
-        let session_a = crate::agents::session::Session::new("session-a".to_string());
-        let session_b = crate::agents::session::Session::new("session-b".to_string());
+        let session_a = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "session-a".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
+        let session_b = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "session-b".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
 
         let result_a = tool
             .execute(json!({ "command": "sleep 30", "background": true }), &session_a)
@@ -1891,7 +1891,7 @@ mod tests {
     async fn shell_poll_reports_unknown_process_id() {
         let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
         let poll_tool = ShellPollTool::new(registry, None);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = poll_tool
             .execute(json!({ "process_id": "sh_nope" }), &session)
             .await
@@ -1939,7 +1939,7 @@ mod tests {
             );
         }
         let poll_tool = ShellPollTool::new(registry, None);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = poll_tool
             .execute(json!({ "process_id": "sh_typo" }), &session)
             .await
@@ -1959,7 +1959,7 @@ mod tests {
     async fn shell_poll_unknown_process_id_with_no_tracked_processes_says_so() {
         let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
         let poll_tool = ShellPollTool::new(registry, None);
-        let session = crate::agents::session::Session::new("empty-session".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "empty-session".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = poll_tool
             .execute(json!({ "process_id": "sh_nope" }), &session)
             .await
@@ -1980,7 +1980,7 @@ mod tests {
             }
         }
         let poll_tool = ShellPollTool::new(registry, None);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = poll_tool
             .execute(json!({ "process_id": "sh_typo" }), &session)
             .await
@@ -1999,7 +1999,7 @@ mod tests {
             entry_for("sh_alive", "s1", "sleep 100", 1000),
         );
         let kill_tool = ShellKillTool::new(registry);
-        let session = crate::agents::session::Session::new("s1".to_string());
+        let session = crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "s1".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None };
         let result = kill_tool
             .execute(json!({ "process_id": "sh_typo" }), &session)
             .await

@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::agents::session::Session;
+use crate::api::tool::ToolContext;
 use crate::providers::capability::Modality;
 use crate::providers::capability_chat::{
     ChatMessage, ChatProvider, ChatRequest, ChatResponse, ContentPart,
@@ -209,7 +209,7 @@ impl Tool for ViewImageTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &Session,
+        _ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let path = args["path"].as_str().unwrap_or("").trim();
         if path.is_empty() {
@@ -396,7 +396,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({"path": protected, "question": "what is this?"}),
-                &Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();

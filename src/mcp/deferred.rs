@@ -306,7 +306,7 @@ mod tests {
             async fn execute(
                 &self,
                 _: serde_json::Value,
-                _: &crate::agents::session::Session,
+                _: &crate::api::tool::ToolContext,
             ) -> anyhow::Result<ToolResult> {
                 Ok(ToolResult {
                     success: true,
@@ -344,7 +344,7 @@ mod tests {
             async fn execute(
                 &self,
                 _: serde_json::Value,
-                _: &crate::agents::session::Session,
+                _: &crate::api::tool::ToolContext,
             ) -> anyhow::Result<ToolResult> {
                 Ok(ToolResult {
                     success: true,
@@ -379,7 +379,7 @@ mod tests {
             async fn execute(
                 &self,
                 _: serde_json::Value,
-                _: &crate::agents::session::Session,
+                _: &crate::api::tool::ToolContext,
             ) -> anyhow::Result<ToolResult> {
                 Ok(ToolResult {
                     success: true,

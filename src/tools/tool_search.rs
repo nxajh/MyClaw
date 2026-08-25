@@ -55,7 +55,7 @@ impl Tool for ToolSearchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let query = args["query"]
             .as_str()
@@ -148,7 +148,7 @@ mod tests {
         async fn execute(
             &self,
             _args: serde_json::Value,
-            _session: &crate::agents::session::Session,
+            _ctx: &crate::api::tool::ToolContext,
         ) -> anyhow::Result<ToolResult> {
             unreachable!("not exercised by tool_search tests")
         }
@@ -186,7 +186,7 @@ mod tests {
             args["limit"] = json!(l);
         }
         let result = tool
-            .execute(args, &crate::agents::session::Session::new("test".into()))
+            .execute(args, &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None })
             .await
             .unwrap();
         assert!(result.success);

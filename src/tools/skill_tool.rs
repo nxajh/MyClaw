@@ -56,7 +56,7 @@ impl Tool for SkillTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let name = args["name"]
             .as_str()
@@ -345,7 +345,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({"name": "test"}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -361,7 +361,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({"name": "nonexistent"}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -379,7 +379,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({"name": "private"}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -397,7 +397,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({"name": "test", "file_path": "../../etc/passwd"}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();

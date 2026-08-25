@@ -42,7 +42,7 @@ impl Tool for SkillsListTool {
     async fn execute(
         &self,
         _args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let skills = self.skills.read();
 
@@ -166,7 +166,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -186,7 +186,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -210,7 +210,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();

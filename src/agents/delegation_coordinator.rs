@@ -1691,7 +1691,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         &self,
         agent_name: &str,
         task: &str,
-        parent_session: &super::session::Session,
+        parent_ctx: &crate::api::tool::ToolContext,
         timeout: Option<u64>,
         allowed_tools: Option<Vec<String>>,
         workspace: Option<&str>,
@@ -1704,11 +1704,11 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         // unified path as the async `spawn_delegate_async`).
         let (sub_ctx, _sub_session_id) = self
             .session_manager
-            .create_sub_session_context(&parent_session.id, agent_name)?;
+            .create_sub_session_context(&parent_ctx.session_id, agent_name)?;
         self.delegate_with_parent(
             agent_name,
             task,
-            &parent_session.id,
+            &parent_ctx.session_id,
             sub_ctx,
             timeout_secs,
             None,
@@ -1722,7 +1722,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         &self,
         agent_name: &str,
         task: &str,
-        parent_session: &super::session::Session,
+        parent_ctx: &crate::api::tool::ToolContext,
         timeout: Option<u64>,
         allowed_tools: Option<Vec<String>>,
         workspace: Option<&str>,
@@ -1733,7 +1733,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         self.spawn_delegate_async(
             agent_name,
             task,
-            &parent_session.id,
+            &parent_ctx.session_id,
             timeout_secs,
             allowed_tools,
             workspace,

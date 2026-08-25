@@ -27,6 +27,21 @@ const WATCHDOG_HEADROOM_SECS: u64 = 30;
 /// filtered through the agent's `tools` / `skills` / `mcp` filters.
 /// No `ToolRegistry` field; the executor is stateless w.r.t. which
 /// tools an agent may call.
+struct OutboundChannelWrapper(Arc<dyn crate::channels::Channel>);
+
+#[async_trait::async_trait]
+impl crate::api::message::OutboundChannel for OutboundChannelWrapper {
+    async fn send_outbound_message(
+        &self,
+        msg: &crate::api::message::ChannelOutboundMessage,
+    ) -> anyhow::Result<crate::api::message::OutboundSendResult> {
+        self.0.send_message(msg).await
+    }
+    fn supports_file_send(&self) -> bool {
+        self.0.capabilities().supports_file_send
+    }
+}
+
 pub struct ToolExecutor {
     pub timeout_secs: u64,
     /// Shared `AskRouter` for per-operation approval in Default mode.
@@ -316,13 +331,27 @@ impl ToolExecutor {
         args: serde_json::Value,
         session: &Session,
     ) -> anyhow::Result<ToolResult> {
+        // Build a ToolContext from the live Session — this is the bridge
+        // between the agents layer (Session) and the api layer (ToolContext).
+        let tool_ctx = crate::api::tool::ToolContext {
+            owner: session.owner.clone(),
+            session_id: session.id.clone(),
+            reply_target: session.reply_target().map(String::from),
+            last_message: session.last_message.clone(),
+            parent_session_id: session.parent_session_id.clone(),
+            agent_name: session.agent_name.clone(),
+            turn_silenced: session.turn_silenced,
+            turn_headless: session.turn_headless,
+            channel: session.resolve_channel().map(|c| Arc::new(OutboundChannelWrapper(c)) as Arc<dyn crate::api::message::OutboundChannel>),
+        };
+
         let raw = if self.timeout_secs > 0 && !tool.blocks_on_human() {
             let effective_secs = Self::effective_timeout_secs(
                 tool.preferred_timeout_secs(),
                 self.timeout_secs,
             );
             let timeout = Duration::from_secs(effective_secs);
-            tokio::time::timeout(timeout, tool.execute(args, session))
+            tokio::time::timeout(timeout, tool.execute(args, &tool_ctx))
                 .await
                 .unwrap_or_else(|_| {
                     Ok(ToolResult {
@@ -335,7 +364,7 @@ impl ToolExecutor {
             // No timeout: either disabled globally, or a human-blocking tool
             // (`ask_user`) whose wait is bounded by a real reply / interruption,
             // not an arbitrary timer.
-            tool.execute(args, session).await?
+            tool.execute(args, &tool_ctx).await?
         };
 
         let max_tokens = tool.max_output_tokens();
@@ -416,7 +445,18 @@ impl MemoryToolExecutor {
             .get(&call.name)
             .ok_or_else(|| anyhow::anyhow!("tool '{}' not found in registry", call.name))?;
         let args = parse_tool_args(&call.arguments);
-        tool.execute(args, session).await
+        let tool_ctx = crate::api::tool::ToolContext {
+            owner: session.owner.clone(),
+            session_id: session.id.clone(),
+            reply_target: session.reply_target().map(String::from),
+            last_message: session.last_message.clone(),
+            parent_session_id: session.parent_session_id.clone(),
+            agent_name: session.agent_name.clone(),
+            turn_silenced: session.turn_silenced,
+            turn_headless: session.turn_headless,
+            channel: session.resolve_channel().map(|c| Arc::new(OutboundChannelWrapper(c)) as Arc<dyn crate::api::message::OutboundChannel>),
+        };
+        tool.execute(args, &tool_ctx).await
     }
 }
 

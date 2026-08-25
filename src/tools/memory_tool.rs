@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::agents::session::Session;
+use crate::api::tool::ToolContext;
 use crate::agents::user_profile::UserResolver;
 use crate::memory::{LinkRef, MemoryFile, build_backlinks};
 use crate::providers::{Tool, ToolResult};
@@ -86,7 +86,7 @@ struct MemoryAudit<'a> {
     args: &'a serde_json::Value,
 }
 
-fn append_memory_audit(base_dir: &Path, session: &Session, audit: MemoryAudit<'_>) {
+fn append_memory_audit(base_dir: &Path, ctx: &ToolContext, audit: MemoryAudit<'_>) {
     // P1-B2: audit is runtime state, lives on the data side
     // ({base_dir}/state/memory/memory_audit.jsonl), not under the
     // memory root (which is the flat agent/user memory pool).
@@ -98,8 +98,8 @@ fn append_memory_audit(base_dir: &Path, session: &Session, audit: MemoryAudit<'_
 
     let entry = json!({
         "timestamp": chrono::Utc::now().to_rfc3339(),
-        "session_id": session.id,
-        "session_owner": session.owner,
+        "session_id": ctx.session_id,
+        "session_owner": ctx.owner,
         "user_id": audit.user_id,
         "scope": audit.scope,
         "action": audit.action,
@@ -322,8 +322,8 @@ fn best_snippet(mf: &crate::memory::MemoryFile, query: &str, tokens: &[String]) 
 }
 
 /// Common helper: resolve the user_id from a session via the resolver.
-fn user_id_for(session: &Session, resolver: &UserResolver) -> String {
-    resolver.resolve(&session.owner)
+fn user_id_for(ctx: &ToolContext, resolver: &UserResolver) -> String {
+    resolver.resolve(&ctx.owner)
 }
 
 /// Resolve the target scope: "user" (default) or "agent".
@@ -641,10 +641,10 @@ impl Tool for MemoryListTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let type_filter = normalize_optional_filter(args["memory_type"].as_str());
-        let user_id = user_id_for(session, &self.resolver);
+        let user_id = user_id_for(ctx, &self.resolver);
         let files = scan_merged(&self.memory_root, &user_id);
         let entries: Vec<crate::memory::IndexEntry> = files
             .iter()
@@ -746,7 +746,7 @@ impl Tool for MemoryViewTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let name = match args["name"].as_str() {
             Some(n) => n,
@@ -759,7 +759,7 @@ impl Tool for MemoryViewTool {
             }
         };
 
-        let user_id = user_id_for(session, &self.resolver);
+        let user_id = user_id_for(ctx, &self.resolver);
         let files = scan_merged(&self.memory_root, &user_id);
         let file = files.iter().find(|f| f.name == name);
 
@@ -862,7 +862,7 @@ impl Tool for MemorySearchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let query = match args["query"].as_str() {
             Some(q) => q.trim().to_lowercase(),
@@ -886,7 +886,7 @@ impl Tool for MemorySearchTool {
         let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize;
         let include_related = args["include_related"].as_bool().unwrap_or(false);
 
-        let user_id = user_id_for(session, &self.resolver);
+        let user_id = user_id_for(ctx, &self.resolver);
         let files = scan_merged(&self.memory_root, &user_id);
 
         let mut results: Vec<(i32, &crate::memory::MemoryFile)> = Vec::new();
@@ -1075,16 +1075,16 @@ impl Tool for MemoryManageTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let action = args["action"].as_str().unwrap_or("");
         let name = args["name"].as_str().unwrap_or("");
-        let user_id = user_id_for(session, &self.resolver);
+        let user_id = user_id_for(ctx, &self.resolver);
 
         let result = match action {
-            "add" => self.action_add(name, &args, &user_id, session),
-            "replace" => self.action_replace(name, &args, &user_id, session),
-            "remove" => self.action_remove(name, &args, &user_id, session),
+            "add" => self.action_add(name, &args, &user_id, ctx),
+            "replace" => self.action_replace(name, &args, &user_id, ctx),
+            "remove" => self.action_remove(name, &args, &user_id, ctx),
             _ => Err(format!(
                 "Unknown action '{}'. Use: add, replace, remove",
                 action
@@ -1112,7 +1112,7 @@ impl MemoryManageTool {
         name: &str,
         args: &serde_json::Value,
         user_id: &str,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
         let scope = resolve_scope(args);
@@ -1181,7 +1181,7 @@ impl MemoryManageTool {
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
         append_memory_audit(
             &self.base_dir,
-            session,
+            ctx,
             MemoryAudit {
                 user_id,
                 scope,
@@ -1209,7 +1209,7 @@ impl MemoryManageTool {
         name: &str,
         args: &serde_json::Value,
         user_id: &str,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
         let scope = resolve_scope(args);
@@ -1289,7 +1289,7 @@ impl MemoryManageTool {
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
         append_memory_audit(
             &self.base_dir,
-            session,
+            ctx,
             MemoryAudit {
                 user_id,
                 scope,
@@ -1314,7 +1314,7 @@ impl MemoryManageTool {
         name: &str,
         args: &serde_json::Value,
         user_id: &str,
-        session: &Session,
+        ctx: &ToolContext,
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
         let scope = resolve_scope(args);
@@ -1338,7 +1338,7 @@ impl MemoryManageTool {
             .map_err(|e| format!("Failed to remove memory file: {}", e))?;
         append_memory_audit(
             &self.base_dir,
-            session,
+            ctx,
             MemoryAudit {
                 user_id,
                 scope,

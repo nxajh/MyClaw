@@ -12,7 +12,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::agents::session::Session;
+
 use crate::agents::tool_registry::ToolRegistry;
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ToolSpec};
 use crate::providers::capability_tool::ToolResult;
@@ -196,11 +196,19 @@ fn sanitize_fork_context(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
 }
 
 async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
-    // Build a minimal Session shell — memory tools need `owner`;
+    // Build a minimal ToolContext for tool execution — memory tools need `owner`;
     // session_query needs the real `id` for provenance lookup.
-    let mut session_shell = Session::new("memory_fork".to_string());
-    session_shell.owner = input.session_owner.clone();
-    session_shell.id = input.session_id.clone();
+    let session_shell = crate::api::tool::ToolContext {
+        owner: input.session_owner.clone(),
+        session_id: input.session_id.clone(),
+        reply_target: None,
+        last_message: None,
+        parent_session_id: None,
+        agent_name: "main".to_string(),
+        turn_silenced: false,
+        turn_headless: false,
+        channel: None,
+    };
 
     // Resolve thinking config from model config (same as do_summarize).
     let thinking = input

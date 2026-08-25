@@ -138,7 +138,7 @@ impl Tool for ListDirTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let path_str = args["path"].as_str().unwrap_or(".");
         let show_hidden = args["show_hidden"].as_bool().unwrap_or(false);
@@ -248,7 +248,7 @@ mod protected_path_tests {
         let result = tool
             .execute(
                 json!({"path": dir.path().to_str().unwrap(), "show_hidden": true}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -274,7 +274,7 @@ mod protected_path_tests {
         let result = tool
             .execute(
                 json!({"path": dir.path().to_str().unwrap(), "show_hidden": true, "max_depth": 3}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();

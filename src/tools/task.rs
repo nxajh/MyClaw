@@ -297,12 +297,12 @@ impl Tool for TaskCreateTool {
     async fn execute(
         &self,
         args: Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let parent = args["parent"].as_str();
         let description = args["details"].as_str().unwrap_or("");
 
-        let board = self.boards.board(&session.id);
+        let board = self.boards.board(&ctx.session_id);
         let mut state = board.write().await;
 
         // Verify parent exists
@@ -431,10 +431,10 @@ impl Tool for TaskListTool {
     async fn execute(
         &self,
         args: Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let parent = args["parent"].as_str();
-        let board = self.boards.board(&session.id);
+        let board = self.boards.board(&ctx.session_id);
         let state = board.read().await;
 
         let filtered: Vec<Value> = state
@@ -510,7 +510,7 @@ impl Tool for TaskUpdateTool {
     async fn execute(
         &self,
         args: Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let task_id = args["task_id"]
             .as_str()
@@ -531,7 +531,7 @@ impl Tool for TaskUpdateTool {
             });
         }
 
-        let board = self.boards.board(&session.id);
+        let board = self.boards.board(&ctx.session_id);
         let mut state = board.write().await;
         match state.find_task_mut(task_id) {
             Some(task) => {
@@ -600,13 +600,13 @@ impl Tool for TaskDeleteTool {
     async fn execute(
         &self,
         args: Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let task_id = args["task_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'task_id'"))?;
 
-        let board = self.boards.board(&session.id);
+        let board = self.boards.board(&ctx.session_id);
         let mut state = board.write().await;
 
         if state.find_task(task_id).is_none() {
@@ -659,8 +659,18 @@ pub fn new_tools(boards: TaskBoards) -> Vec<Arc<dyn Tool>> {
 mod tests {
     use super::*;
 
-    fn make_session(id: &str) -> crate::agents::session::Session {
-        crate::agents::session::Session::new(id.to_string())
+    fn make_session(id: &str) -> crate::api::tool::ToolContext {
+        crate::api::tool::ToolContext {
+            owner: "test".to_string(),
+            session_id: id.to_string(),
+            reply_target: None,
+            last_message: None,
+            parent_session_id: None,
+            agent_name: "main".to_string(),
+            turn_silenced: false,
+            turn_headless: false,
+            channel: None,
+        }
     }
 
     fn boards(dir: &tempfile::TempDir) -> TaskBoards {
@@ -928,7 +938,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let b = boards(&dir);
         let session = make_session("019fe342-6a03-7561-86de-0c2327a8c3de");
-        let path = b.board_path(&session.id);
+        let path = b.board_path(&session.session_id);
 
         // "Daemon A": create a goal and a child task — both must hit disk.
         let create = TaskCreateTool { boards: b.clone() };

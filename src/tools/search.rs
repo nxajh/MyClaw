@@ -152,7 +152,7 @@ impl Tool for GlobSearchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let pattern = args["pattern"]
             .as_str()
@@ -459,7 +459,7 @@ impl Tool for ContentSearchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let pattern = args["regex"]
             .as_str()
@@ -615,7 +615,7 @@ mod protected_path_tests {
         let result = tool
             .execute(
                 json!({"pattern": "*", "path": dir.path().to_str().unwrap()}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -650,7 +650,7 @@ mod protected_path_tests {
         let result = tool
             .execute(
                 json!({"regex": "SECRET_KEY", "path": dir.path().to_str().unwrap()}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();

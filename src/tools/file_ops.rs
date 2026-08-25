@@ -115,7 +115,7 @@ impl Tool for FileReadTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
@@ -517,7 +517,7 @@ impl Tool for FileWriteTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
@@ -621,7 +621,7 @@ impl Tool for FileEditTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
@@ -881,7 +881,7 @@ mod file_edit_diff_tests {
                     "old_string": "marker=alpha-7742 (for file_edit replacement)",
                     "new_string": "marker=beta-9913 (file_edit verified)",
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();
@@ -910,7 +910,7 @@ mod protected_path_tests {
         let err = tool
             .execute(
                 json!({"path": protected}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap_err();
@@ -929,7 +929,7 @@ mod protected_path_tests {
         let result = tool
             .execute(
                 json!({"path": path.to_str().unwrap()}),
-                &crate::agents::session::Session::new("test".to_string()),
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
             )
             .await
             .unwrap();

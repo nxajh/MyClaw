@@ -2,7 +2,7 @@
 //!
 //! Reads the active channel via `Session::resolve_channel()` (registry
 //! installed by `SessionContext::process_turn`), so there is no per-tool
-//! channel map and no need to parse `session.owner`. The tool is wired
+//! channel map and no need to parse `ctx.owner`. The tool is wired
 //! with the global `AskRouter` at construction; orchestrator's inbound
 //! dispatch fulfills the wait via `AskRouter::fulfill(session_id, ...)`.
 
@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::agents::ask_router::AskRouter;
-use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
+use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::providers::{Tool, ToolResult};
 
 pub struct AskUserTool {
@@ -64,7 +64,7 @@ impl Tool for AskUserTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &crate::agents::session::Session,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let question = args["question"]
             .as_str()
@@ -76,7 +76,7 @@ impl Tool for AskUserTool {
         // the final summary or use /btw (bypass question, independent of
         // turn/context). Origin turns (suspension created mid-run) keep the
         // tool available — `turn_silenced` is false there.
-        if session.turn_silenced {
+        if ctx.turn_silenced {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -90,7 +90,7 @@ impl Tool for AskUserTool {
         // RFC channel-role-split §1.1: headless turns (cron/webhook) have
         // no human on the other end — asking would hang the turn forever.
         // Report as a tool error instead (mirrors the silenced-turn guard).
-        if session.turn_headless {
+        if ctx.turn_headless {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -99,7 +99,7 @@ impl Tool for AskUserTool {
             });
         }
 
-        let channel = match session.resolve_channel() {
+        let channel = match ctx.channel.clone() {
             Some(c) => c,
             None => {
                 return Ok(ToolResult {
@@ -114,7 +114,7 @@ impl Tool for AskUserTool {
             }
         };
 
-        let reply_target = match session.reply_target() {
+        let reply_target = match ctx.reply_target.as_deref() {
             Some(rt) => rt.to_string(),
             None => {
                 return Ok(ToolResult {
@@ -128,7 +128,7 @@ impl Tool for AskUserTool {
         };
 
         let mut receiver = MessageReceiver::new(reply_target);
-        if let Some(ref last_msg) = session.last_message {
+        if let Some(ref last_msg) = ctx.last_message {
             receiver.reply_to_message_id = Some(
                 last_msg
                     .receiver
@@ -143,7 +143,7 @@ impl Tool for AskUserTool {
             content: ChannelMessageContent::text(question),
             options: Default::default(),
         };
-        if let Err(e) = channel.send_message(&message).await {
+        if let Err(e) = channel.send_outbound_message(&message).await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -152,9 +152,9 @@ impl Tool for AskUserTool {
         }
 
         // Register with the router and await the user's reply, keyed by
-        // session.id (cross-channel sub-agents would route by session, not
+        // ctx.session_id (cross-channel sub-agents would route by session, not
         // routing_key, after future delegation work).
-        let reply = match self.router.wait_for_reply(&session.id).await {
+        let reply = match self.router.wait_for_reply(&ctx.session_id).await {
             Ok(m) => m,
             Err(e) => {
                 return Ok(ToolResult {
