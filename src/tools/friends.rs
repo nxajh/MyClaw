@@ -22,7 +22,7 @@ use crate::agents::commands::friends::rk_for;
 use crate::agents::commands::register::parse_target;
 use crate::api::tool::ToolContext;
 use crate::agents::{ContactStatus, KnownUsersRegistry, RequestOutcome, UserMail, UserRegistry};
-use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
+use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::ids::{DEFAULT_NAMESPACE, Fqid, TYPE_MSG};
 use crate::providers::{Tool, ToolResult};
 

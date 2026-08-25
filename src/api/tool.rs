@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::api::message::PersistedChannelMessage;
-use crate::channels::Channel;
 
 /// Context passed to tool execution, replacing direct Session dependency.
 ///
@@ -35,7 +34,7 @@ pub struct ToolContext {
     pub turn_headless: bool,
     /// Live channel handle for tools that need to send messages.
     /// Resolved at call time from the session's channel registry.
-    pub channel: Option<Arc<dyn Channel>>,
+    pub channel: Option<Arc<dyn crate::api::message::OutboundChannel>>,
 }
 
 /// Origin of a registered tool — used by `AgentConfig.tools` / `.skills` /

@@ -11,7 +11,7 @@ use crate::api::tool::ToolContext;
 use crate::agents::{
     AgentMail, AgentMessage, AgentMessenger, KnownUsersRegistry, MessageKind, UserRegistry,
 };
-use crate::channels::{
+use crate::api::message::{
     ChannelFile, ChannelFileMeta, ChannelMessageContent, ChannelOutboundMessage, LocalFileBody,
     MessageReceiver, SendOptions,
 };
@@ -545,7 +545,7 @@ impl Tool for SendMessageTool {
             options: SendOptions::default(),
         };
 
-        match channel.send_message(&message).await {
+        match channel.send_outbound_message(&message).await {
             Ok(_) => Ok(ToolResult {
                 success: true,
                 output: if file_names.is_empty() {

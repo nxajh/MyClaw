@@ -27,6 +27,21 @@ const WATCHDOG_HEADROOM_SECS: u64 = 30;
 /// filtered through the agent's `tools` / `skills` / `mcp` filters.
 /// No `ToolRegistry` field; the executor is stateless w.r.t. which
 /// tools an agent may call.
+struct OutboundChannelWrapper(Arc<dyn crate::channels::Channel>);
+
+#[async_trait::async_trait]
+impl crate::api::message::OutboundChannel for OutboundChannelWrapper {
+    async fn send_outbound_message(
+        &self,
+        msg: &crate::api::message::ChannelOutboundMessage,
+    ) -> anyhow::Result<crate::api::message::OutboundSendResult> {
+        self.0.send_message(msg).await
+    }
+    fn supports_file_send(&self) -> bool {
+        self.0.capabilities().supports_file_send
+    }
+}
+
 pub struct ToolExecutor {
     pub timeout_secs: u64,
     /// Shared `AskRouter` for per-operation approval in Default mode.
@@ -327,7 +342,7 @@ impl ToolExecutor {
             agent_name: session.agent_name.clone(),
             turn_silenced: session.turn_silenced,
             turn_headless: session.turn_headless,
-            channel: session.resolve_channel(),
+            channel: session.resolve_channel().map(|c| Arc::new(OutboundChannelWrapper(c)) as Arc<dyn crate::api::message::OutboundChannel>),
         };
 
         let raw = if self.timeout_secs > 0 && !tool.blocks_on_human() {
@@ -439,7 +454,7 @@ impl MemoryToolExecutor {
             agent_name: session.agent_name.clone(),
             turn_silenced: session.turn_silenced,
             turn_headless: session.turn_headless,
-            channel: session.resolve_channel(),
+            channel: session.resolve_channel().map(|c| Arc::new(OutboundChannelWrapper(c)) as Arc<dyn crate::api::message::OutboundChannel>),
         };
         tool.execute(args, &tool_ctx).await
     }
