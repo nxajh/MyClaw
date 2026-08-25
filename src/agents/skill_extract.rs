@@ -170,13 +170,8 @@ async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<Vec<String>
     let session_shell = crate::api::tool::ToolContext {
         owner: "skill_extract".to_string(),
         session_id: input.session_id.clone(),
-        reply_target: None,
-        last_message: None,
-        parent_session_id: None,
         agent_name: "main".to_string(),
-        turn_silenced: false,
-        turn_headless: false,
-        channel: None,
+        ..Default::default()
     };
 
     // Build existing skills index for dedup.
