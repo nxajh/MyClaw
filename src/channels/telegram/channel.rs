@@ -38,6 +38,29 @@ const STREAM_PREVIEW_LIMIT: usize = 4000;
 /// legitimately try to re-edit a message with identical content when the
 /// underlying text hasn't changed since the last flush. This is not an
 /// error worth a WARN; the edit is simply a no-op.
+/// Body for the plain-text `sendMessage` fallback (#144): no `parse_mode`.
+/// Any parse mode can 400 on unclosed Markdown entities (e.g. an odd number
+/// of underscores) and turn the "guaranteed delivery" tier into a silent
+/// drop, so the fallback sends unformatted text by design.
+fn plain_send_message_body(
+    chat_id: &str,
+    text: &str,
+    thread_id: Option<&str>,
+    reply_markup: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "chat_id": chat_id,
+        "text": text,
+    });
+    if let Some(tid) = thread_id {
+        body["message_thread_id"] = serde_json::Value::from(tid);
+    }
+    if let Some(markup) = reply_markup {
+        body["reply_markup"] = markup.clone();
+    }
+    body
+}
+
 fn is_edit_not_modified(status: reqwest::StatusCode, body: &str) -> bool {
     status == reqwest::StatusCode::BAD_REQUEST && body.contains("message is not modified")
 }
@@ -557,6 +580,11 @@ impl TelegramChannel {
     }
 
     /// Plain-text fallback using standard `sendMessage` (no rich formatting).
+    /// #144: no `parse_mode` — this is the last-resort tier whose contract is
+    /// "guarantee delivery", and any parse mode (Markdown included) can 400 on
+    /// unclosed entities and drop the message entirely. Rich rendering is
+    /// `send_rich_message`'s job; if it failed, retrying with the same parsing
+    /// risk defeats the fallback.
     async fn send_plain_message(
         &self,
         chat_id: &str,
@@ -565,17 +593,7 @@ impl TelegramChannel {
         reply_markup: Option<serde_json::Value>,
     ) -> anyhow::Result<Option<i64>> {
         let client = self.http_client();
-        let mut body = serde_json::json!({
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-        });
-        if let Some(tid) = thread_id {
-            body["message_thread_id"] = serde_json::Value::from(tid);
-        }
-        if let Some(ref markup) = reply_markup {
-            body["reply_markup"] = markup.clone();
-        }
+        let body = plain_send_message_body(chat_id, text, thread_id, reply_markup.as_ref());
 
         let resp = client
             .post(self.api_url("sendMessage"))
@@ -2979,6 +2997,34 @@ mod tests {
             reqwest::StatusCode::TOO_MANY_REQUESTS,
             "message is not modified"
         ));
+    }
+
+    /// #144: the plain fallback body must carry NO parse_mode — with
+    /// Markdown attached, an unclosed entity (odd underscore count) turns
+    /// the "guaranteed delivery" tier into a 400 and the message is lost.
+    #[test]
+    fn plain_fallback_body_has_no_parse_mode() {
+        let body = plain_send_message_body("chat-42", "sessions_yield _odd_", None, None);
+        assert_eq!(body["chat_id"], "chat-42");
+        assert_eq!(body["text"], "sessions_yield _odd_");
+        assert!(
+            body.get("parse_mode").is_none(),
+            "plain fallback must not request any parse mode"
+        );
+    }
+
+    #[test]
+    fn plain_fallback_body_carries_thread_and_markup() {
+        let markup = serde_json::json!({"inline_keyboard": []});
+        let body = plain_send_message_body(
+            "chat-42",
+            "hi",
+            Some("7"),
+            Some(&markup),
+        );
+        assert_eq!(body["message_thread_id"], "7");
+        assert_eq!(body["reply_markup"], markup);
+        assert!(body.get("parse_mode").is_none());
     }
 
     fn make_config() -> TelegramAccountConfig {

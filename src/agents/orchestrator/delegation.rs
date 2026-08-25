@@ -461,7 +461,7 @@ pub(super) async fn route_notice(
         };
         if ctx.channel(&key.account_key()).is_none() {
             tracing::warn!(routing_key = %routing_key, "channel for delegation event not found, falling back to non-active path");
-            process_non_active(ctx, session_id, &content, silenced_override, None).await;
+            process_non_active(ctx, session_id, &key.sender, &content, silenced_override, None).await;
             return;
         }
 
@@ -534,13 +534,7 @@ pub(super) async fn route_notice(
             let synthetic = ChannelInboundMessage {
                 id: synthetic_id,
                 sender: crate::channels::MessageSender::new(key.sender.clone()),
-                receiver: crate::channels::MessageReceiver::new(
-                    session
-                        .last_message
-                        .as_ref()
-                        .map(|m| m.receiver.id.clone())
-                        .unwrap_or_default(),
-                ),
+                receiver: notice_receiver(session.last_message.as_ref(), &key.sender),
                 content: crate::channels::ChannelMessageContent::text(content),
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 interruption_scope_id: None,
@@ -556,7 +550,7 @@ pub(super) async fn route_notice(
         // P2: not persisted here (no queue to enter; the wake→turn window is
         // small and RFC §5 keeps this path in-memory-only) — `notice_id`
         // stays None so the store is untouched.
-        process_non_active(ctx, session_id, &content, silenced_override, None).await;
+        process_non_active(ctx, session_id, &notice_fallback_sender(routing_key), &content, silenced_override, None).await;
     }
 }
 
@@ -660,6 +654,7 @@ pub(super) async fn drain_delegation_notices(ctx: &OrchestratorCtx, session_id: 
             process_non_active(
                 ctx,
                 session_id,
+                &key.sender,
                 &notice.content,
                 notice.silenced_override,
                 Some(notice.id),
@@ -685,6 +680,37 @@ fn split_batch_ids(batch: &[DelegationNotice]) -> (String, Vec<String>) {
 /// Deliver a whole batch of queued delegation notices as ONE synthetic
 /// turn (issue #106 round 2 — see `drain_delegation_notices` doc). `batch`
 /// must be non-empty and already deduped/FIFO-ordered.
+/// Reply receiver for a synthetic delegation notice turn (#144).
+///
+/// Prefers the receiver of the session's last message (preserves thread /
+/// reply-to context); falls back to the session key's sender when `last_message`
+/// is missing **or carries an empty receiver id** — an empty id would make
+/// Telegram reject the fallback send with `chat_id is empty` and the notice
+/// would be silently dropped. The empty-receiver filter also self-heals
+/// sessions already polluted by the pre-#144 `record_inbound` overwrite.
+pub(super) fn notice_receiver(
+    last_message: Option<&crate::channels::PersistedChannelMessage>,
+    sender: &str,
+) -> crate::channels::MessageReceiver {
+    crate::channels::MessageReceiver::new(
+        last_message
+            .map(|m| m.receiver.id.clone())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| sender.to_string()),
+    )
+}
+
+/// Sender for the non-active notice path when no parsed `SessionKey` is at
+/// hand (#144): `route_notice` only parses the key inside its active branch,
+/// so the non-active fallback re-derives the sender from the raw routing key
+/// (`channel:account:sender`). Unparsable keys degrade to `"system"` — the
+/// pre-#144 behaviour (empty receiver) is never worse than that.
+pub(super) fn notice_fallback_sender(routing_key: &str) -> String {
+    SessionKey::parse(routing_key)
+        .map(|k| k.sender)
+        .unwrap_or_else(|| "system".to_string())
+}
+
 async fn dispatch_notice_batch(
     ctx: &OrchestratorCtx,
     key: &SessionKey,
@@ -719,13 +745,7 @@ async fn dispatch_notice_batch(
     let synthetic = ChannelInboundMessage {
         id: batch_id,
         sender: crate::channels::MessageSender::new(key.sender.clone()),
-        receiver: crate::channels::MessageReceiver::new(
-            session
-                .last_message
-                .as_ref()
-                .map(|m| m.receiver.id.clone())
-                .unwrap_or_default(),
-        ),
+        receiver: notice_receiver(session.last_message.as_ref(), &key.sender),
         content: crate::channels::ChannelMessageContent::text(combined_content),
         timestamp: chrono::Utc::now().timestamp() as u64,
         interruption_scope_id: None,
@@ -757,9 +777,15 @@ async fn dispatch_notice_batch(
 /// `Some`, the synthetic turn uses that id and a successful turn marks the
 /// persisted entry delivered (at-least-once). `None` (wake for a non-active
 /// session, recovery-synthesized notices) leaves the store untouched.
+///
+/// `sender` (#144): the routing key's sender id, used as the FALLBACK
+/// receiver only — the session's persisted `last_message` receiver wins
+/// when present (keeps the notice in the user's group/thread), mirroring
+/// `route_notice` / `dispatch_notice_batch` / startup recovery semantics.
 pub(super) async fn process_non_active(
     ctx: &OrchestratorCtx,
     session_id: &str,
+    sender: &str,
     content: &str,
     silenced_override: Option<bool>,
     notice_id: Option<String>,
@@ -770,6 +796,15 @@ pub(super) async fn process_non_active(
             tracing::warn!(session_id = %session_id, "cannot load context for non-active delegation event");
             return;
         }
+    };
+
+    // #144 review: prefer the session's persisted last-message receiver —
+    // it keeps the notice in the same group/thread the user was actually
+    // using (sender-as-receiver would reroute group chats to a private DM).
+    // Only when it is absent or empty does the routing key's sender win.
+    let receiver = {
+        let session = session_ctx.session.lock().await;
+        notice_receiver(session.last_message.as_ref(), sender)
     };
 
     let runtime = ctx.runtime.clone();
@@ -793,7 +828,7 @@ pub(super) async fn process_non_active(
         let synthetic = ChannelInboundMessage {
             id: notice_id.unwrap_or_else(|| format!("delegation:{}", uuid::Uuid::new_v4())),
             sender: crate::channels::MessageSender::new("system".to_string()),
-            receiver: crate::channels::MessageReceiver::new(String::new()),
+            receiver,
             content: crate::channels::ChannelMessageContent::text(content_owned),
             timestamp: chrono::Utc::now().timestamp() as u64,
             interruption_scope_id: None,
@@ -845,6 +880,57 @@ mod tests {
     use crate::agents::{AgentMessage, DelegationNotice, SessionContext};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    /// #144 `notice_receiver`: three input states — no last message, a
+    /// last message polluted with an EMPTY receiver id (pre-#144 synthetic
+    /// turns wrote these), and a healthy last message.
+    #[test]
+    fn notice_receiver_falls_back_to_sender_when_last_message_missing() {
+        let r = notice_receiver(None, "u1");
+        assert_eq!(r.id, "u1");
+    }
+
+    #[test]
+    fn notice_receiver_self_heals_empty_receiver_pollution() {
+        let polluted = crate::channels::PersistedChannelMessage {
+            id: "m1".to_string(),
+            sender_id: "u1".to_string(),
+            receiver: crate::channels::MessageReceiver::new(String::new()),
+            text: "x".to_string(),
+            timestamp: 0,
+            interruption_scope_id: None,
+        };
+        // Some("") must NOT win over the sender fallback — a plain
+        // `unwrap_or_else` would keep the empty id and reproduce the bug.
+        let r = notice_receiver(Some(&polluted), "u1");
+        assert_eq!(r.id, "u1");
+    }
+
+    #[test]
+    fn notice_receiver_preserves_healthy_last_message_receiver() {
+        let healthy = crate::channels::PersistedChannelMessage {
+            id: "m1".to_string(),
+            sender_id: "u1".to_string(),
+            receiver: crate::channels::MessageReceiver::new("chat-42".to_string()),
+            text: "x".to_string(),
+            timestamp: 0,
+            interruption_scope_id: None,
+        };
+        let r = notice_receiver(Some(&healthy), "u1");
+        assert_eq!(r.id, "chat-42");
+    }
+
+    /// #144 `notice_fallback_sender`: derives the sender from a routing key;
+    /// unparsable keys degrade to "system" instead of an empty string.
+    #[test]
+    fn notice_fallback_sender_parses_routing_key() {
+        assert_eq!(notice_fallback_sender("telegram:default:alice"), "alice");
+    }
+
+    #[test]
+    fn notice_fallback_sender_degrades_on_invalid_key() {
+        assert_eq!(notice_fallback_sender("no-colons-here"), "system");
+    }
 
     /// A session registered in `ctx` with one pending task "t1".
     fn suspended_session(ctx: &OrchestratorCtx) -> Arc<SessionContext> {

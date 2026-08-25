@@ -642,7 +642,7 @@ fn recover_completion_queue(ctx: &Arc<OrchestratorCtx>) {
                 let content = entry.content.clone();
                 let silenced = entry.silenced_override;
                 tokio::spawn(async move {
-                    process_non_active(&ctx, &sid, &content, silenced, Some(id)).await;
+                    process_non_active(&ctx, &sid, &key.sender, &content, silenced, Some(id)).await;
                 });
                 continue;
             };
@@ -666,7 +666,7 @@ fn recover_completion_queue(ctx: &Arc<OrchestratorCtx>) {
             let content = entry.content.clone();
             let silenced = entry.silenced_override;
             tokio::spawn(async move {
-                process_non_active(&ctx, &sid, &content, silenced, Some(id)).await;
+                process_non_active(&ctx, &sid, &key.sender, &content, silenced, Some(id)).await;
             });
         }
     }
