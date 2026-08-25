@@ -777,6 +777,11 @@ async fn dispatch_notice_batch(
 /// `Some`, the synthetic turn uses that id and a successful turn marks the
 /// persisted entry delivered (at-least-once). `None` (wake for a non-active
 /// session, recovery-synthesized notices) leaves the store untouched.
+///
+/// `sender` (#144): the routing key's sender id, used as the FALLBACK
+/// receiver only — the session's persisted `last_message` receiver wins
+/// when present (keeps the notice in the user's group/thread), mirroring
+/// `route_notice` / `dispatch_notice_batch` / startup recovery semantics.
 pub(super) async fn process_non_active(
     ctx: &OrchestratorCtx,
     session_id: &str,
@@ -793,10 +798,18 @@ pub(super) async fn process_non_active(
         }
     };
 
+    // #144 review: prefer the session's persisted last-message receiver —
+    // it keeps the notice in the same group/thread the user was actually
+    // using (sender-as-receiver would reroute group chats to a private DM).
+    // Only when it is absent or empty does the routing key's sender win.
+    let receiver = {
+        let session = session_ctx.session.lock().await;
+        notice_receiver(session.last_message.as_ref(), sender)
+    };
+
     let runtime = ctx.runtime.clone();
     let session_id_owned = session_id.to_string();
     let content_owned = content.to_string();
-    let sender_owned = sender.to_string();
     let turn_tracker = ctx.turn_tracker.clone();
     // P2: keep the notice id + store handle for the post-turn delivery mark.
     let notice_id_owned = notice_id.clone();
@@ -815,7 +828,7 @@ pub(super) async fn process_non_active(
         let synthetic = ChannelInboundMessage {
             id: notice_id.unwrap_or_else(|| format!("delegation:{}", uuid::Uuid::new_v4())),
             sender: crate::channels::MessageSender::new("system".to_string()),
-            receiver: crate::channels::MessageReceiver::new(sender_owned),
+            receiver,
             content: crate::channels::ChannelMessageContent::text(content_owned),
             timestamp: chrono::Utc::now().timestamp() as u64,
             interruption_scope_id: None,
