@@ -72,7 +72,7 @@ pub use orchestrator::{
 pub use prompt::{PermissionMode, RunMode, SystemPromptBuilder, SystemPromptConfig};
 pub use recovery::UnfinishedSubAgent;
 pub use runtime::AgentRuntime;
-pub use scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
+pub use crate::scheduling_types::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 pub use scheduling::scheduler::{
     JobEntry, JobUpdate, Scheduler, SharedScheduler, WebhookContext, is_active_hours, resolve_tz,
     run_webhook_server, scan_prompt_injection, send_to_target,
