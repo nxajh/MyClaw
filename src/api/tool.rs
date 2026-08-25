@@ -15,6 +15,7 @@ use crate::api::message::PersistedChannelMessage;
 /// Constructed by the tool executor from the live Session before each tool
 /// call. Contains only the fields tools actually need — no history, no
 /// compaction state, no token tracker.
+#[derive(Default)]
 pub struct ToolContext {
     /// Owner routing key (e.g. "telegram:default:12345").
     pub owner: String,

@@ -485,17 +485,7 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
     }
 
     // Build a minimal ToolContext for tool execution — memory tools only need `owner`.
-    let session_shell = crate::api::tool::ToolContext {
-        owner: "memory_distill".to_string(),
-        session_id: "memory_distill".to_string(),
-        reply_target: None,
-        last_message: None,
-        parent_session_id: None,
-        agent_name: "main".to_string(),
-        turn_silenced: false,
-        turn_headless: false,
-        channel: None,
-    };
+    let session_shell = crate::api::tool::ToolContext { owner: "memory_distill".to_string(), session_id: "memory_distill".to_string(), agent_name: "main".to_string(), ..Default::default() };
 
     // Resolve thinking config from model config.
     let thinking = input

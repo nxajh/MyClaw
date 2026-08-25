@@ -201,13 +201,8 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
     let session_shell = crate::api::tool::ToolContext {
         owner: input.session_owner.clone(),
         session_id: input.session_id.clone(),
-        reply_target: None,
-        last_message: None,
-        parent_session_id: None,
         agent_name: "main".to_string(),
-        turn_silenced: false,
-        turn_headless: false,
-        channel: None,
+        ..Default::default()
     };
 
     // Resolve thinking config from model config (same as do_summarize).

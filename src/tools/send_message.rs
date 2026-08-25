@@ -654,13 +654,9 @@ mod tests {
         ToolContext {
             owner: "test".to_string(),
             session_id: "sub_session".to_string(),
-            reply_target: None,
-            last_message: None,
             parent_session_id: Some("parent_session".to_string()),
             agent_name: "coder".to_string(),
-            turn_silenced: false,
-            turn_headless: false,
-            channel: None,
+            ..Default::default()
         }
     }
 
@@ -671,13 +667,8 @@ mod tests {
         let session = ToolContext {
             owner: "test".to_string(),
             session_id: "main".to_string(),
-            reply_target: None,
-            last_message: None,
-            parent_session_id: None,
             agent_name: "main".to_string(),
-            turn_silenced: false,
-            turn_headless: false,
-            channel: None,
+            ..Default::default()
         };
 
         let r = tool
@@ -768,13 +759,8 @@ mod tests {
         let session = ToolContext {
             owner: "test".to_string(),
             session_id: "main".to_string(),
-            reply_target: None,
-            last_message: None,
-            parent_session_id: None,
             agent_name: "main".to_string(),
-            turn_silenced: false,
-            turn_headless: false,
-            channel: None,
+            ..Default::default()
         };
 
         let r = tool
@@ -861,13 +847,8 @@ mod tests {
         ToolContext {
             owner: ALICE.to_string(),
             session_id: "s_alice".to_string(),
-            reply_target: None,
-            last_message: None,
-            parent_session_id: None,
             agent_name: "main".to_string(),
-            turn_silenced: false,
-            turn_headless: false,
-            channel: None,
+            ..Default::default()
         }
     }
 
@@ -947,13 +928,8 @@ mod tests {
         let bob_session = ToolContext {
             owner: BOB.to_string(),
             session_id: "s_bob".to_string(),
-            reply_target: None,
-            last_message: None,
-            parent_session_id: None,
             agent_name: "main".to_string(),
-            turn_silenced: false,
-            turn_headless: false,
-            channel: None,
+            ..Default::default()
         };
 
         // alice → bob
@@ -995,13 +971,8 @@ mod tests {
         let session = ToolContext {
             owner: "telegram:default:alice_tg".to_string(),
             session_id: "s_tg".to_string(),
-            reply_target: None,
-            last_message: None,
-            parent_session_id: None,
             agent_name: "main".to_string(),
-            turn_silenced: false,
-            turn_headless: false,
-            channel: None,
+            ..Default::default()
         };
 
         let r = tool

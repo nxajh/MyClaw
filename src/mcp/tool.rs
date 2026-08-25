@@ -181,7 +181,7 @@ mod tests {
         let result = wrapper
             .execute(
                 json!({}),
-                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "test".to_string(), turn_silenced: false, turn_headless: false, channel: None },
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), agent_name: "test".to_string(), ..Default::default() },
             )
             .await
             .expect("execute should be non-fatal");
@@ -222,7 +222,7 @@ mod tests {
         let result = wrapper
             .execute(
                 json!({ "approved": true, "param": "value" }),
-                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "test".to_string(), turn_silenced: false, turn_headless: false, channel: None },
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), agent_name: "test".to_string(), ..Default::default() },
             )
             .await
             .expect("execute must be non-fatal even with approved field");
@@ -250,13 +250,8 @@ mod tests {
                     &crate::api::tool::ToolContext {
                         owner: "test".to_string(),
                         session_id: "test".to_string(),
-                        reply_target: None,
-                        last_message: None,
-                        parent_session_id: None,
                         agent_name: "test".to_string(),
-                        turn_silenced: false,
-                        turn_headless: false,
-                        channel: None,
+                        ..Default::default()
                     },
                 )
                 .await
