@@ -91,13 +91,8 @@ mod tests {
         ToolContext {
             owner: "test".to_string(),
             session_id: id.to_string(),
-            reply_target: None,
-            last_message: None,
-            parent_session_id: None,
             agent_name: "main".to_string(),
-            turn_silenced: false,
-            turn_headless: false,
-            channel: None,
+            ..Default::default()
         }
     }
 
