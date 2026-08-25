@@ -7,7 +7,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::api::tool::ToolContext;
-    use crate::agents::user_profile::UserResolver;
+    use crate::identity::user_profile::UserResolver;
     use crate::providers::Tool;
     use crate::tools::{MemoryListTool, MemoryManageTool, MemorySearchTool};
 

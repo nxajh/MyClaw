@@ -22,7 +22,7 @@ use crate::agents::loop_breaker::{LoopBreak, LoopBreakReason};
 use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
-use crate::agents::user_registry::UserRegistry;
+use crate::identity::user_registry::UserRegistry;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{
     ChatMessage, ChatMessageUsage, ChatRequest, StopReason, ToolSpec,

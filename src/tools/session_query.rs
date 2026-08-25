@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::api::tool::ToolContext;
-use crate::agents::user_profile::UserResolver;
+use crate::identity::user_profile::UserResolver;
 use crate::providers::{Tool, ToolResult};
 use crate::storage::{SessionBackend, SessionInfo};
 use crate::str_utils::UNKNOWN_ID_LISTING_CAP;

@@ -2,6 +2,7 @@
 
 use super::CommandContext;
 use super::get_history;
+use crate::str_utils::format_ts;
 
 pub fn cmd_help() -> String {
     "📦 **MyClaw Slash Commands**\n\n\
@@ -599,16 +600,4 @@ pub fn cmd_groups(ctx: CommandContext<'_>) -> String {
     }
     lines.push("```".to_string());
     lines.join("\n")
-}
-
-/// Format a unix-ms timestamp as a readable date string.
-pub(crate) fn format_ts(ts_ms: u64) -> String {
-    let secs = ts_ms / 1000;
-    let days = secs / 86400;
-    let year = 1970 + (days / 365);
-    let day_of_year = days % 365;
-    let month = (day_of_year / 30).min(11) + 1;
-    let day = (day_of_year % 30) + 1;
-    let hour = (secs % 86400) / 3600;
-    format!("{year}-{month:02}-{day:02} {hour:02}:00 UTC")
 }

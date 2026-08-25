@@ -22,7 +22,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::agents::{KnownUsersRegistry, UserResolver};
+use crate::identity::{KnownUsersRegistry, UserResolver};
 use crate::ids::{bare_dir_name, Fqid, TYPE_USER};
 
 // ── 常量与规则 ───────────────────────────────────────────────────────────────

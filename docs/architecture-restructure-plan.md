@@ -267,6 +267,12 @@ fi
 - 更新 agents/commands/tools/daemon 引用路径
 - 验收：`verify-layering.sh` L2 合规；agents 行数 < 35000
 
+> **实施记录（PR #158）**：`user_messages.rs` 未迁——其错误映射 `match agents::error::AgentError::LoopBreak`（L4 类型）且消费方全在 agents 内部，强迁即 L2→L4 反向依赖。`format_ts` 随迁下沉 `str_utils`（L1），消除 identity 对 L4 的唯一依赖。实际迁移 2723 行，agents 38263 → **35540**：`< 35000` 阈值原按含 user_messages（354 行）估算，现预计 Phase 2c 后达成（2b 后 35249、2c 后约 30958）。`verify-layering.sh` 已随本 PR 落地并以 `continue-on-error` 接入 CI（早于原定 Phase 11，用于尽早暴露债务）。首跑完整违规基线 = 3 类 42 行，均为存量：
+> - **L1 config→providers（4 行）**：`config/provider.rs:11-12`、`config/routing.rs:7`、`config/mod.rs:868`（测试）。处置：Capability trait 入 api 层时改引 L0 自然消除（Phase 3）。
+> - **L3 tools→agents（23 行）**：cronjob_tool(5)/friends(3)/skill_tool(3)/skill_manage(2)/agent_kill(2)/skills_list(2)/tool_search(2)/agent_resume(1)/agent_list(1)/send_message(1)/ask_user(1)/delegate(1)。处置：scheduling 部分随 2b/2c，skill/delegation 部分待 tools 收窄（Phase 2d 后）。
+> - **L4 agents→channels（15 行）**：orchestrator(6)/session(2)/scheduler(1)/tool_executor(1)/session_context(1)/ask_router(1)/skill_extract(1)/commands/friends(1)。处置：Channel trait 及消息类型完整迁 api（Phase 1.5 遗留，Phase 3）。
+> identity 自身零违规（仅引 ids/config/str_utils + 层内互引）。
+
 2b. **scheduling_types 迁出到 L1**（1 PR）
 - 新建 `src/scheduling_types/` 模块（L1）
 - 移动 `agents/scheduling/cron_types.rs`（291 行纯类型）
