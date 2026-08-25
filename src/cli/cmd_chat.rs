@@ -85,7 +85,7 @@ pub async fn run(
         ));
         let tool_executor = Arc::new(myclaw::agents::tool_executor::ToolExecutor::new(180));
         let loop_breaker = Arc::new(myclaw::agents::loop_breaker::LoopBreaker::new(
-            myclaw::agents::loop_breaker::LoopBreakerConfig::default(),
+            myclaw::api::loop_breaker::LoopBreakerConfig::default(),
         ));
         myclaw::AgentRuntime::new(
             Arc::clone(&registry_arc),

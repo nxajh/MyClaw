@@ -1529,7 +1529,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             .with_ask_router(Arc::clone(&ask_router)),
         );
         let loop_breaker = Arc::new(crate::agents::loop_breaker::LoopBreaker::new(
-            crate::agents::loop_breaker::LoopBreakerConfig {
+            crate::api::loop_breaker::LoopBreakerConfig {
                 max_tool_calls: config.loop_breaker.max_tool_calls,
                 ..Default::default()
             },

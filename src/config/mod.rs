@@ -76,7 +76,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::agents::loop_breaker::LoopBreakerConfig;
+use crate::api::loop_breaker::LoopBreakerConfig;
 use crate::config::scheduler::SchedulerConfig;
 use agent::{AgentConfig, ContextConfig, PromptConfig, ToolExecutorConfig};
 use channel::ChannelConfigs;
