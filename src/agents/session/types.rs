@@ -351,7 +351,16 @@ impl Session {
     /// Store the incoming message context. Converts the runtime
     /// `ChannelInboundMessage` to the serializable `PersistedChannelMessage`
     /// (file bodies are dropped — only text and routing survive).
+    ///
+    /// #144: a synthetic message with an empty receiver id must NOT overwrite
+    /// `last_message` — the empty id propagates to every later consumer
+    /// (notice dispatch, startup recovery, fallback reply-target) as an empty
+    /// chat id until the next real user message. Real channel messages always
+    /// carry a receiver id, so the guard only ever skips synthetic ones.
     pub fn record_inbound(&mut self, msg: ChannelInboundMessage) {
+        if msg.receiver.id.is_empty() {
+            return;
+        }
         self.last_message = Some(msg.to_persisted());
     }
 
@@ -680,5 +689,57 @@ mod deadline_tests {
         assert!(t.contains("deadline warning"));
         assert!(t.contains("Wrap up NOW"));
         assert!(t.contains("100s remain"));
+    }
+}
+
+#[cfg(test)]
+mod record_inbound_tests {
+    use super::*;
+    use crate::channels::{ChannelInboundMessage, ChannelMessageContent, MessageReceiver, MessageSender};
+
+    fn inbound(receiver_id: &str) -> ChannelInboundMessage {
+        ChannelInboundMessage {
+            id: "m1".to_string(),
+            sender: MessageSender::new("u1".to_string()),
+            receiver: MessageReceiver::new(receiver_id.to_string()),
+            content: ChannelMessageContent::text("hello"),
+            timestamp: 0,
+            interruption_scope_id: None,
+            silenced_override: None,
+            run_mode: Default::default(),
+        }
+    }
+
+    /// #144: a real message (non-empty receiver) updates `last_message`.
+    #[test]
+    fn real_message_updates_last_message() {
+        let mut s = Session::new("s1".to_string());
+        s.record_inbound(inbound("chat-42"));
+        assert_eq!(s.last_message.as_ref().unwrap().receiver.id, "chat-42");
+    }
+
+    /// #144: a synthetic message with an empty receiver id must NOT overwrite
+    /// `last_message` — the empty id would pollute every later consumer of
+    /// the persisted field (notice dispatch, startup recovery, fallback
+    /// reply-target) until the next real user message.
+    #[test]
+    fn empty_receiver_synthetic_does_not_pollute_last_message() {
+        let mut s = Session::new("s1".to_string());
+        s.record_inbound(inbound("chat-42"));
+        s.record_inbound(inbound(""));
+        assert_eq!(
+            s.last_message.as_ref().unwrap().receiver.id,
+            "chat-42",
+            "empty-receiver synthetic must not overwrite the healthy last message"
+        );
+    }
+
+    /// #144: with no prior `last_message` the guard keeps it None rather
+    /// than persisting an empty id.
+    #[test]
+    fn empty_receiver_on_fresh_session_keeps_none() {
+        let mut s = Session::new("s1".to_string());
+        s.record_inbound(inbound(""));
+        assert!(s.last_message.is_none());
     }
 }
