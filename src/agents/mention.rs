@@ -12,7 +12,7 @@
 //!   `<…>` 原样保留；username 查不到（含旧数据空串）→ 原样保留标签——uid
 //!   不可读，不渲染 `@u/<uuid>`；`<namespace>/` 前缀不符 → 原样保留标签）。
 
-use super::user_registry::UserRegistry;
+use crate::identity::user_registry::UserRegistry;
 
 // ── 出站渲染 ─────────────────────────────────────────────────────────────────
 

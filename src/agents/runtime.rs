@@ -19,7 +19,7 @@ use crate::agents::loop_breaker::LoopBreaker;
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::prompt::SystemPromptConfig;
 use crate::agents::tool_executor::ToolExecutor;
-use crate::agents::user_registry::UserRegistry;
+use crate::identity::user_registry::UserRegistry;
 use crate::agents::workspace::skills::SkillManager;
 use crate::config::agent::PermissionMode;
 use crate::providers::ProviderRegistry;

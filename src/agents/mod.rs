@@ -9,7 +9,6 @@ pub mod context_engine;
 mod delegation;
 mod delegation_coordinator;
 pub mod delegator;
-pub mod known_users;
 pub mod error;
 pub mod llm_stream;
 pub mod loop_breaker;
@@ -34,8 +33,6 @@ mod tool_registry;
 pub mod turn;
 pub mod turn_event;
 mod user_messages;
-pub mod user_profile;
-pub mod user_registry;
 
 /// Scheduling: cron jobs, webhooks, scheduler loop.
 pub mod scheduling;
@@ -53,7 +50,7 @@ pub use crate::storage::SessionBackend;
 pub use agent::Agent;
 pub use agent_registry::AgentRegistry;
 pub use ask_router::AskRouter;
-pub use known_users::{
+pub use crate::identity::known_users::{
     ContactDirection, ContactEntry, ContactStatus, DeliveryVerdict, KnownUser,
     KnownUsersRegistry, RequestOutcome, UserMail,
 };
@@ -89,8 +86,8 @@ pub use turn::{SubResult, SubStatus, TurnContext, TurnResult, TurnSuspension};
 pub use turn_event::{
     RunSummary, TokenUsage, TtsSummary, TurnEvent, VersionedEvent,
 };
-pub use user_profile::{UserProfile, UserResolver};
-pub use user_registry::{
+pub use crate::identity::user_profile::{UserProfile, UserResolver};
+pub use crate::identity::user_registry::{
     RegisterError, User, UserRegistry, DEFAULT_NAMESPACE, validate_email, validate_username,
 };
 pub use workspace::skill_loader::SkillDefinition;

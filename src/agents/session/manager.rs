@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::agents::Agent;
 use crate::agents::agent_registry::AgentRegistry;
 use crate::agents::session_context::SessionContext;
-use crate::agents::user_profile::UserResolver;
+use crate::identity::user_profile::UserResolver;
 use crate::config::sub_agent::SubAgentConfig;
 
 /// Returned by `switch_session` when the caller tries to point a routing_key

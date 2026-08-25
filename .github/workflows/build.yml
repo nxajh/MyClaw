@@ -24,6 +24,15 @@ jobs:
       - name: Migration script tests
         run: python -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
+  layering:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # 过渡态：Phase 2/3 迁移完成后转 strict
+    steps:
+      - name: Checkout MyClaw
+        uses: actions/checkout@v4
+      - name: Verify layering
+        run: bash scripts/verify-layering.sh
+
   build:
     runs-on: ubuntu-latest
     

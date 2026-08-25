@@ -475,3 +475,15 @@ mod tests {
         assert_eq!(extract_yaml_bool(yaml2, "flag"), None);
     }
 }
+
+/// Format a unix-ms timestamp as a readable date string.
+pub fn format_ts(ts_ms: u64) -> String {
+    let secs = ts_ms / 1000;
+    let days = secs / 86400;
+    let year = 1970 + (days / 365);
+    let day_of_year = days % 365;
+    let month = (day_of_year / 30).min(11) + 1;
+    let day = (day_of_year % 30) + 1;
+    let hour = (secs % 86400) / 3600;
+    format!("{year}-{month:02}-{day:02} {hour:02}:00 UTC")
+}

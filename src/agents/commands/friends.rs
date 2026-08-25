@@ -114,7 +114,7 @@ pub fn cmd_friends(ctx: CommandContext<'_>) -> String {
     if !pending.is_empty() {
         lines.push("\n📩 **待处理请求**".to_string());
         for (peer, entry) in &pending {
-            let when = crate::agents::commands::info::format_ts(entry.requested_at);
+            let when = crate::str_utils::format_ts(entry.requested_at);
             lines.push(format!("  {}（发送于 {}）", ctx.user_registry.display(peer), when));
         }
         lines.push("  用 /friend_accept u/uid 接受，或 /friend_decline u/uid 拒绝。".to_string());

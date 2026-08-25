@@ -22,7 +22,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::agents::UserResolver;
+use crate::identity::user_profile::UserResolver;
 
 // ── Rate limit constants ────────────────────────────────────────────────────
 
@@ -955,7 +955,7 @@ impl KnownUsersRegistry {
     ) -> String {
         let mut lines = Vec::new();
         for (peer, entry) in pending {
-            let when = crate::agents::commands::info::format_ts(entry.requested_at);
+            let when = crate::str_utils::format_ts(entry.requested_at);
             lines.push(format!("你有 1 条待处理好友请求:{}，发送于 {}", display(peer), when));
         }
         format!(

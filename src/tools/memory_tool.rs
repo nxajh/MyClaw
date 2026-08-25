@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::api::tool::ToolContext;
-use crate::agents::user_profile::UserResolver;
+use crate::identity::user_profile::UserResolver;
 use crate::memory::{LinkRef, MemoryFile, build_backlinks};
 use crate::providers::{Tool, ToolResult};
 
