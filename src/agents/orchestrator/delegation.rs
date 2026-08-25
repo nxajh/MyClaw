@@ -796,6 +796,7 @@ pub(super) async fn process_non_active(
     let runtime = ctx.runtime.clone();
     let session_id_owned = session_id.to_string();
     let content_owned = content.to_string();
+    let sender_owned = sender.to_string();
     let turn_tracker = ctx.turn_tracker.clone();
     // P2: keep the notice id + store handle for the post-turn delivery mark.
     let notice_id_owned = notice_id.clone();
@@ -814,7 +815,7 @@ pub(super) async fn process_non_active(
         let synthetic = ChannelInboundMessage {
             id: notice_id.unwrap_or_else(|| format!("delegation:{}", uuid::Uuid::new_v4())),
             sender: crate::channels::MessageSender::new("system".to_string()),
-            receiver: crate::channels::MessageReceiver::new(sender.to_string()),
+            receiver: crate::channels::MessageReceiver::new(sender_owned),
             content: crate::channels::ChannelMessageContent::text(content_owned),
             timestamp: chrono::Utc::now().timestamp() as u64,
             interruption_scope_id: None,

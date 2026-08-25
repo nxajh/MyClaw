@@ -593,7 +593,7 @@ impl TelegramChannel {
         reply_markup: Option<serde_json::Value>,
     ) -> anyhow::Result<Option<i64>> {
         let client = self.http_client();
-        let mut body = plain_send_message_body(chat_id, text, thread_id, reply_markup.as_ref());
+        let body = plain_send_message_body(chat_id, text, thread_id, reply_markup.as_ref());
 
         let resp = client
             .post(self.api_url("sendMessage"))
