@@ -15,13 +15,8 @@ mod tests {
         ToolContext {
             owner: "test-user".to_string(),
             session_id: "test-session".to_string(),
-            reply_target: None,
-            last_message: None,
-            parent_session_id: None,
             agent_name: "main".to_string(),
-            turn_silenced: false,
-            turn_headless: false,
-            channel: None,
+            ..Default::default()
         }
     }
 
@@ -492,13 +487,8 @@ mod tests {
         ToolContext {
             owner: owner.to_string(),
             session_id: format!("session-{owner}"),
-            reply_target: None,
-            last_message: None,
-            parent_session_id: None,
             agent_name: "main".to_string(),
-            turn_silenced: false,
-            turn_headless: false,
-            channel: None,
+            ..Default::default()
         }
     }
 

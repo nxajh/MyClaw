@@ -393,7 +393,7 @@ mod tests {
         let result = tool
             .execute(
                 json!({"path": protected}),
-                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), reply_target: None, last_message: None, parent_session_id: None, agent_name: "main".to_string(), turn_silenced: false, turn_headless: false, channel: None },
+                &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), agent_name: "main".to_string(), ..Default::default() },
             )
             .await
             .unwrap();
