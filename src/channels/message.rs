@@ -1,15 +1,8 @@
 //! channels_message — Shared channel message types.
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use std::{
-    path::PathBuf,
-    pin::Pin,
-    sync::{Arc, Mutex},
-};
-use tokio::io::AsyncRead;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 // ── Channel capabilities (RFC §6.1) ────────────────────────────────────────────
 

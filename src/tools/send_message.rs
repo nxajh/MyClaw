@@ -504,7 +504,7 @@ impl Tool for SendMessageTool {
             }
         };
 
-        if !args.files.is_empty() && !channel.capabilities().supports_file_send {
+        if !args.files.is_empty() && !channel.supports_file_send() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
