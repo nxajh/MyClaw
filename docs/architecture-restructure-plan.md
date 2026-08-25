@@ -242,17 +242,19 @@ fi
 
 **冲突窗口**：无。Phase 1 之后、Phase 2 之前。
 
-### Phase 1.6：mcp→agents 违规修复（1 PR）
+### Phase 1.6：mcp→agents 违规修复（已随 Phase 1.5 完成，无需独立 PR）
 
 1. **收窄 mcp 对 agents::session 的依赖**：`mcp/tool.rs:71` 和 `mcp/deferred.rs` 的 `use crate::agents::session::Session` 改为使用 api 层的 Session trait 或 ToolContext
 2. **验收**：`verify-layering.sh` L2 合规；mcp→agents 归零；CI 全绿
+
+**执行记录**：Phase 1+1.5（PR #153）签名迁移时已同步完成——`mcp/tool.rs:71` 已是 `_ctx: &crate::api::tool::ToolContext`，`src/mcp/` 全目录零 agents 引用（2026-08-25 复核确认）。验收三项全部达标。
 
 **冲突窗口**：无。
 
 ### Phase 1.7：LoopBreakerConfig 下沉（1 PR）
 
-1. **移动 LoopBreakerConfig 到 api**：`config/loop_breaker.rs` 中的 `LoopBreakerConfig` 移到 `api/loop_breaker.rs`
-2. **更新引用路径**：`config/mod.rs:79` 和 agents 的引用改为 `use crate::api::LoopBreakerConfig`
+1. **移动 LoopBreakerConfig 到 api**：`LoopBreakerConfig`（原定义于 `agents/loop_breaker.rs:50`，方案初稿误记为 `config/loop_breaker.rs`）移到 `api/loop_breaker.rs`；运行时状态机 `LoopBreaker`/`LoopBreakerCounter` 留在 agents
+2. **更新引用路径**：`config/mod.rs:79`、`cli/cmd_chat.rs`、`cli/cmd_exec.rs`、`daemon.rs` 改为 `use crate::api::loop_breaker::LoopBreakerConfig`；`agents/loop_breaker.rs` 保留 `pub use` 兼容 re-export
 3. **验收**：`verify-layering.sh` L1 合规；config→agents 归零；CI 全绿
 
 **冲突窗口**：无。
