@@ -315,6 +315,12 @@ fi
 
 **冲突窗口**：无。
 
+> **实施记录（3a = PR #163，3b = PR #164）**：原计划 1 PR，实际按风险拆为 3a/3b 两个纯搬家 PR，后续 3c/3d。
+> - **3a `#163`**：webui → L6（`channels/client.rs` → `src/webui/client.rs`，2852 行 100% rename；channels 15447 → 12591）。channels 侧**不做** re-export（channels→webui 是 L5→L6 反向依赖，实测脚本立即报违规），消费方仅 daemon 2 处直接改。
+> - **3b `#164`**：Channel 契约六组下沉 api——TurnEvent/VersionedEvent（git mv 自 agents，241 行零改动）、RunMode（自 config/agent.rs 剪出，config 侧 re-export）、TurnStream/FoldCandidate、ChannelSecurityPolicy+AllowList+GroupAuthMode、ChannelInboundMessage、Channel trait+CallbackAction。31 文件 +492/−471，api 504 → 1222。channels 侧全符号 re-export；L4 侧 15 处 use + 67 处全限定改引 api，**L4→channels 归零**（评审核实本地复现）。遗留（PR 描述如实披露）：api 内 11 处 `crate::channels::` 全限定引用（trait 默认方法引用未下沉契约类型族：ProcessingStatus/ToolEvent/ChannelCapabilities+MINIMAL_CAPABILITIES+LenUnit/MessageScope/AuthDecision/GroupStat/security::evaluate），脚本只匹配 `use crate::` 前缀漏检——**处置归 3c**（下沉该批类型，或加严脚本 L0 检查至全路径匹配使债务显性化）。
+> - **SCC 解环归属澄清（本轮评审指出）**：#163 PR 描述"后续"曾把 agents↔scheduling_runtime SCC 解环一并列入 3b 范围，3b 实际未做（行为性改动不混入纯搬家 PR，见本节开头原则）。该 SCC（2c 遗留，见 §2c 实施记录）在此明确归属 **3d**：SchedulerEvent/CronTrigger 下沉 + scheduling_runtime 定义回调 trait 由 agents 实现（run_scheduled_turn/OrchestratorCtx/is_silent_ok 方向反转），独立 PR。Phase 11 layering 转 strict 前必须完成，否则门禁无出处可查。
+> - Phase 3 后续序列：**3c** = Capability trait 入 api（消 L1 config→providers 4 行：provider.rs:11-12、routing.rs:7、mod.rs:868）+ 3b 残留处置；**3d** = SCC 解环。
+
 ### Phase 4：registry 并入 providers（1 PR）
 
 1. **移动 registry 文件**：`registry/mod.rs` + `registry/routing.rs` → `providers/registry/`
