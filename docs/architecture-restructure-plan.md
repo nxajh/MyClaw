@@ -322,6 +322,7 @@ fi
 > - Phase 3 后续序列：**3c** = Capability trait 入 api（消 L1 config→providers 4 行：provider.rs:11-12、routing.rs:7、mod.rs:868）+ 3b 残留处置；**3d** = SCC 解环。
 >
 > **实施记录（3c = PR #165）**：三件事一 PR。① `providers/capability.rs` 整体 git mv → `api/capability.rs`（156 行纯类型，serde+fmt 零 crate 依赖），RotationStrategy 随迁（自 credential_pool.rs 剪出，config 唯一 L1→L2 违规点）；providers 侧留 re-export shim（8 类型 + RotationStrategy），`providers::capability::*` 与 `providers::RotationStrategy` 路径零改动。② 3b 残留 9 类型 + 1 函数下沉：LenUnit/ChannelCapabilities+MINIMAL_CAPABILITIES/ProcessingStatus/ToolEvent/GroupStat → api/message.rs；MessageScope/AuthDecision/evaluate（+全部鉴权测试）→ api/security.rs；channels 侧 re-export 保持，`warn_if_locked_down` 留驻（依赖 &dyn Channel）。api 内 11 处 `crate::channels::` 全限定引用全部本地化，**api 成为纯 L0**。③ verify-layering.sh L0 检查加严为全路径匹配（`crate::` 任意位置，不再只看 use 行）——封闭 2c SCC / 3b 残留两次踩中的同类盲区。验收：L1 config 4 行归零，加严后 L0 通过；L3 tools 22 行存量不变（Phase 2d 后待处置）。
+> **3c 评审补丁（同 PR 第二 commit）**：评审发现全路径盲区第 3 次出现（config/mod.rs:1003 测试代码 `crate::providers::Capability::Chat`，L1 检查仍是 use 行口径漏检），并建议全层加严。落实：① mod.rs:1003 去前缀（作用域已有 import）；② **L1–L5 检查全部加严为全路径匹配**；③ 预检比评审多找出 4 处——provider.rs:49/52/53 `crate::providers::AuthStyle`（From impl 桥）顺手下沉 AuthStyle 入 api/capability.rs（2 变体纯枚举，与 RotationStrategy 同构），L1 全路径归零；agents/agent.rs:771/895 `crate::channels::message::ToolEvent`（3b 盲区漏掉的真实 L4→L5 违规）改引 api，L4 全路径保持零。全层加严后 L3 从 22 行显性化为 37 行（+15 处函数体全限定：shell/send_message/friends/delegate 等，均为存量真实债务，处置归属后续 Phase）。
 
 ### Phase 4：registry 并入 providers（1 PR）
 

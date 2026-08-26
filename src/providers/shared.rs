@@ -22,11 +22,8 @@ pub const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── Auth ───────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
-pub enum AuthStyle {
-    Bearer,
-    XApiKey,
-}
+/// (Canonical definition: `crate::api::capability::AuthStyle`, moved in #151 Phase 3c.)
+pub use crate::api::capability::AuthStyle;
 
 pub fn build_auth(auth: &AuthStyle, credential: &str) -> String {
     match auth {

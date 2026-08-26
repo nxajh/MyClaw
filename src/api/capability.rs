@@ -171,3 +171,13 @@ pub enum RotationStrategy {
     /// Pick the key with the lowest use_count.
     LeastUsed,
 }
+
+// ── AuthStyle (moved from providers/shared.rs, #151 Phase 3c) ──
+
+/// HTTP authorization header style for provider APIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum AuthStyle {
+    #[default]
+    Bearer,
+    XApiKey,
+}

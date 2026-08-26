@@ -46,11 +46,11 @@ pub enum AuthStyle {
     XApiKey,
 }
 
-impl From<AuthStyle> for crate::providers::AuthStyle {
+impl From<AuthStyle> for crate::api::capability::AuthStyle {
     fn from(style: AuthStyle) -> Self {
         match style {
-            AuthStyle::Bearer => crate::providers::AuthStyle::Bearer,
-            AuthStyle::XApiKey => crate::providers::AuthStyle::XApiKey,
+            AuthStyle::Bearer => crate::api::capability::AuthStyle::Bearer,
+            AuthStyle::XApiKey => crate::api::capability::AuthStyle::XApiKey,
         }
     }
 }
