@@ -3,6 +3,7 @@
 //! Implements the [`Channel`] trait for the QQ Bot API (WebSocket gateway + REST).
 
 pub mod channel;
+pub mod flow;
 pub mod keyboard;
 pub mod markdown_sanitize;
 pub mod token;
