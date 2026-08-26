@@ -433,13 +433,6 @@ pub async fn send_to_target(ctx: &WebhookContext, delivery: &DeliveryConfig, con
 
 // ── Webhook ────────────────────────────────────────────────────────────────
 
-use http_body_util::Full;
-use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
-
 /// Run the webhook HTTP server.
 ///
 /// If `pre_bound` is `Some`, use the pre-bound `SO_REUSEPORT` listener instead
