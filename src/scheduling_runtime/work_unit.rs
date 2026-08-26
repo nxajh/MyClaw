@@ -104,11 +104,11 @@ pub fn find_compaction_boundary(history: &[ChatMessage], retain_count: usize) ->
 
 /// Per-message token estimator for budget-boundary walks.
 ///
-/// Delegates to [`crate::agents::tokens::estimate_message_tokens`] so File parts
+/// Delegates to [`crate::providers::tokens::estimate_message_tokens`] so File parts
 /// use the same marker-cost default as compaction when no MediaPolicy is known
 /// at this layer (boundary selection does not have model_id).
 fn estimate_msg_tokens(msg: &ChatMessage) -> u64 {
-    crate::agents::tokens::estimate_message_tokens(msg)
+    crate::providers::tokens::estimate_message_tokens(msg)
 }
 
 /// Find the latest compaction boundary whose compressible prefix fits within `compress_budget`.

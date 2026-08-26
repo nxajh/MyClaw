@@ -44,37 +44,9 @@ use crate::agents::session::SessionManager;
 /// threshold, loop-breaker limits) live in `[agent]`/`[context]` config.
 const CHANNEL_QUEUE_SIZE: usize = 100;
 
-/// A cron job that fired and needs a turn run. The fields the scheduled path
-/// actually consumes — delivery/enabled_tools/disabled_tools/provider, which
-/// the cron turn ignores, are deliberately not carried here.
-#[derive(Debug)]
-pub struct CronTrigger {
-    pub session_key: String,
-    pub prompt: String,
-    pub target_channel: Option<String>,
-    pub target_account: Option<String>,
-    pub target_recipient: Option<String>,
-    /// Thread/topic ID (#78 — `DeliveryConfig.thread_id`, previously dead).
-    pub target_thread: Option<String>,
-    /// True when the job's delivery mode is `None` (#78) — the turn still
-    /// runs, but its output must not be sent to any channel.
-    pub delivery_suppressed: bool,
-    pub job_id: String,
-    pub model: Option<String>,
-    /// Context policy: inject into user session or run isolated.
-    pub context_policy: crate::config::scheduler::ContextPolicy,
-}
-
-/// Events from the Scheduler (cron triggers, distill checks).
-#[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
-pub enum SchedulerEvent {
-    /// Cron job matched — run agent with specific prompt.
-    Cron(CronTrigger),
-    /// Idle-time memory distillation check (system idle + maybe new
-    /// user memories — the orchestrator verifies before running).
-    Distill,
-}
+// SchedulerEvent / CronTrigger moved to `crate::scheduling_types::event`
+// (#151 Phase 3d, SCC 解环) — re-exported for path compatibility.
+pub use crate::scheduling_types::event::{CronTrigger, SchedulerEvent};
 
 /// An inbound message handed from a channel listener to the event loop.
 /// `seq` is the inbound-spool sequence (RFC inbound-spool §6.1); 0 means
@@ -715,17 +687,9 @@ impl Orchestrator {
 
 /// Check if a response is a silent "nothing to do" signal. Its only caller
 /// (`run_heartbeat_task`) was removed along with the heartbeat system (U1);
-/// left `#[cfg(test)]` rather than deleted outright because
-/// `scheduler.rs`'s `silent_marker_ok` test still exercises it directly.
-#[cfg(test)]
-pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
-    let trimmed = response.trim().to_lowercase();
-    let marker = format!("{}_ok", prefix);
-    // Only match if the response IS the marker (possibly with surrounding whitespace).
-    // Don't use contains() — a response with real content should never be silenced
-    // just because it happens to mention the marker.
-    trimmed == marker
-}
+/// the `scheduler.rs` `silent_marker_ok` test that kept it alive now carries
+/// a local copy (#151 Phase 3d, SCC 解环 — scheduling_runtime no longer
+/// depends on agents).
 
 #[cfg(test)]
 mod tests {

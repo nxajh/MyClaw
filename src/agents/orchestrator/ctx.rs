@@ -234,6 +234,31 @@ impl OrchestratorCtx {
     }
 }
 
+/// `OrchestratorHook` implementation for the orchestrator side of the
+/// #151 Phase 3d SCC 解环: `scheduling_runtime` defines the trait
+/// (consumer), the orchestrator implements it (producer), the daemon wires
+/// it into `WebhookContext`. Thin delegation to the same functions the
+/// removed direct calls used — no behavior change.
+#[async_trait::async_trait]
+impl crate::scheduling_runtime::scheduler::OrchestratorHook for OrchestratorCtx {
+    async fn run_scheduled_turn(
+        &self,
+        session_key: &str,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        super::scheduled::run_scheduled_turn(self, session_key, prompt, None).await
+    }
+
+    fn outbound_channel(
+        &self,
+        channel_type: &str,
+        account_id: &str,
+    ) -> Option<Arc<dyn Channel>> {
+        self.channels
+            .get(&(channel_type.to_string(), account_id.to_string()))
+    }
+}
+
 // P1 CI 回归守卫 (2026-08-13): `drain_delegation_notices` 被 `dispatch_turn` 的
 // spawn 闭包 await, 闭包内逐级 await 的 future 必须 Send。死函数（非 cfg(test)）
 // 让普通 `cargo check` 就能验证并给出字段级诊断。`unreachable!()` 只用于构造

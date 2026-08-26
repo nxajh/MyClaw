@@ -18,15 +18,43 @@ use chrono::Timelike;
 use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
 
-use crate::agents::orchestrator::SchedulerEvent;
 use crate::scheduling_types::cron_types::{
     DeliveryConfig, DeliveryMode, RunRecord, RunStatus, ScheduleKind, ScheduleSpec,
 };
-use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
+use crate::scheduling_types::event::SchedulerEvent;
+use crate::api::message::{Channel, ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::config::scheduler::WebhookConfig;
 
 /// Shared handle to the Scheduler for concurrent access.
 pub type SharedScheduler = Arc<Scheduler>;
+
+/// Orchestrator-side callbacks the webhook/scheduling runtime needs
+/// (#151 Phase 3d, SCC 解环: direction inversion).
+///
+/// Previously `WebhookContext` held a direct `Arc<OrchestratorCtx>`
+/// directly and called `agents::orchestrator::run_scheduled_turn`, making
+/// scheduling_runtime depend on agents while agents re-exported
+/// scheduling_runtime — a same-layer SCC (found in the #160 review). This
+/// trait is defined HERE (the consumer side) and implemented by the
+/// orchestrator (the producer side); the daemon wires the implementation in
+/// at assembly time. Same functions, same data flow — only the dependency
+/// arrow flips.
+#[async_trait::async_trait]
+pub trait OrchestratorHook: Send + Sync {
+    /// Run one scheduled turn (`agents::orchestrator::run_scheduled_turn`).
+    async fn run_scheduled_turn(
+        &self,
+        session_key: &str,
+        prompt: &str,
+    ) -> anyhow::Result<String>;
+
+    /// Look up a live outbound channel by `(channel_type, account_id)`.
+    fn outbound_channel(
+        &self,
+        channel_type: &str,
+        account_id: &str,
+    ) -> Option<Arc<dyn Channel>>;
+}
 
 // ── JobEntry ────────────────────────────────────────────────────────────────
 
@@ -477,7 +505,7 @@ impl Scheduler {
                         );
                         let (target_channel, target_account, target_recipient, target_thread, delivery_suppressed) =
                             cron_delivery_fields(&j.delivery);
-                        let _ = self.event_tx.send(SchedulerEvent::Cron(crate::agents::orchestrator::CronTrigger {
+                        let _ = self.event_tx.send(SchedulerEvent::Cron(crate::scheduling_types::event::CronTrigger {
                             session_key: format!("_job_{}", crate::ids::bare_dir_name(&j.id)),
                             prompt: j.prompt.clone(),
                             target_channel,
@@ -1617,13 +1645,14 @@ pub fn compute_next_run(
 
 // ── Webhook app state ──────────────────────────────────────────────────────
 
-/// Axum app state for the webhook server. Holds the shared
-/// [`OrchestratorCtx`](crate::agents::OrchestratorCtx) (SessionManager /
-/// AgentRuntime / channel map / scheduler) plus the webhook-specific timezone
-/// for cron parsing.
+/// Axum app state for the webhook server. Holds the orchestrator callback
+/// hook ([`OrchestratorHook`] — dependency-inverted #151 Phase 3d; previously
+/// a direct `Arc<OrchestratorCtx>`), the webhook-specific timezone for cron
+/// parsing, and the live scheduler handle.
 pub struct WebhookContext {
-    /// Shared orchestrator dependency bundle.
-    pub ctx: Arc<crate::agents::OrchestratorCtx>,
+    /// Orchestrator callbacks (run scheduled turn / channel lookup),
+    /// implemented by agents, wired in by the daemon.
+    pub hook: Arc<dyn OrchestratorHook>,
     /// Timezone string used for cron evaluation in the webhook server.
     pub timezone: String,
     /// Live scheduler handle — routes are projected per request from the
@@ -1960,7 +1989,7 @@ pub async fn run_scheduled_task(
     session_key: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    crate::agents::orchestrator::run_scheduled_turn(&ctx.ctx, session_key, prompt, None).await
+    ctx.hook.run_scheduled_turn(session_key, prompt).await
 }
 
 /// Send a response per a resolved delivery config. Single dispatch path
@@ -1974,8 +2003,8 @@ pub async fn send_to_target(ctx: &WebhookContext, delivery: &DeliveryConfig, con
         return; // mode=None, or Last with no prior channel to reply to yet.
     };
 
-    let channel = match ctx.ctx.channels.get(&(ch_type.clone(), acc_id.clone())) {
-        Some(ch) => ch.clone(),
+    let channel = match ctx.hook.outbound_channel(&ch_type, &acc_id) {
+        Some(ch) => ch,
         None => {
             tracing::warn!(channel = %ch_type, account = %acc_id, "target channel not found");
             return;
@@ -2297,7 +2326,8 @@ async fn handle_request(
     });
     if let Some(reason) = ignore_reason {
         tracing::info!(route = %job.route, reason = %reason, "webhook: ignored");
-        if let Some(sched) = ctx.ctx.scheduler.as_ref() {
+        {
+            let sched = &ctx.scheduler;
             sched.record_webhook_run(
                 &job.id,
                 RunRecord {
@@ -2388,7 +2418,8 @@ where
         let duration_ms = started.elapsed().as_millis() as u64;
 
         // History record (§3.4: trigger field + webhook audit fields).
-        if let Some(sched) = ctx.ctx.scheduler.as_ref() {
+        {
+            let sched = &ctx.scheduler;
             let mut record = RunRecord::now(match &result {
                 Ok(_) => RunStatus::Ok,
                 Err(_) => RunStatus::Error,
@@ -2702,7 +2733,85 @@ fn ok_response(status: StatusCode, body: &str) -> anyhow::Result<Response<Full<B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::orchestrator::is_silent_ok;
+    /// Moved from `agents::orchestrator::is_silent_ok` (#151 Phase 3d, SCC
+    /// 解环) — its only remaining caller was this test module.
+    fn is_silent_ok(response: &str, prefix: &str) -> bool {
+        let trimmed = response.trim().to_lowercase();
+        let marker = format!("{}_ok", prefix);
+        trimmed == marker
+    }
+
+    /// Minimal channel mock for webhook dispatch tests (#151 Phase 3d:
+    /// local, replaces `agents::orchestrator::test_support::MockChannel`
+    /// so the test no longer reaches into agents).
+    struct MockChannel {
+        sent: std::sync::Arc<std::sync::Mutex<Vec<ChannelOutboundMessage>>>,
+    }
+
+    impl MockChannel {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                sent: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Channel for MockChannel {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn listen(&self) -> anyhow::Result<tokio::sync::mpsc::Receiver<crate::api::message::ChannelInboundMessage>> {
+            anyhow::bail!("mock channel does not listen")
+        }
+        async fn health_check(&self) -> bool {
+            true
+        }
+        async fn send_message(&self, msg: &ChannelOutboundMessage) -> anyhow::Result<()> {
+            self.sent.lock().unwrap().push(msg.clone());
+            Ok(())
+        }
+    }
+
+    /// OrchestratorHook test double: channel table + recorded turns.
+    struct TestHook {
+        channels: std::collections::HashMap<(String, String), Arc<dyn Channel>>,
+        turns: ParkMutex<Vec<(String, String)>>,
+    }
+
+    impl TestHook {
+        fn new(
+            channels: Vec<((String, String), Arc<dyn Channel>)>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                channels: channels.into_iter().collect(),
+                turns: ParkMutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OrchestratorHook for TestHook {
+        async fn run_scheduled_turn(
+            &self,
+            session_key: &str,
+            prompt: &str,
+        ) -> anyhow::Result<String> {
+            self.turns
+                .lock()
+                .push((session_key.to_string(), prompt.to_string()));
+            Ok("ok".to_string())
+        }
+        fn outbound_channel(
+            &self,
+            channel_type: &str,
+            account_id: &str,
+        ) -> Option<Arc<dyn Channel>> {
+            self.channels
+                .get(&(channel_type.to_string(), account_id.to_string()))
+                .cloned()
+        }
+    }
 
     fn test_scheduler(dir: &std::path::Path) -> SharedScheduler {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
@@ -3616,14 +3725,12 @@ mod tests {
         // actually delivers to the configured recipient/thread now.
         let tmp = tempfile::tempdir().unwrap();
         let sched = test_scheduler(tmp.path());
-        let mock = crate::agents::orchestrator::test_support::MockChannel::new();
-        let mut octx = crate::agents::orchestrator::test_support::test_ctx(vec![(
-            ("wechat".to_string(), "default".to_string()),
-            mock.clone() as Arc<dyn crate::api::message::Channel>,
-        )]);
-        octx.scheduler = Some(sched.clone());
+        let mock = MockChannel::new();
         let ctx = WebhookContext {
-            ctx: Arc::new(octx),
+            hook: TestHook::new(vec![(
+                ("wechat".to_string(), "default".to_string()),
+                mock.clone() as Arc<dyn Channel>,
+            )]),
             timezone: "UTC".to_string(),
             scheduler: sched.clone(),
         };
@@ -3648,14 +3755,12 @@ mod tests {
     async fn send_to_target_none_mode_delivers_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let sched = test_scheduler(tmp.path());
-        let mock = crate::agents::orchestrator::test_support::MockChannel::new();
-        let mut octx = crate::agents::orchestrator::test_support::test_ctx(vec![(
-            ("wechat".to_string(), "default".to_string()),
-            mock.clone() as Arc<dyn crate::api::message::Channel>,
-        )]);
-        octx.scheduler = Some(sched.clone());
+        let mock = MockChannel::new();
         let ctx = WebhookContext {
-            ctx: Arc::new(octx),
+            hook: TestHook::new(vec![(
+                ("wechat".to_string(), "default".to_string()),
+                mock.clone() as Arc<dyn Channel>,
+            )]),
             timezone: "UTC".to_string(),
             scheduler: sched.clone(),
         };
@@ -3672,10 +3777,8 @@ mod tests {
     async fn webhook_dispatch_returns_202_without_awaiting_turn() {
         let tmp = tempfile::tempdir().unwrap();
         let sched = test_scheduler(tmp.path());
-        let mut octx = crate::agents::orchestrator::test_support::test_ctx(vec![]);
-        octx.scheduler = Some(sched.clone());
         let ctx = Arc::new(WebhookContext {
-            ctx: Arc::new(octx),
+            hook: TestHook::new(vec![]),
             timezone: "UTC".to_string(),
             scheduler: sched.clone(),
         });
