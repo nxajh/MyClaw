@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use chrono::Timelike;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
@@ -28,13 +27,16 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
-use crate::scheduling_types::cron_types::{DeliveryConfig, DeliveryMode};
-use crate::api::message::{Channel, ChannelOutboundMessage};
+use crate::scheduling_types::cron_types::{
+    DeliveryConfig, DeliveryMode, RunRecord, RunStatus,
+};
+use crate::api::message::{
+    Channel, ChannelMessageContent, ChannelOutboundMessage, MessageReceiver,
+};
 use crate::config::scheduler::WebhookConfig;
 
 use super::scheduler::{
-    JobEntry, OrchestratorHook, Scheduler, SharedScheduler, WebhookFilter, cron_delivery_fields,
-    is_active_hours, parse_interval, parse_target_string, resolve_tz,
+    OrchestratorHook, Scheduler, SharedScheduler, WebhookDef, WebhookFilter, parse_target_string,
 };
 
 
@@ -261,127 +263,6 @@ impl WebhookGuard {
     }
 }
 
-// ── Interval parsing ───────────────────────────────────────────────────────
-
-/// Parse interval string like "5m", "30m", "1h" to Duration.
-pub fn parse_interval(s: &str) -> Option<Duration> {
-    let s = s.trim();
-    if s == "0" {
-        return None;
-    }
-
-    let (num_part, multiplier) = if let Some(n) = s.strip_suffix('s') {
-        (n, 1u64)
-    } else if let Some(n) = s.strip_suffix('m') {
-        (n, 60)
-    } else if let Some(n) = s.strip_suffix('h') {
-        (n, 3600)
-    } else {
-        // Default to minutes if no suffix
-        (s, 60)
-    };
-
-    let num: u64 = num_part.parse().ok()?;
-    Some(Duration::from_secs(num * multiplier))
-}
-
-// ── Active hours ───────────────────────────────────────────────────────────
-
-/// Parse the legacy `target` string grammar ("last" | "none" |
-/// "channel[:account]") into a [`DeliveryConfig`]. Used to migrate old
-/// meta.json files (`fold_one_target_delivery`), and as the grammar for
-/// the ad-hoc `/hooks/agent` `target` request field, which is a one-off
-/// per-request string and was never part of a job's persisted schema.
-pub fn parse_target_string(target: &str) -> DeliveryConfig {
-    match target {
-        "none" => DeliveryConfig {
-            mode: DeliveryMode::None,
-            ..Default::default()
-        },
-        "last" | "" => DeliveryConfig::default(), // mode: Last
-        name => {
-            let (channel, account_id) = match name.split_once(':') {
-                Some((ch, acc)) => (ch.to_string(), Some(acc.to_string())),
-                None => (name.to_string(), None),
-            };
-            DeliveryConfig {
-                mode: DeliveryMode::Fixed,
-                channel: Some(channel),
-                account_id,
-                ..Default::default()
-            }
-        }
-    }
-}
-
-/// Statically decompose a job's delivery config into the fields
-/// `CronTrigger` needs. `Last` mode deliberately leaves channel/account as
-/// `None` so `send_to_target_internal` resolves them lazily at delivery
-/// time (the response goes to whoever most recently messaged in, which may
-/// differ from trigger time for a long-running turn) - existing behavior,
-/// unchanged by #78.
-fn cron_delivery_fields(
-    delivery: &DeliveryConfig,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    bool,
-) {
-    match delivery.mode {
-        DeliveryMode::None => (None, None, None, None, true),
-        DeliveryMode::Fixed => (
-            delivery.channel.clone(),
-            Some(
-                delivery
-                    .account_id
-                    .clone()
-                    .unwrap_or_else(|| "default".to_string()),
-            ),
-            delivery.to.clone(),
-            delivery.thread_id.clone(),
-            false,
-        ),
-        DeliveryMode::Last => (None, None, delivery.to.clone(), delivery.thread_id.clone(), false),
-    }
-}
-
-/// Check if current time is within active hours.
-/// Format: "HH:MM-HH:MM" e.g. "08:00-24:00".
-/// `tz_name` is the IANA timezone (e.g. "Asia/Shanghai").
-pub fn is_active_hours(active_hours: &Option<String>, tz_name: &str) -> bool {
-    let Some(hours) = active_hours else {
-        return true; // No restriction = always active
-    };
-
-    let (start_mins, end_mins) = match parse_hours(hours) {
-        Some(h) => h,
-        None => return true, // Invalid format = always active
-    };
-
-    let tz = resolve_tz(tz_name);
-    let now_local = chrono::Utc::now().with_timezone(&tz);
-    let now_mins = now_local.hour() * 60 + now_local.minute();
-
-    now_mins >= start_mins && now_mins < end_mins
-}
-
-/// Parse "HH:MM-HH:MM" → (start_minutes, end_minutes).
-fn parse_hours(s: &str) -> Option<(u32, u32)> {
-    let (start, end) = s.split_once('-')?;
-    Some((parse_hhmm(start.trim())?, parse_hhmm(end.trim())?))
-}
-
-fn parse_hhmm(s: &str) -> Option<u32> {
-    let (h, m) = s.split_once(':')?;
-    let hours: u32 = h.trim().parse().ok()?;
-    let mins: u32 = m.trim().parse().ok()?;
-    if hours > 24 || mins >= 60 || (hours == 24 && mins > 0) {
-        return None;
-    }
-    Some(hours * 60 + mins)
-}
 
 // ── Webhook execution helpers ──────────────────────────────────────────────
 
@@ -1305,7 +1186,6 @@ mod tests {
         assert!(!verify_hmac_signature(b"body", "secret", "sha256=abc"));
     }
 
-    #[test]
     fn wh_entry(name: Option<&str>, secret: &str, schedule: Option<&str>) -> JobEntry {
         JobEntry {
             webhook: Some(WebhookDef {
@@ -1715,33 +1595,6 @@ mod tests {
         assert!(!is_route_slug("中文")); // unicode
         assert!(!is_route_slug("has/slash"));
         assert!(!is_route_slug(&"x".repeat(65))); // too long
-    }
-
-    #[test]
-    fn parse_interval_minutes() {
-        assert_eq!(parse_interval("30m"), Some(Duration::from_secs(30 * 60)));
-        assert_eq!(parse_interval("5m"), Some(Duration::from_secs(5 * 60)));
-    }
-
-    #[test]
-    fn parse_interval_hours() {
-        assert_eq!(parse_interval("1h"), Some(Duration::from_secs(3600)));
-        assert_eq!(parse_interval("2h"), Some(Duration::from_secs(7200)));
-    }
-
-    #[test]
-    fn parse_interval_seconds() {
-        assert_eq!(parse_interval("30s"), Some(Duration::from_secs(30)));
-    }
-
-    #[test]
-    fn parse_interval_zero_disables() {
-        assert_eq!(parse_interval("0"), None);
-    }
-
-    #[test]
-    fn parse_interval_invalid() {
-        assert_eq!(parse_interval("abc"), None);
     }
 
 }

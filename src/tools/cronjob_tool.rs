@@ -9,10 +9,13 @@ use crate::agents::SharedScheduler;
 use crate::scheduling_types::cron_types::{
     DeliveryConfig, DeliveryMode, FailureAlertConfig, RetryConfig, ScheduleKind, ScheduleSpec,
 };
-use crate::scheduling_runtime::scheduler::{
-    self, JobEntry, validate_active_hours, validate_at_timestamp, validate_schedule, validate_tz,
+use crate::scheduling_runtime::{
+    scheduler::{
+        self, JobEntry, validate_active_hours, validate_at_timestamp, validate_schedule,
+        validate_tz,
+    },
+    webhook::is_route_slug,
 };
-use crate::scheduling_runtime::webhook::is_route_slug;
 use crate::providers::{Tool, ToolResult};
 
 pub struct CronJobTool {
