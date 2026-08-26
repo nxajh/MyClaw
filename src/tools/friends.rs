@@ -18,8 +18,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::warn;
 
-use crate::agents::commands::friends::rk_for;
-use crate::agents::commands::register::parse_target;
+use crate::commands::friends::rk_for;
+use crate::commands::register::parse_target;
 use crate::api::tool::ToolContext;
 use crate::agents::{ContactStatus, KnownUsersRegistry, RequestOutcome, UserMail, UserRegistry};
 use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};

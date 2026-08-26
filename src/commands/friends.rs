@@ -15,8 +15,8 @@
 
 use tracing::warn;
 
-use crate::agents::commands::register::parse_target;
-use crate::agents::commands::CommandContext;
+use crate::commands::register::parse_target;
+use crate::commands::CommandContext;
 use crate::agents::{ContactStatus, KnownUsersRegistry, RequestOutcome};
 use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 

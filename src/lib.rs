@@ -16,6 +16,7 @@ pub fn is_shutting_down() -> bool {
 pub mod api;
 pub mod agents;
 pub mod channels;
+pub mod commands;
 pub mod config;
 pub mod daemon;
 pub mod hot_switch;

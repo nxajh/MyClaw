@@ -9,7 +9,7 @@
 //! [`parse_target`] 是好友命令、`/link`、工具层共用的目标解析：把用户输入
 //! （`u/uid`、完整 user.id、或邮箱）解析为内部统一键 user.id（FQID）。
 
-use crate::agents::commands::CommandContext;
+use crate::commands::CommandContext;
 use crate::agents::{RegisterError, UserRegistry};
 
 /// 解析目标参数（`u/uid`、`u/username`、完整 user.id、或邮箱）为完整

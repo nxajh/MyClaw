@@ -264,7 +264,7 @@ impl SendMessageTool {
         let owner = ctx.owner.clone();
         // P3/P4 身份折叠: 发送者经 resolver 归一到 FQID user.id。
         let owner_uid = known_users.resolve_uid(&owner);
-        let peer = match crate::agents::commands::register::parse_target(user_registry, recipient)
+        let peer = match crate::commands::register::parse_target(user_registry, recipient)
         {
             Ok(p) => p,
             Err(e) => {
