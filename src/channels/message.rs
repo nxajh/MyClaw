@@ -2,7 +2,6 @@
 
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 
 // ── Channel capabilities (RFC §6.1) ────────────────────────────────────────────
 
@@ -122,9 +121,9 @@ pub static MINIMAL_CAPABILITIES: ChannelCapabilities = ChannelCapabilities::mini
 // ── L0 contract types (canonical defs in crate::api::message) ────────────────
 
 pub use crate::api::message::{
-    ChannelFile, ChannelFileBody, ChannelFileMeta, ChannelMessageContent, ChannelOutboundMessage,
-    InlineButton, LocalFileBody, MessageId, MessageReceiver, MessageSender, OutboundSendResult,
-    PersistedChannelMessage, SendOptions,
+    CallbackAction, Channel, ChannelFile, ChannelFileBody, ChannelFileMeta, ChannelInboundMessage,
+    ChannelMessageContent, ChannelOutboundMessage, InlineButton, LocalFileBody, MessageId,
+    MessageReceiver, MessageSender, OutboundSendResult, PersistedChannelMessage, SendOptions,
 };
 
 
@@ -138,83 +137,6 @@ pub use crate::api::message::{
 
 
 
-/// A runtime message received from a channel.
-#[derive(Debug, Clone)]
-pub struct ChannelInboundMessage {
-    pub id: String,
-    pub sender: MessageSender,
-    pub receiver: MessageReceiver,
-    pub content: ChannelMessageContent,
-    pub timestamp: u64,
-    pub interruption_scope_id: Option<String>,
-    /// 方案 C (RFC §3.3, race fix 2026-08-10): wake-time silence intent for
-    /// synthesized delegation notices. `Some(true)` = intermediate notice
-    /// (pending tasks remained when the terminal event was collected →
-    /// silenced turn → the model output is delivered as an ordinary
-    /// intermediate message and the turn does NOT end), `Some(false)` = final
-    /// notice (pending empty → loud summary). `None` for real user messages /
-    /// scheduled turns → `process_turn` falls back to the live suspension
-    /// snapshot at turn start. Runtime-only; never persisted (see
-    /// `to_persisted`).
-    pub silenced_override: Option<bool>,
-    /// RFC channel-role-split §1.1: turn-scoped "is there a human user
-    /// present?" marker. `Interactive` (default) for user messages, daemon
-    /// recovery synthetic messages and delegation-wake notices; `Background`
-    /// for cron/webhook synthesized turns (scheduled.rs). Drives
-    /// `Session::turn_headless` + `prompt_config.run_mode` inside
-    /// `process_turn` — NOT a delivery handle (that's the channel registry).
-    /// Runtime-only; never persisted.
-    pub run_mode: crate::config::agent::RunMode,
-}
-
-impl Default for ChannelInboundMessage {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            sender: MessageSender::new(String::new()),
-            receiver: MessageReceiver::new(String::new()),
-            content: ChannelMessageContent::text(String::new()),
-            timestamp: 0,
-            interruption_scope_id: None,
-            silenced_override: None,
-            run_mode: crate::config::agent::RunMode::default(),
-        }
-    }
-}
-
-impl ChannelInboundMessage {
-    /// Convert to the serializable form for session persistence.
-    /// File bodies (runtime-only) are dropped; only text and routing survive.
-    pub fn to_persisted(&self) -> PersistedChannelMessage {
-        PersistedChannelMessage {
-            id: self.id.clone(),
-            sender_id: self.sender.id.clone(),
-            receiver: self.receiver.clone(),
-            text: self.content.text.clone(),
-            timestamp: self.timestamp,
-            interruption_scope_id: self.interruption_scope_id.clone(),
-        }
-    }
-}
-
-impl PersistedChannelMessage {
-    /// Reverse of `to_persisted`: rebuild a runtime message for inbound-spool
-    /// replay (RFC inbound-spool §6.4). File bodies are gone (never spooled);
-    /// `silenced_override` is `None` — replayed messages are ordinary user
-    /// messages, never synthesized delegation notices.
-    pub fn into_runtime(&self) -> ChannelInboundMessage {
-        ChannelInboundMessage {
-            id: self.id.clone(),
-            sender: MessageSender::new(self.sender_id.clone()),
-            receiver: self.receiver.clone(),
-            content: ChannelMessageContent::text(self.text.clone()),
-            timestamp: self.timestamp,
-            interruption_scope_id: self.interruption_scope_id.clone(),
-            silenced_override: None,
-            run_mode: crate::config::agent::RunMode::default(),
-        }
-    }
-}
 
 
 
@@ -223,56 +145,6 @@ impl PersistedChannelMessage {
 
 // ── Callback actions (RFC §11 Phase 5) ─────────────────────────────────────────
 
-/// Structured button callback action.
-///
-/// Replaces the `__retry:{sk_prefix}` / `__abort:{sk_prefix}` string-prefix
-/// convention with a closed enum. `serialize()` produces the wire format
-/// embedded in `InlineButton.callback_data` (kept under Telegram's 64-byte
-/// limit); `parse()` recognises inbound callback strings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CallbackAction {
-    /// User asked to retry the last failed turn.
-    Retry { session_key_prefix: String },
-    /// User asked to abort the pending retry prompt.
-    Abort { session_key_prefix: String },
-    /// Future-extension hook for app-defined callbacks.
-    Custom { tag: String, data: String },
-}
-
-impl CallbackAction {
-    /// Wire format: `__<tag>:<payload>`. Stays compatible with the
-    /// historical `__retry:` / `__abort:` prefixes so messages produced
-    /// by older orchestrator builds still parse.
-    pub fn serialize(&self) -> String {
-        match self {
-            Self::Retry { session_key_prefix } => format!("__retry:{}", session_key_prefix),
-            Self::Abort { session_key_prefix } => format!("__abort:{}", session_key_prefix),
-            Self::Custom { tag, data } => format!("__{}:{}", tag, data),
-        }
-    }
-
-    /// Parse a callback_data / inbound text string into a `CallbackAction`.
-    /// Returns `None` for non-callback text (regular user messages).
-    pub fn parse(s: &str) -> Option<Self> {
-        let rest = s.strip_prefix("__")?;
-        let (tag, data) = rest.split_once(':')?;
-        match tag {
-            "retry" => Some(Self::Retry {
-                session_key_prefix: data.to_string(),
-            }),
-            "abort" => Some(Self::Abort {
-                session_key_prefix: data.to_string(),
-            }),
-            other => Some(Self::Custom {
-                tag: other.to_string(),
-                data: data.to_string(),
-            }),
-        }
-    }
-}
-
-/// Processing status notification from Orchestrator to Channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessingStatus {
     /// LLM call started — the bot is "thinking".
     Thinking,
@@ -298,140 +170,6 @@ pub enum ToolEvent {
     },
 }
 
-/// Marker trait for channel adapters.
-#[async_trait]
-pub trait Channel: crate::api::message::OutboundChannel + Send + Sync {
-    fn name(&self) -> &str;
-
-    /// Send a fully-typed outbound message.
-    async fn send_message(
-        &self,
-        msg: &ChannelOutboundMessage,
-    ) -> anyhow::Result<OutboundSendResult> {
-        if !msg.content.files.is_empty() {
-            anyhow::bail!("send_message with files not supported by {}", self.name());
-        }
-        anyhow::bail!("send_message not implemented by {}", self.name())
-    }
-
-    /// Edit a previously sent message's content.
-    /// Default: not supported — channels that support edit override this.
-    async fn edit_message(
-        &self,
-        _receiver: &MessageReceiver,
-        _message_id: &MessageId,
-        _content: ChannelMessageContent,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("edit_message not supported by {}", self.name())
-    }
-
-    /// Delete a previously sent message.
-    /// Default: not supported — channels that support delete override this.
-    async fn delete_message(
-        &self,
-        _receiver: &MessageReceiver,
-        _message_id: &MessageId,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("delete_message not supported by {}", self.name())
-    }
-
-    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelInboundMessage>>;
-    async fn health_check(&self) -> bool;
-
-    /// Notify the channel about processing status changes.
-    /// Default implementation does nothing — channels can override to show
-    /// status indicators (e.g. reactions).
-    async fn on_status(&self, _recipient: &str, _status: ProcessingStatus) {}
-
-    /// Notify the channel about tool call lifecycle events.
-    /// Default implementation does nothing — channels can override to show
-    /// per-tool progress (e.g. WeChat reply progress).
-    async fn on_tool_event(&self, _recipient: &str, _event: ToolEvent) {}
-
-    /// Declarative capabilities (RFC §6.1). Default points at
-    /// `MINIMAL_CAPABILITIES`; each channel overrides to publish its own
-    /// `&'static ChannelCapabilities`.
-    fn capabilities(&self) -> &ChannelCapabilities {
-        &MINIMAL_CAPABILITIES
-    }
-
-    /// Whether auto-TTS is enabled for this channel instance (per-account
-    /// `tts` config flag, default off). `SessionContext::process_turn`
-    /// consults this together with the global `[agent] auto_tts` master
-    /// switch before synthesizing a reply to voice.
-    fn tts_enabled(&self) -> bool {
-        false
-    }
-
-    /// Measure text length in the unit declared by `capabilities()`.
-    /// Used for chunking and "is this within platform limits" checks.
-    fn message_len(&self, text: &str) -> usize {
-        match self.capabilities().message_len_unit {
-            LenUnit::Codepoints => text.chars().count(),
-            LenUnit::Utf16Units => text.encode_utf16().count(),
-            LenUnit::Bytes => text.len(),
-        }
-    }
-
-    /// Whether this channel supports streaming turn events via the
-    /// `create_stream` mechanism. Default reads from `capabilities()`.
-    fn supports_streaming(&self) -> bool {
-        self.capabilities().supports_streaming
-    }
-
-    /// Create a per-turn streaming output handle.
-    ///
-    /// RFC §7.6 (Phase 1.5): replaces `push_event` + `cancel_signal`.
-    /// `SessionContext::process_turn` installs the returned stream on
-    /// `Session.turn_stream` before invoking `Agent::run`; the agent
-    /// pushes via `session.turn_stream.as_mut()`. Non-streaming channels
-    /// return `None`; the agent then falls through to the
-    /// `send_message` fallback at end of turn.
-    fn create_stream(&self, _reply_target: &str) -> Option<Box<dyn crate::channels::TurnStream>> {
-        None
-    }
-
-    /// 单 preview (2026-08-12): like `create_stream`, but the returned
-    /// stream may TAKE OVER an existing preview message (cross-turn fold for
-    /// async-delegation continuation — the whole suspension flow is one
-    /// evolving message). `fold` carries the platform message id + last
-    /// body; channels without fold support ignore it. Default: plain
-    /// `create_stream`.
-    fn create_stream_folding(
-        &self,
-        reply_target: &str,
-        _fold: Option<crate::channels::FoldCandidate>,
-    ) -> Option<Box<dyn crate::channels::TurnStream>> {
-        let _ = _fold;
-        self.create_stream(reply_target)
-    }
-
-    /// Authorization policy snapshot for this channel (RFC §14).
-    /// Default: open policy — used by Client (connection-level token authn).
-    /// Hot-reload-capable channels read through their internal RwLock and
-    /// return a cloned snapshot.
-    fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
-        crate::channels::ChannelSecurityPolicy::open()
-    }
-
-    /// Decide whether an inbound message is authorized. Channels call this
-    /// in their listen/poll loop before forwarding to the orchestrator.
-    /// Default implementation delegates to `security_policy()`.
-    fn check_authorization(
-        &self,
-        sender: &str,
-        scope: crate::channels::MessageScope<'_>,
-    ) -> crate::channels::AuthDecision {
-        crate::channels::security::evaluate(&self.security_policy(), sender, scope)
-    }
-
-    /// Group statistics for the `/groups` slash command.
-    /// Only group-capable channels (e.g. QQBot) override this.
-    /// Default: empty vec.
-    fn group_stats(&self) -> Vec<crate::channels::GroupStat> {
-        vec![]
-    }
-}
 
 #[async_trait]
 impl<T: ?Sized + Channel> crate::api::message::OutboundChannel for T {

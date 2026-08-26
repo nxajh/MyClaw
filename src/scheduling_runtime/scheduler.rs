@@ -22,7 +22,7 @@ use crate::agents::orchestrator::SchedulerEvent;
 use crate::scheduling_types::cron_types::{
     DeliveryConfig, DeliveryMode, RunRecord, RunStatus, ScheduleKind, ScheduleSpec,
 };
-use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
+use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::config::scheduler::WebhookConfig;
 
 /// Shared handle to the Scheduler for concurrent access.
@@ -3619,7 +3619,7 @@ mod tests {
         let mock = crate::agents::orchestrator::test_support::MockChannel::new();
         let mut octx = crate::agents::orchestrator::test_support::test_ctx(vec![(
             ("wechat".to_string(), "default".to_string()),
-            mock.clone() as Arc<dyn crate::channels::Channel>,
+            mock.clone() as Arc<dyn crate::api::message::Channel>,
         )]);
         octx.scheduler = Some(sched.clone());
         let ctx = WebhookContext {
@@ -3651,7 +3651,7 @@ mod tests {
         let mock = crate::agents::orchestrator::test_support::MockChannel::new();
         let mut octx = crate::agents::orchestrator::test_support::test_ctx(vec![(
             ("wechat".to_string(), "default".to_string()),
-            mock.clone() as Arc<dyn crate::channels::Channel>,
+            mock.clone() as Arc<dyn crate::api::message::Channel>,
         )]);
         octx.scheduler = Some(sched.clone());
         let ctx = WebhookContext {

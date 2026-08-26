@@ -21,7 +21,7 @@ use crate::agents::error::AgentError;
 use crate::agents::loop_breaker::{LoopBreak, LoopBreakReason};
 use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
-use crate::agents::turn_event::TurnEvent;
+use crate::api::turn_event::TurnEvent;
 use crate::identity::user_registry::UserRegistry;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{
@@ -768,7 +768,7 @@ impl Agent {
                 {
                     ch.on_tool_event(
                         rt,
-                        crate::channels::ToolEvent::Start {
+                        crate::channels::message::ToolEvent::Start {
                             tool_name: call.name.clone(),
                             tool_call_id: call.id.clone(),
                         },
@@ -892,7 +892,7 @@ impl Agent {
                 {
                     ch.on_tool_event(
                         rt,
-                        crate::channels::ToolEvent::End {
+                        crate::channels::message::ToolEvent::End {
                             tool_name: call.name.clone(),
                             tool_call_id: call.id.clone(),
                             success: !is_error,
@@ -1481,7 +1481,7 @@ struct CollectedResponse {
 /// `send_message` in `SessionContext::process_turn` then ensures the user
 /// still receives the final text via the non-streaming path.
 async fn push_or_drop(
-    turn_stream: &mut Option<Box<dyn crate::channels::TurnStream>>,
+    turn_stream: &mut Option<Box<dyn crate::api::turn_stream::TurnStream>>,
     event: TurnEvent,
 ) {
     let Some(stream) = turn_stream.as_mut() else {
@@ -1507,7 +1507,7 @@ async fn push_or_drop(
 /// tags surface as `@昵称(u/uid)`. `None` (tests/CLI) → passthrough.
 async fn collect_stream(
     stream: BoxStream<StreamEvent>,
-    turn_stream: &mut Option<Box<dyn crate::channels::TurnStream>>,
+    turn_stream: &mut Option<Box<dyn crate::api::turn_stream::TurnStream>>,
     user_registry: Option<&Arc<UserRegistry>>,
 ) -> anyhow::Result<CollectedResponse> {
     let mut stream = stream;
@@ -1993,11 +1993,11 @@ mod tests {
     #[test]
     fn filter_turn_scoped_tools_hides_send_tools_without_channel() {
         let mut session = Session::new("s".into());
-        session.record_inbound(crate::channels::ChannelInboundMessage {
+        session.record_inbound(crate::api::message::ChannelInboundMessage {
             id: "test".into(),
-            sender: crate::channels::MessageSender::new("u"),
-            receiver: crate::channels::MessageReceiver::new("s"),
-            content: crate::channels::ChannelMessageContent::text("hi"),
+            sender: crate::api::message::MessageSender::new("u"),
+            receiver: crate::api::message::MessageReceiver::new("s"),
+            content: crate::api::message::ChannelMessageContent::text("hi"),
             timestamp: 0,
             interruption_scope_id: None,
             silenced_override: None,
@@ -2282,7 +2282,7 @@ mod tests {
                 reason: crate::providers::StopReason::EndTurn,
             },
         ]);
-        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let mut turn_stream: Option<Box<dyn crate::api::turn_stream::TurnStream>> = None;
         let resp = match collect_stream(s, &mut turn_stream, None).await {
             Ok(r) => r,
             Err(e) => panic!("should succeed without signature: {e}"),
@@ -2309,7 +2309,7 @@ mod tests {
                 reason: crate::providers::StopReason::EndTurn,
             },
         ]);
-        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let mut turn_stream: Option<Box<dyn crate::api::turn_stream::TurnStream>> = None;
         let resp = match collect_stream(s, &mut turn_stream, None).await {
             Ok(r) => r,
             Err(e) => panic!("should succeed: {e}"),
@@ -2330,7 +2330,7 @@ mod tests {
                 reason: crate::providers::StopReason::EndTurn,
             },
         ]);
-        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let mut turn_stream: Option<Box<dyn crate::api::turn_stream::TurnStream>> = None;
         let resp = match collect_stream(s, &mut turn_stream, None).await {
             Ok(r) => r,
             Err(e) => panic!("should succeed: {e}"),
@@ -2357,7 +2357,7 @@ mod tests {
                 reason: crate::providers::StopReason::EndTurn,
             },
         ]);
-        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let mut turn_stream: Option<Box<dyn crate::api::turn_stream::TurnStream>> = None;
         let resp = match collect_stream(s, &mut turn_stream, None).await {
             Ok(r) => r,
             Err(e) => panic!("should succeed: {e}"),
@@ -2378,7 +2378,7 @@ mod tests {
                 reason: crate::providers::StopReason::EndTurn,
             },
         ]);
-        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let mut turn_stream: Option<Box<dyn crate::api::turn_stream::TurnStream>> = None;
         let resp = match collect_stream(s, &mut turn_stream, None).await {
             Ok(r) => r,
             Err(e) => panic!("should succeed: {e}"),
@@ -2396,7 +2396,7 @@ mod tests {
         let s = events_to_stream(vec![StreamEvent::Delta {
             text: "中方".into(),
         }]);
-        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let mut turn_stream: Option<Box<dyn crate::api::turn_stream::TurnStream>> = None;
         assert!(
             collect_stream(s, &mut turn_stream, None).await.is_err(),
             "truncated stream (no completion marker) must error"
@@ -2415,7 +2415,7 @@ mod tests {
             },
             StreamEvent::Error("stream closed before completion".into()),
         ]);
-        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let mut turn_stream: Option<Box<dyn crate::api::turn_stream::TurnStream>> = None;
         assert!(
             collect_stream(s, &mut turn_stream, None).await.is_err(),
             "provider Error must fail the turn"

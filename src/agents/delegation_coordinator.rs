@@ -814,11 +814,11 @@ impl DelegationCoordinator {
             // Synthetic ChannelInboundMessage carries the delegated task. No
             // channel — sub-agent output is returned to the parent's tool call
             // via the TurnResult text.
-            let synthetic = crate::channels::ChannelInboundMessage {
+            let synthetic = crate::api::message::ChannelInboundMessage {
                 id: format!("delegation:{}", sub_session_id),
-                sender: crate::channels::MessageSender::new(format!("agent:{}", config.name)),
-                receiver: crate::channels::MessageReceiver::new(String::new()),
-                content: crate::channels::ChannelMessageContent::text(task.to_string()),
+                sender: crate::api::message::MessageSender::new(format!("agent:{}", config.name)),
+                receiver: crate::api::message::MessageReceiver::new(String::new()),
+                content: crate::api::message::ChannelMessageContent::text(task.to_string()),
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 interruption_scope_id: None,
                 silenced_override: None,

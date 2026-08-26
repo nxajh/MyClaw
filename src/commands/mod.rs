@@ -59,7 +59,7 @@ pub struct CommandContext<'a> {
     /// (framework template push, RFC §4.3; never routed through the LLM).
     pub channels: &'a crate::agents::orchestrator::ChannelRegistry,
     /// The channel that received this command (for `/groups`, etc.).
-    pub channel: Option<&'a Arc<dyn crate::channels::Channel>>,
+    pub channel: Option<&'a Arc<dyn crate::api::message::Channel>>,
 }
 
 /// Parse a slash command from message content.

@@ -23,7 +23,7 @@ use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
 use crate::commands;
 use crate::agents::user_messages::{MSG_ABORT_ACK, MSG_NO_PENDING_RETRY};
-use crate::channels::{
+use crate::api::message::{
     CallbackAction, Channel, ChannelInboundMessage, ChannelMessageContent, ChannelOutboundMessage,
     MessageReceiver,
 };
@@ -1041,7 +1041,7 @@ mod tests {
     fn spool_msg(id: &str, content: &str) -> ChannelInboundMessage {
         ChannelInboundMessage {
             id: id.to_string(),
-            sender: crate::channels::MessageSender::new("user1".to_string()),
+            sender: crate::api::message::MessageSender::new("user1".to_string()),
             receiver: MessageReceiver::new("user1".to_string()),
             content: ChannelMessageContent::text(content.to_string()),
             timestamp: 0,
