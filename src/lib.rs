@@ -26,7 +26,6 @@ pub mod mcp;
 pub mod memory;
 pub mod migration;
 pub mod providers;
-pub mod registry;
 pub mod scheduling_types;
 pub mod scheduling_runtime;
 pub mod signal;
@@ -60,4 +59,4 @@ pub use providers::{
     ToolResult,
     XiaomiProvider, // Xiaomi MiMo provider
 };
-pub use registry::Registry;
+pub use providers::Registry;

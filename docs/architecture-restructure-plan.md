@@ -332,6 +332,8 @@ fi
 3. **删除 registry/ 顶层模块**
 4. **验收**：`verify-layering.sh` L2 合规；模块数 -1
 
+> **实施记录（Phase 4 = 本 PR）**：git mv 整目录零内容改动（routing.rs 0 行变更，mod.rs 仅 1 行 `use self::routing::` 前缀修正）。registry 依赖面即"providers facade"实证：15 处 `crate::providers::*` use + 函数体多处全限定（capability/provider_registry/fallback/media 等），加 `crate::config::provider/routing`（L2→L1 合法）——迁入 providers 后全部同层或合法向下。消费方仅 3 文件 9 处直接改路径（不留 crate::registry shim，消费面小且全部同仓）：lib.rs（`pub mod registry` 删除、`pub use providers::Registry` 保持 `myclaw::Registry` 对外不变）、daemon.rs build_registry ×2、agents/media_e2e_test.rs ×4。providers/mod.rs 加 `pub mod registry` + `pub use registry::Registry`。验收：`grep crate::registry src/` 归零；顶层模块 24→23（−1 达标）；verify-layering.sh 唯一违规仍为 L3 tools 39 行存量（与 #165/#166 基线一致，无新增）。
+
 **冲突窗口**：无。
 
 ### Phase 5：storage 编排域迁出（1 PR）

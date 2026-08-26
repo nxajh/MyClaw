@@ -183,7 +183,7 @@ fn print_banner(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Build the Registry and register all providers from config.
-fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::registry::Registry> {
+fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::providers::registry::Registry> {
     use crate::providers::{
         BuildChatProviderRequest, BuildEmbeddingProviderRequest, BuildImageProviderRequest,
         BuildSearchProviderRequest, BuildSttProviderRequest, BuildTtsProviderRequest,
@@ -194,7 +194,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 
     let factory = ProviderFactory::new();
     let mut registry =
-        crate::registry::Registry::from_config(config.providers.clone(), &config.routing)
+        crate::providers::registry::Registry::from_config(config.providers.clone(), &config.routing)
             .context("failed to build registry")?;
 
     for (provider_key, provider_cfg) in &config.providers {

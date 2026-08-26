@@ -3,6 +3,7 @@
 // ── Capability traits (defs live here, impls below) ───────────────────────────
 
 pub mod tokens; // Token estimation over ChatMessage (moved from agents, #151 Phase 3d)
+pub mod registry; // Registry facade over providers (moved from top level, #151 Phase 4)
 pub mod capability; // Capability, Modality, model configs
 pub mod capability_chat; // ChatProvider, ChatMessage, StreamEvent, etc.
 pub mod capability_embedding; // EmbeddingProvider, EmbedRequest, etc.
@@ -36,6 +37,7 @@ pub use error_class::{
 };
 pub use image::{ImageFormat, ImageGenerationProvider, ImageOutput, ImageRequest, ImageResponse};
 pub use provider_registry::{ProviderRegistry, ProviderSummary, SearchFallbackEntry};
+pub use registry::Registry;
 pub use search::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 pub use stt::{SttProvider, SttRequest, SttSegment, TranscriptionResponse};
 pub use tts::{TtsFormat, TtsProvider, TtsRequest, TtsVoice};
