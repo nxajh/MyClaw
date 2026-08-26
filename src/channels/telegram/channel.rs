@@ -133,7 +133,7 @@ pub struct TelegramChannel {
     tts: bool,
     /// Targets with active streams; stall watchdog skips these to avoid
     /// redundant "still thinking" messages alongside the live preview.
-    streaming_targets: Arc<Mutex<std::collections::HashSet<String>>>,
+    pub(crate) streaming_targets: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Directory for persisting state (e.g. Telegram update offset).
     base_dir: std::path::PathBuf,
     /// Shared HTTP client with connection pool.
@@ -687,7 +687,7 @@ impl TelegramChannel {
     }
 
     /// Send a message using rich_message format (markdown rendering), no reply_markup.
-    async fn send_rich_message_simple(
+    pub(crate) async fn send_rich_message_simple(
         &self,
         chat_id: &str,
         markdown: &str,
@@ -754,7 +754,7 @@ impl TelegramChannel {
     }
 
     /// Edit a message using rich_message format (markdown rendering).
-    async fn edit_message_rich(
+    pub(crate) async fn edit_message_rich(
         &self,
         chat_id: i64,
         message_id: i64,
