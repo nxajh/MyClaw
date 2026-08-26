@@ -1090,7 +1090,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         && std::fs::read_dir(&jobs_root).map(|mut rd| rd.next().is_none()).unwrap_or(true)
     {
         let (dummy_tx, _) = tokio::sync::mpsc::channel(1);
-        let migrator = crate::agents::scheduling::scheduler::Scheduler::new(
+        let migrator = crate::scheduling_runtime::scheduler::Scheduler::new(
             jobs_root.clone(),
             &config.system.namespace,
             tz_name.clone(),
@@ -1107,7 +1107,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     // Idle-time memory distillation config (None disables the distill tick).
     let distill_config = if config.memory.distill_enabled {
-        Some(crate::agents::scheduling::scheduler::DistillConfig {
+        Some(crate::scheduling_runtime::scheduler::DistillConfig {
             idle_secs: config.memory.distill_idle_secs,
             interval_secs: config.memory.distill_interval_secs,
         })
@@ -1115,7 +1115,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         None
     };
 
-    let shared_scheduler = crate::agents::scheduling::scheduler::Scheduler::new(
+    let shared_scheduler = crate::scheduling_runtime::scheduler::Scheduler::new(
         jobs_root,
         &config.system.namespace,
         tz_name.clone(),
