@@ -28,7 +28,7 @@ use crate::providers::capability::{ChatModelConfig, Modality};
 use crate::providers::capability_chat::{
     BoxStream, ChatMessage, ChatProvider, ChatRequest, ContentPart, StopReason, StreamEvent,
 };
-use crate::registry::Registry;
+use crate::providers::registry::Registry;
 
 /// A `ChatProvider` that records the messages it receives on each call and
 /// replays a scripted sequence of `StreamEvent`s per call (FIFO).
@@ -150,8 +150,8 @@ fn runtime_with(providers: Arc<dyn ProviderRegistry>) -> AgentRuntime {
 }
 
 /// Registry routing (used by `get_chat_routing_models` / vision lookup).
-fn registry_routing(models: &[&str]) -> crate::registry::routing::RoutingConfig {
-    use crate::registry::routing::{RouteEntry, RoutingConfig, RoutingStrategy};
+fn registry_routing(models: &[&str]) -> crate::providers::registry::routing::RoutingConfig {
+    use crate::providers::registry::routing::{RouteEntry, RoutingConfig, RoutingStrategy};
     RoutingConfig {
         chat: Some(RouteEntry {
             strategy: RoutingStrategy::Fallback,

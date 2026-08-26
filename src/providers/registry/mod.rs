@@ -19,7 +19,7 @@ use crate::providers::stt::SttProvider;
 use crate::providers::tts::TtsProvider;
 use crate::providers::video::VideoGenerationProvider;
 
-use crate::registry::routing::{RouteEntry, RoutingConfig, RoutingStrategy};
+use self::routing::{RouteEntry, RoutingConfig, RoutingStrategy};
 
 // ── Config types ────────────────────────────────────────────────────────────────
 
