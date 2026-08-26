@@ -3,8 +3,10 @@
 set -u
 violations=0
 
-# L0 契约层：零外部 crate 引用（api 内部互引豁免）
-l0=$(grep -rn "use crate::" src/api/ 2>/dev/null | grep -v "crate::api::" || true)
+# L0 契约层：零外部 crate 引用（api 内部互引豁免）。
+# #151 Phase 3c 起匹配文件内任意位置的 crate:: 路径（含函数体内全限定引用），
+# 不再只看 use 行——3b 曾从该盲区漏掉 11 处 api→channels 全限定引用。
+l0=$(grep -rn "crate::" src/api/ 2>/dev/null | grep -v "crate::api::" || true)
 if [ -n "$l0" ]; then
   echo "❌ L0 api 层违规引用："; echo "$l0"; violations=$((violations + 1))
 fi

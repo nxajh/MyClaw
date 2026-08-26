@@ -31,19 +31,8 @@ pub struct CredentialEntry {
 }
 
 /// Strategy for selecting the next credential from the pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RotationStrategy {
-    /// Use the first key until exhausted, then move to next.
-    #[default]
-    FillFirst,
-    /// Round-robin across all keys.
-    RoundRobin,
-    /// Random selection among active keys.
-    Random,
-    /// Pick the key with the lowest use_count.
-    LeastUsed,
-}
+/// (Canonical definition: `crate::api::capability::RotationStrategy`, moved in #151 Phase 3c.)
+pub use crate::api::capability::RotationStrategy;
 
 /// Multi-credential pool with rotation and cooldown management.
 pub struct CredentialPool {

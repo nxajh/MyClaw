@@ -865,7 +865,7 @@ impl ConfigLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::Capability;
+    use crate::api::capability::Capability;
 
     #[test]
     fn parse_minimal_config() {

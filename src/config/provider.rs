@@ -7,11 +7,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-// Re-export new types from the canonical source.
-pub use crate::providers::RotationStrategy;
-pub use crate::providers::capability::{
+// Re-export new types from the canonical source (L0 api, moved in #151 Phase 3c).
+pub use crate::api::capability::{
     BasicModelConfig, BasicPricing, Capability, ChatModelConfig, ChatPricing, EmbeddingModelConfig,
-    EmbeddingPricing, Modality,
+    EmbeddingPricing, Modality, RotationStrategy,
 };
 
 // ── Protocol ──────────────────────────────────────────────────────────────────
