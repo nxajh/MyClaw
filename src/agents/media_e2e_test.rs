@@ -128,7 +128,7 @@ fn runtime_with(providers: Arc<dyn ProviderRegistry>) -> AgentRuntime {
         String::new(),
         0,
     );
-    let context_engine = Arc::new(crate::agents::context_engine::ContextEngine::new(
+    let context_engine = Arc::new(crate::agents::compaction_engine::CompactionEngine::new(
         &crate::config::agent::ContextConfig::default(),
         Arc::clone(&providers),
         resources,

@@ -367,6 +367,8 @@ fi
 2. **更新引用路径**
 3. **验收**：`grep -r "ContextEngine" src/` 输出空；CI 全绿
 
+> **实施记录（Phase 7 = 本 PR）**：git mv + 全仓双口径改名（14 文件 +28/−28，rename 99%）。类型 `ContextEngine` → `CompactionEngine`（13 文件 26 处）；模块路径 `agents::context_engine` → `agents::compaction_engine`（use 行+全限定，含 cli 的 `myclaw::agents::` 外部口径 2 处）；memory_fork.rs 死注释模块前缀同步。**保留项（有意不改）**：TOML 配置键 `[context_engine]` 及 config 字段 `context_engine: ContextConfig`（外部契约——改键会破坏存量 myclaw.toml，方案未要求）；`AgentRuntime.context_engine` 字段名及 daemon/cli 局部变量（小写、非验收对象，字段类型已随类型改名更新为 `Arc<CompactionEngine>`）。验收：`grep ContextEngine src/` 空；layering 仍仅 L3 39 行存量。
+
 **冲突窗口**：无。
 
 ### Phase 8：巨文件拆分（多 PR，按优先级）

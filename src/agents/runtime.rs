@@ -14,7 +14,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::agents::AgentRegistry;
-use crate::agents::context_engine::ContextEngine;
+use crate::agents::compaction_engine::CompactionEngine;
 use crate::agents::loop_breaker::LoopBreaker;
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::prompt::SystemPromptConfig;
@@ -70,7 +70,7 @@ pub struct AgentRuntime {
     /// same live table.
     pub agents: Arc<AgentRegistry>,
     /// Compaction policy + summarizer. Shared singleton.
-    pub context_engine: Arc<ContextEngine>,
+    pub context_engine: Arc<CompactionEngine>,
     /// Tool executor (timeout + dispatch). Shared singleton.
     pub tool_executor: Arc<ToolExecutor>,
     /// Loop-breaker policy. Hands out per-turn `LoopBreakerCounter`s
@@ -115,7 +115,7 @@ impl AgentRuntime {
         tools: Arc<ToolRegistry>,
         skills: Arc<RwLock<SkillManager>>,
         agents: Arc<AgentRegistry>,
-        context_engine: Arc<ContextEngine>,
+        context_engine: Arc<CompactionEngine>,
         tool_executor: Arc<ToolExecutor>,
         loop_breaker: Arc<LoopBreaker>,
     ) -> Self {

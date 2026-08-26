@@ -1,7 +1,7 @@
 //! Token estimation + tracking utilities.
 //!
 //! Extracted from `agent_impl::types` so that the types Session and
-//! ContextEngine depend on (TokenTracker, estimate_*, is_write_tool)
+//! CompactionEngine depend on (TokenTracker, estimate_*, is_write_tool)
 //! survive the H45 deletion of `agent_impl`.
 
 use crate::providers::media::{

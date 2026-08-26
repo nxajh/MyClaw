@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use parking_lot::RwLock;
 
 use super::ctx::{ChannelRegistry, OrchestratorCtx, TurnTracker};
-use crate::agents::context_engine::ContextEngine;
+use crate::agents::compaction_engine::CompactionEngine;
 use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::session::SessionManager;
 use crate::agents::tool_executor::ToolExecutor;
@@ -106,7 +106,7 @@ fn test_runtime() -> AgentRuntime {
         String::new(),
         0,
     );
-    let context_engine = Arc::new(ContextEngine::new(
+    let context_engine = Arc::new(CompactionEngine::new(
         &crate::config::agent::ContextConfig::default(),
         Arc::clone(&providers),
         resources,

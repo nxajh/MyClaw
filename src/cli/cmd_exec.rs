@@ -75,7 +75,7 @@ pub async fn run(
             String::new(),
             0,
         );
-        let context_engine = Arc::new(myclaw::agents::context_engine::ContextEngine::new(
+        let context_engine = Arc::new(myclaw::agents::compaction_engine::CompactionEngine::new(
             &Default::default(),
             Arc::clone(&registry_arc),
             resources,

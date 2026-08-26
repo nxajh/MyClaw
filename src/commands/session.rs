@@ -37,7 +37,7 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
     };
     // /compact runs an unconditional compaction. We mirror Agent.run's
     // compaction trigger but skip the should_compact gate. The
-    // ContextEngine is constructed per-call here (matches Agent.run's
+    // CompactionEngine is constructed per-call here (matches Agent.run's
     // per-turn pattern). /compact mutates history so we need exclusive
     // access — if a turn is in flight, surface a busy message instead
     // of waiting through the LLM call.
