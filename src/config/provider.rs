@@ -7,11 +7,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-// Re-export new types from the canonical source.
-pub use crate::providers::RotationStrategy;
-pub use crate::providers::capability::{
+// Re-export new types from the canonical source (L0 api, moved in #151 Phase 3c).
+pub use crate::api::capability::{
     BasicModelConfig, BasicPricing, Capability, ChatModelConfig, ChatPricing, EmbeddingModelConfig,
-    EmbeddingPricing, Modality,
+    EmbeddingPricing, Modality, RotationStrategy,
 };
 
 // ── Protocol ──────────────────────────────────────────────────────────────────
@@ -47,11 +46,11 @@ pub enum AuthStyle {
     XApiKey,
 }
 
-impl From<AuthStyle> for crate::providers::AuthStyle {
+impl From<AuthStyle> for crate::api::capability::AuthStyle {
     fn from(style: AuthStyle) -> Self {
         match style {
-            AuthStyle::Bearer => crate::providers::AuthStyle::Bearer,
-            AuthStyle::XApiKey => crate::providers::AuthStyle::XApiKey,
+            AuthStyle::Bearer => crate::api::capability::AuthStyle::Bearer,
+            AuthStyle::XApiKey => crate::api::capability::AuthStyle::XApiKey,
         }
     }
 }

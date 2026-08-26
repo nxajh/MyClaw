@@ -865,7 +865,7 @@ impl ConfigLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::Capability;
+    use crate::api::capability::Capability;
 
     #[test]
     fn parse_minimal_config() {
@@ -1000,7 +1000,7 @@ level = "INFO"
         // Routing
         let chat_route = config
             .routing
-            .get(crate::providers::Capability::Chat)
+            .get(Capability::Chat)
             .unwrap();
         assert_eq!(chat_route.models, vec!["gpt-4o"]);
 

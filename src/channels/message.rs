@@ -3,127 +3,13 @@
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
-// ── Channel capabilities (RFC §6.1) ────────────────────────────────────────────
-
-/// Unit used by the platform to measure message length.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LenUnit {
-    /// Unicode code points (Rust `chars().count()`).
-    Codepoints,
-    /// UTF-16 code units (Telegram's measure — emoji counts as 2).
-    Utf16Units,
-    /// Raw UTF-8 bytes.
-    Bytes,
-}
-
-/// Declarative capabilities of a Channel implementation.
-///
-/// Per RFC §6.1: const-fn constructors let each channel publish a
-/// `&'static ChannelCapabilities`. `MINIMAL_CAPABILITIES` is the default
-/// for implementations that don't override `Channel::capabilities()`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChannelCapabilities {
-    pub supports_streaming: bool,
-    pub supports_edit: bool,
-    pub supports_delete: bool,
-    pub supports_inline_buttons: bool,
-    pub supports_file_send: bool,
-    pub supports_file_receive: bool,
-    pub supports_threads: bool,
-    /// Maximum length of a single message; messages longer than this must be split.
-    pub message_chunk_limit: usize,
-    pub message_len_unit: LenUnit,
-}
-
-impl ChannelCapabilities {
-    /// Conservative defaults — no streaming/edit/delete/media/buttons; treat
-    /// length as codepoints with a generous 64 KiB cap so non-overriding
-    /// channels don't trip the splitter unnecessarily.
-    pub const fn minimal() -> Self {
-        Self {
-            supports_streaming: false,
-            supports_edit: false,
-            supports_delete: false,
-            supports_inline_buttons: false,
-            supports_file_send: false,
-            supports_file_receive: false,
-            supports_threads: false,
-            message_chunk_limit: 65_536,
-            message_len_unit: LenUnit::Codepoints,
-        }
-    }
-
-    /// ClientChannel (WebSocket WebUI/TUI): full streaming, plenty of slack.
-    pub const fn client() -> Self {
-        Self {
-            supports_streaming: true,
-            supports_edit: false,
-            supports_delete: false,
-            supports_inline_buttons: true,
-            supports_file_send: true,
-            supports_file_receive: true,
-            supports_threads: false,
-            message_chunk_limit: 65_536,
-            message_len_unit: LenUnit::Codepoints,
-        }
-    }
-
-    /// Telegram bot: 32 768 codepoints (rich messages), edit/delete/buttons/media.
-    pub const fn telegram() -> Self {
-        Self {
-            supports_streaming: true,
-            supports_edit: true,
-            supports_delete: true,
-            supports_inline_buttons: true,
-            supports_file_send: true,
-            supports_file_receive: true,
-            supports_threads: true,
-            message_chunk_limit: 32768,
-            message_len_unit: LenUnit::Codepoints,
-        }
-    }
-
-    /// QQBot: 2000 codepoints, inline buttons via Keyboard.
-    pub const fn qqbot() -> Self {
-        Self {
-            supports_streaming: false,
-            supports_edit: false,
-            supports_delete: false,
-            supports_inline_buttons: true,
-            supports_file_send: true,
-            supports_file_receive: true,
-            supports_threads: false,
-            message_chunk_limit: 2000,
-            message_len_unit: LenUnit::Codepoints,
-        }
-    }
-
-    /// Wechat: 2048 codepoints, minimal feature set.
-    pub const fn wechat() -> Self {
-        Self {
-            supports_streaming: false,
-            supports_edit: false,
-            supports_delete: false,
-            supports_inline_buttons: false,
-            supports_file_send: true,
-            supports_file_receive: true,
-            supports_threads: false,
-            message_chunk_limit: 2048,
-            message_len_unit: LenUnit::Codepoints,
-        }
-    }
-}
-
-/// Static default returned by `Channel::capabilities()` when an
-/// implementation doesn't override it. Zero-cost reference.
-pub static MINIMAL_CAPABILITIES: ChannelCapabilities = ChannelCapabilities::minimal();
-
-// ── L0 contract types (canonical defs in crate::api::message) ────────────────
+// ── L0 contract types (canonical defs in crate::api) ─────────────────────────
 
 pub use crate::api::message::{
-    CallbackAction, Channel, ChannelFile, ChannelFileBody, ChannelFileMeta, ChannelInboundMessage,
-    ChannelMessageContent, ChannelOutboundMessage, InlineButton, LocalFileBody, MessageId,
-    MessageReceiver, MessageSender, OutboundSendResult, PersistedChannelMessage, SendOptions,
+    CallbackAction, Channel, ChannelCapabilities, ChannelFile, ChannelFileBody, ChannelFileMeta,
+    ChannelInboundMessage, ChannelMessageContent, ChannelOutboundMessage, GroupStat, InlineButton,
+    LenUnit, LocalFileBody, MessageId, MessageReceiver, MessageSender, MINIMAL_CAPABILITIES,
+    OutboundSendResult, PersistedChannelMessage, ProcessingStatus, SendOptions, ToolEvent,
 };
 
 
@@ -144,32 +30,7 @@ pub use crate::api::message::{
 
 
 // ── Callback actions (RFC §11 Phase 5) ─────────────────────────────────────────
-
-pub enum ProcessingStatus {
-    /// LLM call started — the bot is "thinking".
-    Thinking,
-    /// Response sent successfully (status cleanup already handled in send()).
-    Done,
-    /// An error occurred during processing.
-    Error,
-}
-
-/// Tool lifecycle event for channels that show per-tool progress.
-#[derive(Debug, Clone)]
-pub enum ToolEvent {
-    /// A tool call is about to start.
-    Start {
-        tool_name: String,
-        tool_call_id: String,
-    },
-    /// A tool call finished (success or failure).
-    End {
-        tool_name: String,
-        tool_call_id: String,
-        success: bool,
-    },
-}
-
+// ProcessingStatus / ToolEvent moved to crate::api::message (#151 Phase 3c).
 
 #[async_trait]
 impl<T: ?Sized + Channel> crate::api::message::OutboundChannel for T {
@@ -184,14 +45,7 @@ impl<T: ?Sized + Channel> crate::api::message::OutboundChannel for T {
     }
 }
 
-/// Per-group statistics surfaced by the `/groups` command.
-#[derive(Debug, Clone)]
-pub struct GroupStat {
-    pub group_id: String,
-    pub name: Option<String>,
-    pub buffered_messages: usize,
-    pub history_limit: usize,
-}
+// GroupStat moved to crate::api::message (#151 Phase 3c).
 
 /// Dedup state for a channel adapter (in-memory).
 ///

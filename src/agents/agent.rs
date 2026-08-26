@@ -768,7 +768,7 @@ impl Agent {
                 {
                     ch.on_tool_event(
                         rt,
-                        crate::channels::message::ToolEvent::Start {
+                        crate::api::message::ToolEvent::Start {
                             tool_name: call.name.clone(),
                             tool_call_id: call.id.clone(),
                         },
@@ -892,7 +892,7 @@ impl Agent {
                 {
                     ch.on_tool_event(
                         rt,
-                        crate::channels::message::ToolEvent::End {
+                        crate::api::message::ToolEvent::End {
                             tool_name: call.name.clone(),
                             tool_call_id: call.id.clone(),
                             success: !is_error,

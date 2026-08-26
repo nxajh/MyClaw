@@ -370,18 +370,18 @@ pub trait Channel: crate::api::message::OutboundChannel + Send + Sync {
     /// Notify the channel about processing status changes.
     /// Default implementation does nothing — channels can override to show
     /// status indicators (e.g. reactions).
-    async fn on_status(&self, _recipient: &str, _status: crate::channels::message::ProcessingStatus) {}
+    async fn on_status(&self, _recipient: &str, _status: ProcessingStatus) {}
 
     /// Notify the channel about tool call lifecycle events.
     /// Default implementation does nothing — channels can override to show
     /// per-tool progress (e.g. WeChat reply progress).
-    async fn on_tool_event(&self, _recipient: &str, _event: crate::channels::message::ToolEvent) {}
+    async fn on_tool_event(&self, _recipient: &str, _event: ToolEvent) {}
 
     /// Declarative capabilities (RFC §6.1). Default points at
     /// `MINIMAL_CAPABILITIES`; each channel overrides to publish its own
     /// `&'static ChannelCapabilities`.
-    fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities {
-        &crate::channels::message::MINIMAL_CAPABILITIES
+    fn capabilities(&self) -> &ChannelCapabilities {
+        &MINIMAL_CAPABILITIES
     }
 
     /// Whether auto-TTS is enabled for this channel instance (per-account
@@ -396,9 +396,9 @@ pub trait Channel: crate::api::message::OutboundChannel + Send + Sync {
     /// Used for chunking and "is this within platform limits" checks.
     fn message_len(&self, text: &str) -> usize {
         match self.capabilities().message_len_unit {
-            crate::channels::message::LenUnit::Codepoints => text.chars().count(),
-            crate::channels::message::LenUnit::Utf16Units => text.encode_utf16().count(),
-            crate::channels::message::LenUnit::Bytes => text.len(),
+            LenUnit::Codepoints => text.chars().count(),
+            LenUnit::Utf16Units => text.encode_utf16().count(),
+            LenUnit::Bytes => text.len(),
         }
     }
 
@@ -449,15 +449,15 @@ pub trait Channel: crate::api::message::OutboundChannel + Send + Sync {
     fn check_authorization(
         &self,
         sender: &str,
-        scope: crate::channels::MessageScope<'_>,
-    ) -> crate::channels::AuthDecision {
-        crate::channels::security::evaluate(&self.security_policy(), sender, scope)
+        scope: crate::api::security::MessageScope<'_>,
+    ) -> crate::api::security::AuthDecision {
+        crate::api::security::evaluate(&self.security_policy(), sender, scope)
     }
 
     /// Group statistics for the `/groups` slash command.
     /// Only group-capable channels (e.g. QQBot) override this.
     /// Default: empty vec.
-    fn group_stats(&self) -> Vec<crate::channels::GroupStat> {
+    fn group_stats(&self) -> Vec<GroupStat> {
         vec![]
     }
 }
@@ -510,4 +510,156 @@ impl CallbackAction {
             }),
         }
     }
+}
+
+// ── Channel capabilities (moved from channels/message.rs, #151 Phase 3c; RFC §6.1) ──
+
+/// Unit used by the platform to measure message length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LenUnit {
+    /// Unicode code points (Rust `chars().count()`).
+    Codepoints,
+    /// UTF-16 code units (Telegram's measure — emoji counts as 2).
+    Utf16Units,
+    /// Raw UTF-8 bytes.
+    Bytes,
+}
+
+/// Declarative capabilities of a Channel implementation.
+///
+/// Per RFC §6.1: const-fn constructors let each channel publish a
+/// `&'static ChannelCapabilities`. `MINIMAL_CAPABILITIES` is the default
+/// for implementations that don't override `Channel::capabilities()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelCapabilities {
+    pub supports_streaming: bool,
+    pub supports_edit: bool,
+    pub supports_delete: bool,
+    pub supports_inline_buttons: bool,
+    pub supports_file_send: bool,
+    pub supports_file_receive: bool,
+    pub supports_threads: bool,
+    /// Maximum length of a single message; messages longer than this must be split.
+    pub message_chunk_limit: usize,
+    pub message_len_unit: LenUnit,
+}
+
+impl ChannelCapabilities {
+    /// Conservative defaults — no streaming/edit/delete/media/buttons; treat
+    /// length as codepoints with a generous 64 KiB cap so non-overriding
+    /// channels don't trip the splitter unnecessarily.
+    pub const fn minimal() -> Self {
+        Self {
+            supports_streaming: false,
+            supports_edit: false,
+            supports_delete: false,
+            supports_inline_buttons: false,
+            supports_file_send: false,
+            supports_file_receive: false,
+            supports_threads: false,
+            message_chunk_limit: 65_536,
+            message_len_unit: LenUnit::Codepoints,
+        }
+    }
+
+    /// ClientChannel (WebSocket WebUI/TUI): full streaming, plenty of slack.
+    pub const fn client() -> Self {
+        Self {
+            supports_streaming: true,
+            supports_edit: false,
+            supports_delete: false,
+            supports_inline_buttons: true,
+            supports_file_send: true,
+            supports_file_receive: true,
+            supports_threads: false,
+            message_chunk_limit: 65_536,
+            message_len_unit: LenUnit::Codepoints,
+        }
+    }
+
+    /// Telegram bot: 32 768 codepoints (rich messages), edit/delete/buttons/media.
+    pub const fn telegram() -> Self {
+        Self {
+            supports_streaming: true,
+            supports_edit: true,
+            supports_delete: true,
+            supports_inline_buttons: true,
+            supports_file_send: true,
+            supports_file_receive: true,
+            supports_threads: true,
+            message_chunk_limit: 32768,
+            message_len_unit: LenUnit::Codepoints,
+        }
+    }
+
+    /// QQBot: 2000 codepoints, inline buttons via Keyboard.
+    pub const fn qqbot() -> Self {
+        Self {
+            supports_streaming: false,
+            supports_edit: false,
+            supports_delete: false,
+            supports_inline_buttons: true,
+            supports_file_send: true,
+            supports_file_receive: true,
+            supports_threads: false,
+            message_chunk_limit: 2000,
+            message_len_unit: LenUnit::Codepoints,
+        }
+    }
+
+    /// Wechat: 2048 codepoints, minimal feature set.
+    pub const fn wechat() -> Self {
+        Self {
+            supports_streaming: false,
+            supports_edit: false,
+            supports_delete: false,
+            supports_inline_buttons: false,
+            supports_file_send: true,
+            supports_file_receive: true,
+            supports_threads: false,
+            message_chunk_limit: 2048,
+            message_len_unit: LenUnit::Codepoints,
+        }
+    }
+}
+
+/// Static default returned by `Channel::capabilities()` when an
+/// implementation doesn't override it. Zero-cost reference.
+pub static MINIMAL_CAPABILITIES: ChannelCapabilities = ChannelCapabilities::minimal();
+
+// ── Callback / stats types (moved from channels/message.rs, #151 Phase 3c) ──
+
+/// RFC §11 Phase 5 callback action.
+pub enum ProcessingStatus {
+    /// LLM call started — the bot is "thinking".
+    Thinking,
+    /// Response sent successfully (status cleanup already handled in send()).
+    Done,
+    /// An error occurred during processing.
+    Error,
+}
+
+/// Tool lifecycle event for channels that show per-tool progress.
+#[derive(Debug, Clone)]
+pub enum ToolEvent {
+    /// A tool call is about to start.
+    Start {
+        tool_name: String,
+        tool_call_id: String,
+    },
+    /// A tool call finished (success or failure).
+    End {
+        tool_name: String,
+        tool_call_id: String,
+        success: bool,
+    },
+}
+
+/// Per-group statistics surfaced by the `/groups` command.
+#[derive(Debug, Clone)]
+pub struct GroupStat {
+    pub group_id: String,
+    pub name: Option<String>,
+    pub buffered_messages: usize,
+    pub history_limit: usize,
 }
