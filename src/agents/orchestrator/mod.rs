@@ -23,7 +23,7 @@ pub mod turn;
 
 pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;
-pub(crate) use scheduled::{run_cron_task, run_distill_task, run_scheduled_turn};
+pub(crate) use scheduled::{run_cron_task, run_distill_task};
 
 use crate::agents::DelegationCoordinator;
 use crate::agents::delegation::DelegationEvent;
