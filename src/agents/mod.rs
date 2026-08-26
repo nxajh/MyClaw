@@ -6,7 +6,7 @@ pub mod ask_router;
 pub mod attachment;
 pub mod compaction_engine;
 mod delegation;
-mod delegation_coordinator;
+pub mod delegation_coordinator;
 pub mod delegator;
 pub mod error;
 pub mod llm_stream;
