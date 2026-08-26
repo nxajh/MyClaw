@@ -35,6 +35,7 @@ pub mod str_utils;
 pub mod sys_info;
 pub mod tools;
 pub mod update_state;
+pub mod webui;
 
 #[cfg(feature = "tui")]
 pub mod tui;
