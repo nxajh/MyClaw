@@ -2562,7 +2562,7 @@ fn extract_event_type(event_header: Option<&str>, payload: &serde_json::Value) -
 /// Evaluate a single webhook filter condition against the payload.
 /// AND semantics across the filter list; `not` negates the match.
 fn filter_matches(
-    f: &crate::agents::scheduling::scheduler::WebhookFilter,
+    f: &crate::scheduling_runtime::scheduler::WebhookFilter,
     payload: &serde_json::Value,
 ) -> bool {
     let mut cur = payload;

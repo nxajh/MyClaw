@@ -20,7 +20,7 @@ pub mod memory_distill;
 pub mod memory_fork;
 pub mod skill_draft_reminder;
 pub mod skill_extract;
-mod orchestrator;
+pub(crate) mod orchestrator;
 mod prompt;
 pub mod recovery;
 pub mod resource_provider;
@@ -33,11 +33,6 @@ mod tool_registry;
 pub mod turn;
 pub mod turn_event;
 mod user_messages;
-
-/// Scheduling: cron jobs, webhooks, scheduler loop.
-pub mod scheduling;
-pub use scheduling::cron_loader;
-pub use scheduling::work_unit;
 
 /// Workspace: agent/skill loading, skill execution, file watching.
 pub mod workspace;
@@ -73,7 +68,7 @@ pub use prompt::{PermissionMode, RunMode, SystemPromptBuilder, SystemPromptConfi
 pub use recovery::UnfinishedSubAgent;
 pub use runtime::AgentRuntime;
 pub use crate::scheduling_types::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
-pub use scheduling::scheduler::{
+pub use crate::scheduling_runtime::scheduler::{
     JobEntry, JobUpdate, Scheduler, SharedScheduler, WebhookContext, is_active_hours, resolve_tz,
     run_webhook_server, scan_prompt_injection, send_to_target,
 };

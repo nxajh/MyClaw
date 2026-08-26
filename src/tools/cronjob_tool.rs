@@ -9,7 +9,7 @@ use crate::agents::SharedScheduler;
 use crate::scheduling_types::cron_types::{
     DeliveryConfig, DeliveryMode, FailureAlertConfig, RetryConfig, ScheduleKind, ScheduleSpec,
 };
-use crate::agents::scheduling::scheduler::{
+use crate::scheduling_runtime::scheduler::{
     self, JobEntry, validate_active_hours, validate_at_timestamp, validate_schedule, validate_tz,
 };
 use crate::providers::{Tool, ToolResult};
@@ -1266,7 +1266,7 @@ mod webhook_parse_tests {
 #[cfg(test)]
 mod update_echo_tests {
     use super::*;
-    use crate::agents::scheduling::scheduler::Scheduler;
+    use crate::scheduling_runtime::scheduler::Scheduler;
 
     fn test_tool(dir: &std::path::Path) -> CronJobTool {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
@@ -1436,7 +1436,7 @@ mod update_echo_tests {
 #[cfg(test)]
 mod unknown_job_listing_tests {
     use super::*;
-    use crate::agents::scheduling::scheduler::Scheduler;
+    use crate::scheduling_runtime::scheduler::Scheduler;
 
     fn test_tool(dir: &std::path::Path) -> CronJobTool {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);

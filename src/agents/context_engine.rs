@@ -13,7 +13,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 
 use crate::agents::resource_provider::ResourceProvider;
-use crate::agents::scheduling::work_unit;
+use crate::scheduling_runtime::work_unit;
 use crate::agents::session::Session;
 use crate::agents::tokens::{
     estimate_history_tokens_with_media, estimate_message_tokens, estimate_tokens,
