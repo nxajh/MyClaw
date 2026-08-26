@@ -200,10 +200,10 @@ impl RateLimiter {
 // ── Deliver debouncer ─────────────────────────────────────────────────────────
 
 /// A pending debounced delivery for one recipient.
-struct PendingDeliver {
-    texts: Vec<String>,
-    msg_id: String,
-    waiters: Vec<
+pub(crate) struct PendingDeliver {
+    pub(crate) texts: Vec<String>,
+    pub(crate) msg_id: String,
+    pub(crate) waiters: Vec<
         tokio::sync::oneshot::Sender<anyhow::Result<crate::channels::OutboundSendResult>>,
     >,
 }
@@ -215,8 +215,8 @@ struct PendingDeliver {
 /// recipient within an idle window drives a flush task; subsequent sends within
 /// the window append to the buffer and await the shared flush result.
 pub(crate) struct DeliverDebouncer {
-    window_ms: u64,
-    separator: String,
+    pub(crate) window_ms: u64,
+    pub(crate) separator: String,
     pending: parking_lot::Mutex<std::collections::HashMap<String, PendingDeliver>>,
 }
 
