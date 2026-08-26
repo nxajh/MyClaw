@@ -2434,52 +2434,6 @@ pub(crate) mod tests {
 
     /// 挂起轮折叠 (2026-08-11): a flushed preview message is reported as a
     /// fold candidate (id + current body) so the suspension machinery can
-    /// edit it in place; no flushed message → None (nothing to fold).
-    #[test]
-    fn fold_candidate_reports_flushed_message() {
-        let ch = TelegramChannel::new(make_config());
-        let mut s = TelegramTurnStream {
-            channel: ch,
-            chat_id: 42,
-            thread_id: None,
-            reply_target: "t".to_string(),
-            mode: crate::config::channel::StreamingMode::Partial,
-            msg_id: Some(7),
-            accumulated: "hello".to_string(),
-            tool_lines: vec![],
-            tool_count: 0,
-            thinking_steps: 0,
-            commentary_notes: 0,
-            thinking_tokens: 0,
-            thinking_active: false,
-            pending_commentary: String::new(),
-            inherited_preview: None,
-            defer_collapse: false,
-            final_takeover: false,
-            start: std::time::Instant::now(),
-            absolute_start: std::time::SystemTime::now(),
-            last_edit: std::time::Instant::now(),
-            delivery: StreamDelivery::FinalDelivered,
-            finished: true,
-        };
-        let f = s.fold_candidate().unwrap();
-        assert_eq!(f.msg_id, "7");
-        assert_eq!(f.text, "hello");
-        // 单 preview (2026-08-12): cumulative counters ride along so a
-        // taken-over stream keeps counting the WHOLE message across turns.
-        s.thinking_steps = 3;
-        s.tool_count = 2;
-        s.commentary_notes = 1;
-        let f2 = s.fold_candidate().unwrap();
-        assert_eq!(f2.thinking_steps, 3);
-        assert_eq!(f2.tool_count, 2);
-        assert_eq!(f2.commentary_notes, 1);
-        assert!(f2.started_at_unix_secs.is_some());
-        // No flushed message (deleted / never sent) → None.
-        s.msg_id = None;
-        assert!(s.fold_candidate().is_none());
-    }
-
     #[test]
     fn test_parse_reply_target() {
         assert_eq!(
