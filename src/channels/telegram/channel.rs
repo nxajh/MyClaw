@@ -10,12 +10,11 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::api::turn_event::TurnEvent;
 use crate::channels::message::{
     ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
     MessageReceiver, MessageSender,
 };
-use crate::channels::{FoldCandidate, StreamDelivery, TurnStream};
+use crate::channels::{FoldCandidate, TurnStream};
 use crate::config::channel::TelegramAccountConfig;
 use crate::{Channel, DedupState, ProcessingStatus};
 

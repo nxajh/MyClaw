@@ -21,4 +21,3 @@ pub mod turn_stream;
 pub mod types;
 
 pub use channel::TelegramChannel;
-pub(crate) use turn_stream::TelegramTurnStream;

@@ -27,14 +27,6 @@ const STREAM_PREVIEW_LIMIT: usize = 4000;
 
 // ── Telegram streaming preview (edit-on-stream) ───────────────────────────────
 
-/// Escape HTML special characters for Telegram parse_mode=HTML.
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 /// Clip detail text to max 300 chars (matching OpenClaw's clipTelegramProgressText).
 fn clip_detail(s: &str) -> String {
     const MAX: usize = 300;
