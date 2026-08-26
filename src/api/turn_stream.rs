@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::agents::TurnEvent;
+use crate::api::turn_event::TurnEvent;
 
 /// Delivery state for an event pushed to a TurnStream.
 ///

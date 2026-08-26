@@ -374,7 +374,7 @@ pub trait PersistHook: Send + Sync {
     fn save_session_override(&self, session_id: &str, override_json: &str);
     /// Persist the last incoming message context (sender / receiver /
     /// text) so startup recovery can replay routing.
-    fn save_last_message(&self, session_id: &str, msg: &crate::channels::PersistedChannelMessage);
+    fn save_last_message(&self, session_id: &str, msg: &crate::api::message::PersistedChannelMessage);
     /// 方案 C (RFC §5): persist the turn-suspension state to
     /// `sessions/<sid>/suspension.json`; empty `json` deletes the file.
     /// Default no-op (sessions without a persist hook).
@@ -463,7 +463,7 @@ impl PersistHook for BackendPersistHook {
         }
     }
 
-    fn save_last_message(&self, session_id: &str, msg: &crate::channels::PersistedChannelMessage) {
+    fn save_last_message(&self, session_id: &str, msg: &crate::api::message::PersistedChannelMessage) {
         if let Err(e) = self.backend.save_last_message(session_id, msg) {
             tracing::warn!(session = %session_id, err = %e, "save last message failed");
         }

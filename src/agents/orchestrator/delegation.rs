@@ -22,7 +22,7 @@ use super::key::SessionKey;
 use crate::agents::session_context::TerminalRecord;
 use crate::agents::turn::SubStatus;
 use crate::agents::{DelegationEvent, DelegationNotice, MessageKind, SessionContext};
-use crate::channels::ChannelInboundMessage;
+use crate::api::message::ChannelInboundMessage;
 
 /// 方案 C (§3.3, 2026-08-10): appended to every resume-turn notice while
 /// the session still has pending delegations — that turn's output is
@@ -533,9 +533,9 @@ pub(super) async fn route_notice(
             // matches the old no-bump path.
             let synthetic = ChannelInboundMessage {
                 id: synthetic_id,
-                sender: crate::channels::MessageSender::new(key.sender.clone()),
+                sender: crate::api::message::MessageSender::new(key.sender.clone()),
                 receiver: notice_receiver(session.last_message.as_ref(), &key.sender),
-                content: crate::channels::ChannelMessageContent::text(content),
+                content: crate::api::message::ChannelMessageContent::text(content),
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 interruption_scope_id: None,
                 silenced_override,
@@ -689,10 +689,10 @@ fn split_batch_ids(batch: &[DelegationNotice]) -> (String, Vec<String>) {
 /// would be silently dropped. The empty-receiver filter also self-heals
 /// sessions already polluted by the pre-#144 `record_inbound` overwrite.
 pub(super) fn notice_receiver(
-    last_message: Option<&crate::channels::PersistedChannelMessage>,
+    last_message: Option<&crate::api::message::PersistedChannelMessage>,
     sender: &str,
-) -> crate::channels::MessageReceiver {
-    crate::channels::MessageReceiver::new(
+) -> crate::api::message::MessageReceiver {
+    crate::api::message::MessageReceiver::new(
         last_message
             .map(|m| m.receiver.id.clone())
             .filter(|id| !id.is_empty())
@@ -744,9 +744,9 @@ async fn dispatch_notice_batch(
 
     let synthetic = ChannelInboundMessage {
         id: batch_id,
-        sender: crate::channels::MessageSender::new(key.sender.clone()),
+        sender: crate::api::message::MessageSender::new(key.sender.clone()),
         receiver: notice_receiver(session.last_message.as_ref(), &key.sender),
-        content: crate::channels::ChannelMessageContent::text(combined_content),
+        content: crate::api::message::ChannelMessageContent::text(combined_content),
         timestamp: chrono::Utc::now().timestamp() as u64,
         interruption_scope_id: None,
         silenced_override,
@@ -827,9 +827,9 @@ pub(super) async fn process_non_active(
         let _guard = turn_tracker.track();
         let synthetic = ChannelInboundMessage {
             id: notice_id.unwrap_or_else(|| format!("delegation:{}", uuid::Uuid::new_v4())),
-            sender: crate::channels::MessageSender::new("system".to_string()),
+            sender: crate::api::message::MessageSender::new("system".to_string()),
             receiver,
-            content: crate::channels::ChannelMessageContent::text(content_owned),
+            content: crate::api::message::ChannelMessageContent::text(content_owned),
             timestamp: chrono::Utc::now().timestamp() as u64,
             interruption_scope_id: None,
             silenced_override,
@@ -892,10 +892,10 @@ mod tests {
 
     #[test]
     fn notice_receiver_self_heals_empty_receiver_pollution() {
-        let polluted = crate::channels::PersistedChannelMessage {
+        let polluted = crate::api::message::PersistedChannelMessage {
             id: "m1".to_string(),
             sender_id: "u1".to_string(),
-            receiver: crate::channels::MessageReceiver::new(String::new()),
+            receiver: crate::api::message::MessageReceiver::new(String::new()),
             text: "x".to_string(),
             timestamp: 0,
             interruption_scope_id: None,
@@ -908,10 +908,10 @@ mod tests {
 
     #[test]
     fn notice_receiver_preserves_healthy_last_message_receiver() {
-        let healthy = crate::channels::PersistedChannelMessage {
+        let healthy = crate::api::message::PersistedChannelMessage {
             id: "m1".to_string(),
             sender_id: "u1".to_string(),
-            receiver: crate::channels::MessageReceiver::new("chat-42".to_string()),
+            receiver: crate::api::message::MessageReceiver::new("chat-42".to_string()),
             text: "x".to_string(),
             timestamp: 0,
             interruption_scope_id: None,
@@ -951,7 +951,7 @@ mod tests {
         let store = Arc::new(
             crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
         );
-        let channel: Arc<dyn crate::channels::Channel> = MockChannel::new();
+        let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
         let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
         ctx.completion_queue = Some(Arc::clone(&store));
         let sctx = suspended_session(&ctx);
@@ -996,7 +996,7 @@ mod tests {
         let store = Arc::new(
             crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
         );
-        let channel: Arc<dyn crate::channels::Channel> = MockChannel::new();
+        let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
         let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
         ctx.completion_queue = Some(Arc::clone(&store));
         let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
@@ -1034,7 +1034,7 @@ mod tests {
         let store = Arc::new(
             crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
         );
-        let channel: Arc<dyn crate::channels::Channel> = MockChannel::new();
+        let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
         let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
         ctx.completion_queue = Some(Arc::clone(&store));
         let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
@@ -1074,7 +1074,7 @@ mod tests {
         let store = Arc::new(
             crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
         );
-        let channel: Arc<dyn crate::channels::Channel> = MockChannel::new();
+        let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
         let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
         ctx.completion_queue = Some(Arc::clone(&store));
         let sctx = ctx.sessions.get_or_create_context("mock:default:u1");

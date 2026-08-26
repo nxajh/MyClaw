@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use crate::agents::session::{PersistHook, Session};
 use crate::agents::turn::{PreviewState, SubResult, SubStatus, TurnResult, TurnSuspension};
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
-use crate::channels::{Channel, ChannelInboundMessage};
+use crate::api::message::{Channel, ChannelInboundMessage};
 
 /// 方案 C (RFC §3.3, race fix 2026-08-10): decide whether a turn is silenced.
 ///
@@ -539,7 +539,7 @@ impl SessionContext {
     /// write the preview message id + current body into the suspension; the
     /// next delegation-notice turn folds it (edit-in-place append, 保留历史
     /// 行追加). No-op when the session is not suspended.
-    pub fn set_preview(&self, reply_target: String, fold: crate::channels::FoldCandidate) {
+    pub fn set_preview(&self, reply_target: String, fold: crate::api::turn_stream::FoldCandidate) {
         {
             let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(s) = guard.as_mut() {
@@ -720,7 +720,7 @@ impl SessionContext {
         let fold = if silenced_intent.is_some() {
             self.suspension_snapshot()
                 .and_then(|s| s.preview)
-                .map(|p| crate::channels::FoldCandidate {
+                .map(|p| crate::api::turn_stream::FoldCandidate {
                     msg_id: p.msg_id,
                     text: p.text,
                     // 单 preview (2026-08-12): cumulative counters + wall-clock
@@ -850,7 +850,7 @@ impl SessionContext {
                 if let Some(ch) = channel_for_send {
                     let receiver = {
                         let mut r =
-                            crate::channels::MessageReceiver::new(reply_target.clone());
+                            crate::api::message::MessageReceiver::new(reply_target.clone());
                         if let Some(ref last_msg) = session.last_message {
                             r.reply_to_message_id = Some(
                                 last_msg
@@ -863,9 +863,9 @@ impl SessionContext {
                         }
                         r
                     };
-                    let message = crate::channels::ChannelOutboundMessage {
+                    let message = crate::api::message::ChannelOutboundMessage {
                         receiver,
-                        content: crate::channels::ChannelMessageContent::text(msg.clone()),
+                        content: crate::api::message::ChannelMessageContent::text(msg.clone()),
                         options: Default::default(),
                     };
                     let _ = ch.send_message(&message).await;
@@ -1056,7 +1056,7 @@ impl SessionContext {
                 let fold = stream.as_ref().and_then(|s| s.fold_candidate());
                 let delivery = match stream {
                     Some(s) => s.finish().await,
-                    None => crate::channels::StreamDelivery::Pending,
+                    None => crate::api::turn_stream::StreamDelivery::Pending,
                 };
                 let suspended_turn = silenced || turn_result.has_pending;
                 if suspended_turn {
@@ -1064,14 +1064,14 @@ impl SessionContext {
                         self.set_preview(reply_target.clone(), f);
                     }
                 }
-                if delivery != crate::channels::StreamDelivery::FinalDelivered
-                    && (delivery == crate::channels::StreamDelivery::Pending || !suspended_turn)
+                if delivery != crate::api::turn_stream::StreamDelivery::FinalDelivered
+                    && (delivery == crate::api::turn_stream::StreamDelivery::Pending || !suspended_turn)
                 {
                     if let Some(ref ch) = channel_for_send {
                         if !turn_result.text.trim().is_empty() {
                             let receiver = {
                                 let mut r =
-                                    crate::channels::MessageReceiver::new(reply_target.clone());
+                                    crate::api::message::MessageReceiver::new(reply_target.clone());
                                 if let Some(ref last_msg) = session.last_message {
                                     r.reply_to_message_id = Some(
                                         last_msg
@@ -1084,9 +1084,9 @@ impl SessionContext {
                                 }
                                 r
                             };
-                            let message = crate::channels::ChannelOutboundMessage {
+                            let message = crate::api::message::ChannelOutboundMessage {
                                 receiver,
-                                content: crate::channels::ChannelMessageContent::text(
+                                content: crate::api::message::ChannelMessageContent::text(
                                     turn_result.text.clone(),
                                 ),
                                 options: Default::default(),
@@ -1139,7 +1139,7 @@ impl SessionContext {
                                             .is_ok()
                                         {
                                             let receiver = {
-                                                let mut r = crate::channels::MessageReceiver::new(
+                                                let mut r = crate::api::message::MessageReceiver::new(
                                                     reply_target.clone(),
                                                 );
                                                 if let Some(ref last_msg) = session.last_message {
@@ -1155,8 +1155,8 @@ impl SessionContext {
                                                 }
                                                 r
                                             };
-                                            let voice_file = crate::channels::ChannelFile {
-                                                meta: crate::channels::ChannelFileMeta {
+                                            let voice_file = crate::api::message::ChannelFile {
+                                                meta: crate::api::message::ChannelFileMeta {
                                                     file_name: format!(
                                                         "voice-{}.mp3",
                                                         uuid::Uuid::new_v4()
@@ -1170,15 +1170,15 @@ impl SessionContext {
                                                     source_url: None,
                                                 },
                                                 body: std::sync::Arc::new(
-                                                    crate::channels::LocalFileBody::new(
+                                                    crate::api::message::LocalFileBody::new(
                                                         temp_path.to_string_lossy().to_string(),
                                                     ),
                                                 ),
                                             };
                                             let message =
-                                                crate::channels::ChannelOutboundMessage {
+                                                crate::api::message::ChannelOutboundMessage {
                                                     receiver,
-                                                    content: crate::channels::ChannelMessageContent {
+                                                    content: crate::api::message::ChannelMessageContent {
                                                         text: String::new(),
                                                         files: vec![voice_file],
                                                         buttons: vec![],

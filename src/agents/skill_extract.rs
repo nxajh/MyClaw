@@ -18,7 +18,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 
 use crate::agents::tool_registry::ToolRegistry;
-use crate::channels::{Channel, ChannelOutboundMessage};
+use crate::api::message::{Channel, ChannelOutboundMessage};
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ToolSpec};
 use crate::providers::capability_tool::ToolResult;
 use crate::providers::{BoxStream, ChatUsage, StreamEvent, ToolCall};
@@ -488,7 +488,7 @@ mod tests {
     use std::sync::Mutex;
 
     struct MockChannel {
-        sent: Mutex<Vec<crate::channels::ChannelOutboundMessage>>,
+        sent: Mutex<Vec<crate::api::message::ChannelOutboundMessage>>,
     }
 
     #[async_trait::async_trait]
@@ -499,13 +499,13 @@ mod tests {
         async fn send_message(
             &self,
             msg: &ChannelOutboundMessage,
-        ) -> anyhow::Result<crate::channels::OutboundSendResult> {
+        ) -> anyhow::Result<crate::api::message::OutboundSendResult> {
             self.sent.lock().unwrap().push(msg.clone());
-            Ok(crate::channels::OutboundSendResult::empty())
+            Ok(crate::api::message::OutboundSendResult::empty())
         }
         async fn listen(
             &self,
-        ) -> anyhow::Result<tokio::sync::mpsc::Receiver<crate::channels::ChannelInboundMessage>>
+        ) -> anyhow::Result<tokio::sync::mpsc::Receiver<crate::api::message::ChannelInboundMessage>>
         {
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
             Ok(rx)

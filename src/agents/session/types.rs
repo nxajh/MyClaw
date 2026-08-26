@@ -7,7 +7,8 @@ use super::session_override::SessionOverride;
 use crate::agents::attachment::AttachmentManager;
 use crate::agents::delegation::SubAgentMailbox;
 use crate::agents::tokens::TokenTracker;
-use crate::channels::{Channel, ChannelInboundMessage, PersistedChannelMessage, TurnStream};
+use crate::api::message::{Channel, ChannelInboundMessage, PersistedChannelMessage};
+use crate::api::turn_stream::TurnStream;
 use crate::providers::capability_chat::ChatMessage;
 
 /// Summary metadata stored in Session memory (no text parsing needed).
@@ -695,7 +696,7 @@ mod deadline_tests {
 #[cfg(test)]
 mod record_inbound_tests {
     use super::*;
-    use crate::channels::{ChannelInboundMessage, ChannelMessageContent, MessageReceiver, MessageSender};
+    use crate::api::message::{ChannelInboundMessage, ChannelMessageContent, MessageReceiver, MessageSender};
 
     fn inbound(receiver_id: &str) -> ChannelInboundMessage {
         ChannelInboundMessage {

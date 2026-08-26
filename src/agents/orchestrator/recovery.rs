@@ -22,7 +22,7 @@ use crate::agents::{
     AgentRuntime, DelegationCoordinator, DelegationEvent, DelegationNotice, SessionContext,
     UnfinishedSubAgent,
 };
-use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
+use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 
 /// Where a recovered sub-agent turn's output goes.
 enum CompletionSink {
@@ -1381,7 +1381,7 @@ mod tests {
         recover_active_session(
             Arc::clone(&ctx),
             key,
-            crate::channels::MessageReceiver::new("u1"),
+            crate::api::message::MessageReceiver::new("u1"),
         )
         .await;
 

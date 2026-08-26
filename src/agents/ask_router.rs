@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
-use crate::channels::ChannelInboundMessage;
+use crate::api::message::ChannelInboundMessage;
 
 /// One pending ask: a generation tag (to disambiguate replacements) + the
 /// oneshot sender that wakes the waiting `ask_user`.
@@ -127,9 +127,9 @@ mod tests {
     fn msg(content: &str) -> ChannelInboundMessage {
         ChannelInboundMessage {
             id: "test".into(),
-            sender: crate::channels::MessageSender::new("s"),
-            receiver: crate::channels::MessageReceiver::new("rt"),
-            content: crate::channels::ChannelMessageContent::text(content),
+            sender: crate::api::message::MessageSender::new("s"),
+            receiver: crate::api::message::MessageReceiver::new("rt"),
+            content: crate::api::message::ChannelMessageContent::text(content),
             timestamp: 0,
             interruption_scope_id: None,
             silenced_override: None,

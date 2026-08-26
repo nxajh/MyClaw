@@ -27,7 +27,7 @@ pub(crate) use scheduled::{run_cron_task, run_distill_task, run_scheduled_turn};
 
 use crate::agents::DelegationCoordinator;
 use crate::agents::delegation::DelegationEvent;
-use crate::channels::{Channel, ChannelInboundMessage};
+use crate::api::message::{Channel, ChannelInboundMessage};
 use crate::storage::InboundSpool;
 use anyhow::Context;
 use std::sync::Arc;

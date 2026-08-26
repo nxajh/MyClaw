@@ -30,7 +30,6 @@ pub mod tokens;
 pub mod tool_executor;
 mod tool_registry;
 pub mod turn;
-pub mod turn_event;
 mod user_messages;
 
 /// Workspace: agent/skill loading, skill execution, file watching.
@@ -77,9 +76,7 @@ pub use session::{detect_incomplete_turn, identify_breakpoint};
 pub use session_context::{DelegationNotice, SessionContext};
 pub use tool_registry::ToolRegistry;
 pub use turn::{SubResult, SubStatus, TurnContext, TurnResult, TurnSuspension};
-pub use turn_event::{
-    RunSummary, TokenUsage, TtsSummary, TurnEvent, VersionedEvent,
-};
+pub use crate::api::turn_event::{RunSummary, TokenUsage, TtsSummary, TurnEvent, VersionedEvent};
 pub use crate::identity::user_profile::{UserProfile, UserResolver};
 pub use crate::identity::user_registry::{
     RegisterError, User, UserRegistry, DEFAULT_NAMESPACE, validate_email, validate_username,

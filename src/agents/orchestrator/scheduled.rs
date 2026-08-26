@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use super::OrchestratorCtx;
-use crate::channels::ChannelInboundMessage;
+use crate::api::message::ChannelInboundMessage;
 
 /// Run a scheduled turn for `session_key` with `prompt`, forcing Background
 /// run_mode on the synthetic message and applying an optional per-call model
@@ -50,9 +50,9 @@ pub(crate) async fn run_scheduled_turn(
     // the autonomous section for THIS turn only).
     let inbound = ChannelInboundMessage {
         id: format!("scheduled:{}", session_key),
-        sender: crate::channels::MessageSender::new(format!("scheduler:{}", session_key)),
-        receiver: crate::channels::MessageReceiver::new(String::new()),
-        content: crate::channels::ChannelMessageContent::text(prompt.to_string()),
+        sender: crate::api::message::MessageSender::new(format!("scheduler:{}", session_key)),
+        receiver: crate::api::message::MessageReceiver::new(String::new()),
+        content: crate::api::message::ChannelMessageContent::text(prompt.to_string()),
         timestamp: chrono::Utc::now().timestamp() as u64,
         interruption_scope_id: None,
         silenced_override: None,
@@ -252,13 +252,13 @@ async fn send_to_target_internal(
         }
     };
 
-    let mut receiver = crate::channels::MessageReceiver::new(recipient);
+    let mut receiver = crate::api::message::MessageReceiver::new(recipient);
     if let Some(thread) = target_thread {
         receiver = receiver.with_thread(thread);
     }
-    let message = crate::channels::ChannelOutboundMessage {
+    let message = crate::api::message::ChannelOutboundMessage {
         receiver,
-        content: crate::channels::ChannelMessageContent::text(content.to_string()),
+        content: crate::api::message::ChannelMessageContent::text(content.to_string()),
         options: Default::default(),
     };
     if let Err(e) = channel.send_message(&message).await {

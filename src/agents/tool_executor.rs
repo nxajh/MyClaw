@@ -5,7 +5,7 @@ use super::ask_router::AskRouter;
 use super::session::Session;
 use super::tokens::is_write_tool;
 use super::tool_registry::ToolRegistry;
-use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, InlineButton, MessageReceiver};
+use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, InlineButton, MessageReceiver};
 use crate::config::agent::PermissionMode;
 use crate::providers::ToolCall;
 use crate::providers::capability_tool::ToolResult;
@@ -27,7 +27,7 @@ const WATCHDOG_HEADROOM_SECS: u64 = 30;
 /// filtered through the agent's `tools` / `skills` / `mcp` filters.
 /// No `ToolRegistry` field; the executor is stateless w.r.t. which
 /// tools an agent may call.
-struct OutboundChannelWrapper(Arc<dyn crate::channels::Channel>);
+struct OutboundChannelWrapper(Arc<dyn crate::api::message::Channel>);
 
 #[async_trait::async_trait]
 impl crate::api::message::OutboundChannel for OutboundChannelWrapper {

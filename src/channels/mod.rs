@@ -5,7 +5,6 @@ pub mod message;
 pub mod qqbot;
 pub mod security;
 pub mod telegram;
-pub mod turn_stream;
 #[cfg(feature = "wechat")]
 pub mod wechat;
 
@@ -23,6 +22,6 @@ pub use security::{
     warn_if_locked_down,
 };
 pub use telegram::TelegramChannel;
-pub use turn_stream::{FoldCandidate, StreamDelivery, TurnStream};
+pub use crate::api::turn_stream::{FoldCandidate, StreamDelivery, TurnStream};
 #[cfg(feature = "wechat")]
 pub use wechat::WechatChannel;

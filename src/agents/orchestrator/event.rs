@@ -18,7 +18,7 @@ pub enum OrchestratorEvent {
     Inbound {
         channel_type: String,
         account_id: String,
-        message: crate::channels::ChannelInboundMessage,
+        message: crate::api::message::ChannelInboundMessage,
         /// Inbound-spool sequence; 0 = not spooled (spool disabled, attachment
         /// message, or append failure degraded delivery). Non-zero entries are
         /// marked `Done` after dispatch returns.
@@ -47,7 +47,7 @@ pub enum OrchestratorEvent {
     /// routing_key, so cross-channel ask_user works for sub-agents).
     AskReply {
         session_id: String,
-        reply: crate::channels::ChannelInboundMessage,
+        reply: crate::api::message::ChannelInboundMessage,
     },
 
     /// Graceful shutdown signal — main loop should drain and exit.

@@ -17,7 +17,7 @@ use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::session::SessionManager;
 use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::{AgentRegistry, AgentRuntime, AskRouter, LoopBreaker, LoopBreakerConfig};
-use crate::channels::{Channel, ChannelInboundMessage, ChannelOutboundMessage, OutboundSendResult};
+use crate::api::message::{Channel, ChannelInboundMessage, ChannelOutboundMessage, OutboundSendResult};
 use crate::providers::{
     Capability, ChatModelConfig, ChatProvider, EmbeddingProvider, ImageGenerationProvider,
     ProviderRegistry, ProviderSummary, SearchFallbackEntry, SearchProvider, SttProvider,
@@ -152,9 +152,9 @@ pub(crate) fn test_ctx(channels: Vec<((String, String), Arc<dyn Channel>)>) -> O
 pub(crate) fn inbound_msg(sender: &str, content: &str) -> ChannelInboundMessage {
     ChannelInboundMessage {
         id: "test-msg".to_string(),
-        sender: crate::channels::MessageSender::new(sender.to_string()),
-        receiver: crate::channels::MessageReceiver::new(sender.to_string()),
-        content: crate::channels::ChannelMessageContent::text(content.to_string()),
+        sender: crate::api::message::MessageSender::new(sender.to_string()),
+        receiver: crate::api::message::MessageReceiver::new(sender.to_string()),
+        content: crate::api::message::ChannelMessageContent::text(content.to_string()),
         timestamp: 0,
         interruption_scope_id: None,
         silenced_override: None,
