@@ -26,6 +26,7 @@ pub mod memory;
 pub mod migration;
 pub mod providers;
 pub mod registry;
+pub mod scheduling_types;
 pub mod signal;
 pub mod storage;
 pub mod str_utils;

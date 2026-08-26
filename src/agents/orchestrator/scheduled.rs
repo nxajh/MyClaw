@@ -108,8 +108,8 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
 
     // Build run record and mark result in scheduler.
     let record = match &result {
-        Ok(response) => crate::agents::scheduling::cron_types::RunRecord::now(
-            crate::agents::scheduling::cron_types::RunStatus::Ok,
+        Ok(response) => crate::scheduling_types::cron_types::RunRecord::now(
+            crate::scheduling_types::cron_types::RunStatus::Ok,
         )
         .with_duration(duration_ms)
         .with_output_preview(response)
@@ -117,8 +117,8 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
         Err(e) => {
             let err_str = e.to_string();
             tracing::warn!(session_key = %effective_session_key, err = %err_str, "cron job failed");
-            crate::agents::scheduling::cron_types::RunRecord::now(
-                crate::agents::scheduling::cron_types::RunStatus::Error,
+            crate::scheduling_types::cron_types::RunRecord::now(
+                crate::scheduling_types::cron_types::RunStatus::Error,
             )
             .with_duration(duration_ms)
             .with_error(err_str)

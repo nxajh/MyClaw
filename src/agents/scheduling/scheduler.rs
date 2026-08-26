@@ -19,7 +19,7 @@ use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::agents::orchestrator::SchedulerEvent;
-use crate::agents::scheduling::cron_types::{
+use crate::scheduling_types::cron_types::{
     DeliveryConfig, DeliveryMode, RunRecord, RunStatus, ScheduleKind, ScheduleSpec,
 };
 use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
@@ -86,10 +86,10 @@ pub struct JobEntry {
     // ── New fields ──────────────────────────────────────────────────────────
     /// Per-job retry policy for transient errors.
     #[serde(default)]
-    pub retry: Option<crate::agents::scheduling::cron_types::RetryConfig>,
+    pub retry: Option<crate::scheduling_types::cron_types::RetryConfig>,
     /// Per-job failure alert configuration.
     #[serde(default)]
-    pub failure_alert: Option<crate::agents::scheduling::cron_types::FailureAlertConfig>,
+    pub failure_alert: Option<crate::scheduling_types::cron_types::FailureAlertConfig>,
     /// Consecutive error count (reset on success).
     #[serde(default)]
     pub consecutive_errors: u32,
@@ -207,8 +207,8 @@ pub struct JobUpdate {
     pub delivery: Option<DeliveryConfig>,
     pub enabled_tools: Option<Vec<String>>,
     pub disabled_tools: Option<Vec<String>>,
-    pub retry: Option<crate::agents::scheduling::cron_types::RetryConfig>,
-    pub failure_alert: Option<crate::agents::scheduling::cron_types::FailureAlertConfig>,
+    pub retry: Option<crate::scheduling_types::cron_types::RetryConfig>,
+    pub failure_alert: Option<crate::scheduling_types::cron_types::FailureAlertConfig>,
     pub max_runs: Option<Option<u32>>,
     pub delete_after_run: Option<bool>,
     pub model: Option<Option<String>>,

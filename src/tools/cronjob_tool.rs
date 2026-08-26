@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 
 use crate::agents::SharedScheduler;
-use crate::agents::scheduling::cron_types::{
+use crate::scheduling_types::cron_types::{
     DeliveryConfig, DeliveryMode, FailureAlertConfig, RetryConfig, ScheduleKind, ScheduleSpec,
 };
 use crate::agents::scheduling::scheduler::{
@@ -940,7 +940,7 @@ fn format_unknown_job_listing(mut jobs: Vec<JobEntry>) -> String {
     )
 }
 
-fn format_run_record(i: usize, run: &crate::agents::scheduling::cron_types::RunRecord) -> String {
+fn format_run_record(i: usize, run: &crate::scheduling_types::cron_types::RunRecord) -> String {
     let error_info = if let Some(ref e) = run.error {
         format!(" — {}", e)
     } else {
