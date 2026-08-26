@@ -34,7 +34,6 @@ pub(crate) use scheduled::{run_cron_task, run_distill_task};
 use crate::agents::DelegationCoordinator;
 use crate::agents::delegation::DelegationEvent;
 use crate::api::message::{Channel, ChannelInboundMessage};
-use crate::agents::orchestrator::InboundSpool;
 use anyhow::Context;
 use std::sync::Arc;
 use std::time::Duration;
