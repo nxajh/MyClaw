@@ -25,6 +25,8 @@ use crate::scheduling_types::event::SchedulerEvent;
 use crate::api::message::{Channel, ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::config::scheduler::WebhookConfig;
 
+use super::webhook::{WebhookJobDef, is_route_slug};
+
 /// Shared handle to the Scheduler for concurrent access.
 pub type SharedScheduler = Arc<Scheduler>;
 
@@ -951,7 +953,51 @@ impl Scheduler {
     pub fn record_webhook_run(&self, job_id: &str, record: RunRecord) {
         self.append_run_log_inner(job_id, &record);
     }
-
+    // ── Webhook projection on Scheduler (#151 Phase 8a: moved back from
+    // webhook.rs — an inherent impl in another module cannot touch the
+    // private `jobs` field; reachable as `scheduler.webhook_jobs()` unchanged)
+    // ─────────────────────────────────────────────────────────────────────
+    pub fn webhook_jobs(&self) -> Vec<WebhookJobDef> {
+        let mut out: Vec<WebhookJobDef> = Vec::new();
+        let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for j in self.jobs.read().jobs.iter() {
+            let Some(wh) = j.webhook.as_ref() else { continue };
+            let route = match j.name.as_deref() {
+                Some(n) if !n.is_empty() => n.to_string(),
+                _ => {
+                    tracing::warn!(job_id = %j.id, "webhook job without a name: no route");
+                    continue;
+                }
+            };
+            if route == "agent" || route == "wake" {
+                continue;
+            }
+            if !is_route_slug(&route) {
+                tracing::warn!(job_id = %j.id, route = %route, "webhook route name is not a URL-safe slug [a-z0-9-]: skipped");
+                continue;
+            }
+            if !seen_routes.insert(route.clone()) {
+                tracing::warn!(route = %route, "duplicate webhook route (job names must be unique): keeping first");
+                continue;
+            }
+            if wh.secret.is_empty() {
+                tracing::warn!(job_id = %j.id, route = %route, "webhook job without a secret: rejected at load (design §3.4.1)");
+                continue;
+            }
+            out.push(WebhookJobDef {
+                id: j.id.clone(),
+                route,
+                secret: wh.secret.clone(),
+                auth: wh.auth_kind(),
+                delivery: j.delivery.clone(),
+                prompt_template: j.prompt.clone(),
+                events: wh.events.clone(),
+                filters: wh.filters.clone(),
+                payload_off: wh.payload_off,
+            });
+        }
+        out
+    }
     /// Resolve a delivery config to (channel_type, account_id, recipient),
     /// or `None` to skip delivery. Single resolution path shared by the
     /// cron and webhook dispatch routes (#78) — previously duplicated with

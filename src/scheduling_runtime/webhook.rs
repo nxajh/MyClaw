@@ -1007,61 +1007,6 @@ fn ok_response(status: StatusCode, body: &str) -> anyhow::Result<Response<Full<B
         .map_err(Into::into)
 }
 
-
-// ── Webhook projection on Scheduler (#151 Phase 8a: method moved with the
-// WebhookJobDef view it produces; same inherent method, reachable as
-// `scheduler.webhook_jobs()` unchanged) ──────────────────────────────────────
-
-impl Scheduler {
-    /// Jobs with a webhook channel (orthogonal model: `webhook.is_some()`,
-    /// independent of `schedule` — a job can be timer-only, webhook-only, or
-    /// both). Projected into the server's `WebhookJobDef` view; route derives
-    /// from the job name. Jobs whose name is not a URL-safe slug, or whose
-    /// name collides with another webhook job, are skipped with a warning.
-    pub fn webhook_jobs(&self) -> Vec<WebhookJobDef> {
-        let mut out: Vec<WebhookJobDef> = Vec::new();
-        let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for j in self.jobs.read().jobs.iter() {
-            let Some(wh) = j.webhook.as_ref() else { continue };
-            let route = match j.name.as_deref() {
-                Some(n) if !n.is_empty() => n.to_string(),
-                _ => {
-                    tracing::warn!(job_id = %j.id, "webhook job without a name: no route");
-                    continue;
-                }
-            };
-            if route == "agent" || route == "wake" {
-                tracing::warn!(job_id = %j.id, route = %route, "webhook route collides with a built-in /hooks endpoint: skipped");
-                continue;
-            }
-            if !is_route_slug(&route) {
-                tracing::warn!(job_id = %j.id, route = %route, "webhook route name is not a URL-safe slug [a-z0-9-]: skipped");
-                continue;
-            }
-            if !seen_routes.insert(route.clone()) {
-                tracing::warn!(route = %route, "duplicate webhook route (job names must be unique): keeping first");
-                continue;
-            }
-            if wh.secret.is_empty() {
-                tracing::warn!(job_id = %j.id, route = %route, "webhook job without a secret: rejected at load (design §3.4.1)");
-                continue;
-            }
-            out.push(WebhookJobDef {
-                id: j.id.clone(),
-                route,
-                secret: wh.secret.clone(),
-                auth: wh.auth_kind(),
-                delivery: j.delivery.clone(),
-                prompt_template: j.prompt.clone(),
-                events: wh.events.clone(),
-                filters: wh.filters.clone(),
-                payload_off: wh.payload_off,
-            });
-        }
-        out
-    }
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
