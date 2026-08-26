@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::agents::SkillDefinition;
+use crate::agents::skill_loader;
 use crate::agents::SkillManager;
 use crate::providers::{Tool, ToolResult};
 
@@ -404,8 +404,7 @@ impl SkillManageTool {
             &skills_dir,
             self.agents_skills_dir.as_deref(),
         );
-        let new_skills: Vec<Skill> = definitions.iter().map(Skill::from_definition).collect();
-        self.skills.write().reload(new_skills);
+        self.skills.write().reload_from_definitions(definitions);
     }
 }
 
@@ -582,7 +581,7 @@ mod tests {
         let defs = skill_loader::load_skills_from_dir(&workspace.join("skills"));
         let mut mgr = SkillManager::new();
         for def in &defs {
-            mgr.register(Skill::from_definition(def));
+            mgr.register_definition(def);
         }
         Arc::new(RwLock::new(mgr))
     }
