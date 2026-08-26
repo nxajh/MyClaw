@@ -285,6 +285,8 @@ fi
 - 更新 daemon 引用路径
 - 验收：`verify-layering.sh` L4 合规；agents 行数 < 31000
 
+> **实施记录（PR #160）**：实际 4290 行，agents 35248 → 30953（达标）。清单外必要改动：`agents/mod.rs` 的 `mod orchestrator` → `pub(crate) mod orchestrator`（scheduler 引用其 6+ 符号，迁出后私有不可见）。**已知遗留（评审发现，verify-layering.sh 漏检）**：`scheduling_runtime → agents::orchestrator`（SchedulerEvent/CronTrigger/run_scheduled_turn/OrchestratorCtx/is_silent_ok 等）与 `agents → scheduling_runtime`（mod.rs re-export、context_engine 用 work_unit）双向并存，构成同层两模块循环依赖（SCC）。脚本只查层间单向违规，不查同层模块互引。处置方向（Phase 3 / §5.1 解环时）：把 scheduler 所需符号下沉更底层，或 scheduling_runtime 定义回调 trait 由 agents 实现（方向反转）。Phase 11 layering 转 strict 前须先解此环，否则门禁无出处可查。
+
 2d. **commands 域迁出到 L4**（1 PR）
 - 新建 `src/commands/` 模块（L4）
 - 移动 commands/（2433 行）
