@@ -15,7 +15,7 @@ mod delegation;
 pub mod event;
 mod inbound;
 pub mod key;
-mod recovery;
+pub(in crate::agents) mod turn_recovery;
 pub mod scheduled;
 
 // #151 Phase 5: orchestration-domain stores moved from top-level storage/
@@ -510,7 +510,7 @@ impl Orchestrator {
                     .await;
                 }
             }
-            recovery::run_startup(&ctx, &unfinished, all_sessions_for_recovery);
+            turn_recovery::run_startup(&ctx, &unfinished, all_sessions_for_recovery);
         });
 
         // Known-users persistence flush (every 60s).

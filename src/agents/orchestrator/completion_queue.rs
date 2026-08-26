@@ -5,7 +5,7 @@
 //! enters the in-memory queue (`route_notice`), and marked delivered only
 //! after the notice turn's content is persisted to session history
 //! (`process_turn` returned `Ok`). A crash in between leaves the entry
-//! `Pending`; startup recovery (`recovery::recover_completion_queue`)
+//! `Pending`; startup recovery (`turn_recovery::recover_completion_queue`)
 //! re-enqueues it.
 //!
 //! Storage is one JSON file per entry, `{seq}.json`, under

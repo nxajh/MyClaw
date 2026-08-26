@@ -357,6 +357,8 @@ fi
 3. **更新 daemon 引用路径**
 4. **验收**：`grep -r "recovery" src/` 无歧义；CI 全绿
 
+> **实施记录（Phase 6 = 本 PR）**：三处 git mv 按域改名（startup_recovery 109 行 / turn_recovery 1397 行 / breakpoint_detect 65 行，前两者 rename 100%/99%，breakpoint_detect 0 内容变更）。新建 `agents/recovery/mod.rs` 门面：re-export `UnfinishedSubAgent`/`scan_unfinished_subagents`（startup）+ `run_startup`（turn，可见性 `pub(super)` → `pub(in crate::agents)` 以便跨模块 re-export；orchestrator 内部调用点同步改 `turn_recovery::run_startup`）；breakpoint 三符号维持 `session::` 原路径 re-export（mod.rs 仅改模块名，manager.rs use 同步）。调用点改动极小：daemon.rs 全限定路径不变（门面保持 `crate::agents::recovery::scan_unfinished_subagents` 可达）+ 注释块订正（顺手清偿死引用 `cleanup_stale_subagent_markers`——全仓不存在该符号）；doc 注释 3 处 `recovery::recover_*` 提法同步 `turn_recovery::`。验收：全仓无裸 `recovery.rs`；`recovery::` 全限定仅剩指向门面的 3 处合法引用；layering 仍仅 L3 39 行存量。
+
 **冲突窗口**：无。
 
 ### Phase 7：context 家族改名（1 PR）

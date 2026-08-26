@@ -22,6 +22,7 @@ pub mod skill_extract;
 pub(crate) mod orchestrator;
 mod prompt;
 pub mod recovery;
+pub mod startup_recovery;
 pub mod resource_provider;
 pub mod runtime;
 pub mod session;
@@ -64,6 +65,7 @@ pub use orchestrator::{
 };
 pub use prompt::{PermissionMode, RunMode, SystemPromptBuilder, SystemPromptConfig};
 pub use recovery::UnfinishedSubAgent;
+pub use recovery::scan_unfinished_subagents;
 pub use runtime::AgentRuntime;
 pub use crate::scheduling_types::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 pub use crate::scheduling_runtime::scheduler::{

@@ -5,7 +5,7 @@
 //! the orchestrator's in-memory event loop, and marked `Done` only after
 //! `inbound::dispatch` returned (the message is in session history — session
 //! recovery owns everything after that point). A crash in between leaves the
-//! entry `Pending`; startup recovery (`recovery::recover_inbound_spool`)
+//! entry `Pending`; startup recovery (`turn_recovery::recover_inbound_spool`)
 //! replays it.
 //!
 //! Storage is one JSON file per message, `{seq}.json`, under
