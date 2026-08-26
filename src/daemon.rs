@@ -1432,9 +1432,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     // Create ClientChannel separately (needs session_manager for management API).
     #[cfg(feature = "client")]
-    let _client_channel: Option<Arc<crate::channels::ClientChannel>> =
+    let _client_channel: Option<Arc<crate::webui::ClientChannel>> =
         config.channels.client.as_ref().filter(|c| c.enabled).map(|cfg| {
-            let cc = crate::channels::ClientChannel::new(cfg.clone());
+            let cc = crate::webui::ClientChannel::new(cfg.clone());
             cc.set_session_manager(session_manager.clone());
             cc.set_tool_specs(tools_arc.all_tools().iter().map(|t| t.spec()).collect());
             cc.set_workspace_dir(config.workspace_dir.clone());

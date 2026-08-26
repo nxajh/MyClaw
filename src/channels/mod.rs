@@ -1,7 +1,5 @@
 //! channels — Message channel adapters (Telegram, WeChat, QQ Bot, Client).
 
-#[cfg(feature = "client")]
-pub mod client;
 pub mod message;
 #[cfg(feature = "qqbot")]
 pub mod qqbot;
@@ -11,8 +9,6 @@ pub mod turn_stream;
 #[cfg(feature = "wechat")]
 pub mod wechat;
 
-#[cfg(feature = "client")]
-pub use client::ClientChannel;
 pub use message::{
     CallbackAction, Channel, ChannelCapabilities, ChannelFile, ChannelFileBody, ChannelFileMeta,
     ChannelInboundMessage, ChannelMessageContent, ChannelOutboundMessage, DedupState, GroupStat,
