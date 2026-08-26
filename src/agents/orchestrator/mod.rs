@@ -15,7 +15,7 @@ mod delegation;
 pub mod event;
 mod inbound;
 pub mod key;
-mod turn_recovery;
+pub(in crate::agents) mod turn_recovery;
 pub mod scheduled;
 
 // #151 Phase 5: orchestration-domain stores moved from top-level storage/

@@ -13,11 +13,10 @@
 //!   history ([`BreakpointItem`], [`identify_breakpoint`],
 //!   [`detect_incomplete_turn`])
 
-pub mod startup_recovery;
+pub use crate::agents::startup_recovery::{UnfinishedSubAgent, scan_unfinished_subagents};
 
-pub use startup_recovery::{UnfinishedSubAgent, scan_unfinished_subagents};
-
-// Turn recovery entry point (`run_startup`) is `pub(in crate::agents)` in
-// `orchestrator/turn_recovery.rs`; orchestrator-internal callers keep using
+// Turn recovery entry point (`run_startup`) lives in
+// `orchestrator/turn_recovery.rs` (module `turn_recovery` is
+// `pub(in crate::agents)`); orchestrator-internal callers keep using
 // `turn_recovery::run_startup` directly.
 pub use crate::agents::orchestrator::turn_recovery::run_startup;
