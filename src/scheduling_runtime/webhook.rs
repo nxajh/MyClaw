@@ -14,12 +14,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Context as _;
-use hmac::{Hmac, Mac};
-use serde::Deserialize;
-use sha2::Sha256;
-use tokio::net::TcpListener;
-
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
@@ -27,16 +21,14 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
-use crate::scheduling_types::cron_types::{
-    DeliveryConfig, DeliveryMode, RunRecord, RunStatus,
-};
+use crate::scheduling_types::cron_types::{DeliveryConfig, RunRecord, RunStatus};
 use crate::api::message::{
-    Channel, ChannelMessageContent, ChannelOutboundMessage, MessageReceiver,
+    ChannelMessageContent, ChannelOutboundMessage, MessageReceiver,
 };
 use crate::config::scheduler::WebhookConfig;
 
 use super::scheduler::{
-    OrchestratorHook, Scheduler, SharedScheduler, WebhookDef, WebhookFilter, parse_target_string,
+    OrchestratorHook, SharedScheduler, WebhookDef, WebhookFilter, parse_target_string,
 };
 
 
@@ -1013,8 +1005,9 @@ fn ok_response(status: StatusCode, body: &str) -> anyhow::Result<Response<Full<B
 mod tests {
     use super::*;
     use super::scheduler::tests::{test_entry, test_scheduler};
+    use crate::api::message::Channel;
     use crate::scheduling_runtime::scheduler::JobEntry;
-    use crate::scheduling_types::cron_types::ScheduleSpec;
+    use crate::scheduling_types::cron_types::{DeliveryMode, ScheduleSpec};
     use std::time::Duration;
 
     /// Moved from `agents::orchestrator::is_silent_ok` (#151 Phase 3d, SCC

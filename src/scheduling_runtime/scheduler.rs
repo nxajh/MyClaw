@@ -22,8 +22,7 @@ use crate::scheduling_types::cron_types::{
     DeliveryConfig, DeliveryMode, RunRecord, RunStatus, ScheduleKind, ScheduleSpec,
 };
 use crate::scheduling_types::event::SchedulerEvent;
-use crate::api::message::{Channel, ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
-use crate::config::scheduler::WebhookConfig;
+use crate::api::message::Channel;
 
 use super::webhook::{WebhookJobDef, is_route_slug};
 
