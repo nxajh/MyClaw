@@ -6,7 +6,7 @@ pub mod ask_router;
 pub mod attachment;
 pub mod compaction_engine;
 mod delegation;
-mod delegation_coordinator;
+pub mod delegation_coordinator;
 pub mod delegator;
 pub mod error;
 pub mod llm_stream;
@@ -53,8 +53,7 @@ pub use delegation::{
     AgentMail, AgentMessage, DelegationEvent, DelegationStatus, MessageKind,
     render_agent_mail_reminder,
 };
-pub use delegation_coordinator::{DelegationCoordinator, RunningAgentInfo};
-pub(crate) use delegation_coordinator::SUB_AGENT_TIMEOUT_MAX_SECS;
+pub use delegation_coordinator::{DelegationCoordinator, RunningAgentInfo, SUB_AGENT_TIMEOUT_MAX_SECS};
 pub use delegator::{AgentDelegator, AgentMessenger};
 pub use error::AgentError;
 pub use loop_breaker::{LoopBreak, LoopBreakReason, LoopBreaker, LoopBreakerConfig};

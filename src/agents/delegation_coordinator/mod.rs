@@ -26,6 +26,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
+
+pub(crate) mod checkpoint;
+pub(crate) mod worktree;
+use worktree::worktree_branch_name;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -52,7 +56,7 @@ const SUB_AGENT_TIMEOUT_DEFAULT_SECS: u64 = 1200;
 /// (`[agent] tool_timeout_secs`, default far below this) would silently
 /// drop the whole `agent_delegate` call before a delegation ever gets to
 /// run for the `timeout` its own caller actually asked for.
-pub(crate) const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
+pub const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
 
 /// Capacity of each running sub-agent's inbox (parent → sub messages).
 const SUB_AGENT_INBOX_CAPACITY: usize = 64;
@@ -100,13 +104,6 @@ fn should_gc_sub_session(is_async_delegation: bool, result_is_ok: bool) -> bool 
     result_is_ok && !is_async_delegation
 }
 
-/// Builds the git branch name used for a sub-agent worktree.
-///
-/// Format: `subagent/{agent_name}_{worktree_id}`, where `worktree_id` is the
-/// caller-provided short identifier (typically the first 8 hex chars of a UUID).
-fn worktree_branch_name(agent_name: &str, worktree_id: &str) -> String {
-    format!("subagent/{}_{}", agent_name, worktree_id)
-}
 
 /// One entry in the coordinator's running table.
 ///
@@ -183,7 +180,7 @@ pub struct DelegationCoordinator {
     /// passes it (with workspace_dir overlaid when worktree-isolated) to
     /// `SessionContext::process_turn`. `OnceLock` encodes the set-once
     /// contract and gives lock-free reads on the hot delegate path.
-    runtime_cell: Arc<OnceLock<crate::agents::AgentRuntime>>,
+    runtime_cell: Arc<std::sync::OnceLock<crate::agents::runtime::AgentRuntime>>,
     /// In-flight background delegations (sub_session_id → entry). Powers
     /// `/agent_list` (read snapshot with live status) and `/agent_kill`
     /// (abort by session id).
@@ -250,7 +247,7 @@ impl DelegationCoordinator {
     /// by the daemon after both the coordinator and the runtime are
     /// constructed (chicken-egg: runtime construction needs the
     /// AgentRegistry which the coordinator also references).
-    pub fn set_runtime(&self, runtime: crate::agents::AgentRuntime) {
+    pub fn set_runtime(&self, runtime: crate::agents::runtime::AgentRuntime) {
         // Set-once; a second call (should not happen) is ignored.
         let _ = self.runtime_cell.set(runtime);
     }
@@ -300,126 +297,7 @@ impl DelegationCoordinator {
         self.running.len()
     }
 
-    /// Durable checkpoints currently in `timed_out` status — the only ones
-    /// `resume_timed_out` will actually accept (issue #134 P2). Backs the
-    /// listing appended to `agent_resume`'s not-found error; unscoped by
-    /// parent session, same convention as `running_records`/`agent_list`.
-    pub fn timed_out_checkpoints(&self) -> Vec<crate::storage::DelegationCheckpoint> {
-        self.session_manager
-            .backend()
-            .load_delegation_checkpoints()
-            .into_iter()
-            .filter(|cp| cp.status == "timed_out")
-            .collect()
-    }
 
-    /// Checkpoint all running tasks to durable storage and cancel them.
-    ///
-    /// Called during daemon shutdown (before hot-switch fork or process exit).
-    /// Each running task's checkpoint is updated to `status: "checkpointed"`
-    /// so startup recovery knows the task was interrupted by shutdown, not a
-    /// business failure. The tokio tasks are then aborted — their sub-session
-    /// history is already persisted, so `scan_unfinished_subagents` will
-    /// resume them on restart.
-    ///
-    /// Unlike `drain`, this does NOT wait for tasks to finish — it checkpoints
-    /// and immediately aborts. The drain timeout is therefore not a business
-    /// failure.
-    pub fn checkpoint_and_cancel_all(&self) {
-        let backend = self.session_manager.backend();
-        let existing: Vec<crate::storage::DelegationCheckpoint> = backend.load_delegation_checkpoints();
-
-        // Take ownership of all entries by removing from the map (same pattern
-        // as `drain`). Each entry carries the JoinHandle we need to abort.
-        let entries: Vec<(String, RunningEntry)> = self
-            .running
-            .iter()
-            .map(|e| e.key().clone())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .filter_map(|id| self.running.remove(&id).map(|(_, v)| (id, v)))
-            .collect();
-
-        for (sub_session_id, entry) in &entries {
-            let checkpoint = existing
-                .iter()
-                .find(|c| &c.sub_session_id == sub_session_id)
-                .cloned()
-                .map(|mut c| {
-                    c.status = "checkpointed".to_string();
-                    c.last_checkpoint = Some(chrono::Utc::now());
-                    c
-                })
-                .unwrap_or_else(|| crate::storage::DelegationCheckpoint {
-                    parent_session_id: entry.parent_session_id.clone(),
-                    sub_session_id: sub_session_id.clone(),
-                    agent_name: entry.agent_name.clone(),
-                    status: "checkpointed".to_string(),
-                    started_at: entry.started_at,
-                    timeout_secs: entry.timeout_secs.unwrap_or(SUB_AGENT_TIMEOUT_DEFAULT_SECS),
-                    allowed_tools: entry.allowed_tools.clone(),
-                    last_checkpoint: Some(chrono::Utc::now()),
-                });
-            if let Err(e) = backend.save_delegation_checkpoint(&checkpoint) {
-                tracing::warn!(sub_session_id = %sub_session_id, err = %e, "shutdown checkpoint failed");
-            }
-        }
-
-        // Abort all running tasks. The sub-session history is already on disk;
-        // startup recovery will resume via `scan_unfinished_subagents`.
-        for (_, entry) in &entries {
-            entry.handle.abort();
-        }
-        if !entries.is_empty() {
-            tracing::info!(count = entries.len(), "checkpointed and cancelled running sub-agents");
-        }
-    }
-
-    /// Load all durable delegation checkpoints from the backend.
-    ///
-    /// Called at daemon startup to distinguish tasks interrupted by shutdown
-    /// (checkpointed → resumable) from tasks that crashed without a checkpoint
-    /// (potentially failed).
-    pub fn load_checkpoints(&self) -> Vec<crate::storage::DelegationCheckpoint> {
-        self.session_manager.backend().load_delegation_checkpoints()
-    }
-
-    /// Remove orphaned worktree directories left behind by crashed or
-    /// timed-out sub-agent runs. Called once at daemon startup.
-    ///
-    /// Runs `git -C <dir> worktree remove` from the leftover directory
-    /// itself: git locates the owning repository through the worktree's
-    /// `.git` file (the startup path has no per-agent workspace context, and
-    /// `worktrees_root` itself is not a repository). `worktree remove` also
-    /// clears the worktree metadata in the owning repo, so no separate
-    /// `prune` is needed on the success path.
-    pub fn cleanup_stale_worktrees(&self) {
-        let entries = match std::fs::read_dir(&self.worktrees_root) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-        let mut cleaned = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // Each worktree dir is named like `coder_<8hex>`.
-            // `git -C <dir> worktree remove --force` also removes stale git worktree metadata.
-            let out = std::process::Command::new("git")
-                .args(["worktree", "remove", "--force"])
-                .arg(&path)
-                .current_dir(&path)
-                .output();
-            let ok = out.as_ref().is_ok_and(|o| o.status.success());
-            if !ok {
-                // Fallback: remove directory directly if git doesn't know about it.
-                let _ = std::fs::remove_dir_all(&path);
-            }
-            cleaned += 1;
-        }
-        tracing::debug!(cleaned, root = %self.worktrees_root.display(), "cleaned stale worktrees");
-        if cleaned > 0 {
-            tracing::info!(count = cleaned, "cleaned up stale sub-agent worktrees");
-        }
-    }
 
     /// Cancel a running background task by id.
     ///
@@ -471,7 +349,7 @@ impl DelegationCoordinator {
         true
     }
 
-    fn runtime(&self) -> anyhow::Result<crate::agents::AgentRuntime> {
+    pub fn runtime(&self) -> anyhow::Result<crate::agents::runtime::AgentRuntime> {
         self.runtime_cell
             .get()
             .cloned()
@@ -1149,26 +1027,7 @@ impl DelegationCoordinator {
         }) // end Box::pin
     }
 
-    /// 方案 A tombstone: terminal cleanup rewrites the durable checkpoint's
-    /// status (instead of deleting it) so a restart can tell "already
-    /// finished, do not resume" from "crash remnant, resume". Only a
-    /// *Completed* terminal state deletes the checkpoint — its history is
-    /// complete and never triggers resume. Missing checkpoints are a no-op
-    /// (idempotent; e.g. the crash happened before spawn finished).
-    fn persist_terminal_checkpoint(&self, sub_session_id: &str, status: DelegationStatus) {
-        if let Err(e) = self
-            .session_manager
-            .backend()
-            .update_delegation_checkpoint_status(sub_session_id, status.as_str())
-        {
-            tracing::warn!(
-                sub_session_id = %sub_session_id,
-                status = %status.as_str(),
-                err = %e,
-                "update delegation checkpoint status (tombstone) failed"
-            );
-        }
-    }
+
 
     /// Delegate a task asynchronously — spawns the sub-agent in a
     /// background tokio task whose JoinHandle is stashed in `running`

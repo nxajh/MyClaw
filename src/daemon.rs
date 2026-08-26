@@ -1345,7 +1345,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // exists as a separate type.
     let delegation_rx = if let Some(ref delegator) = sub_agent_delegator_arc {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agents::DelegationEvent>(100);
-        delegator.set_event_sender(tx);
+            delegator.set_event_sender(tx.clone());
         Some(rx)
     } else {
         None
@@ -1833,7 +1833,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         deferred_turn_tracker
             .drain(std::time::Duration::from_secs(30))
             .await;
-        if let Some(ref delegator) = deferred_delegator {
+        if let Some(delegator) = deferred_delegator.as_ref() {
             delegator.checkpoint_and_cancel_all();
         }
         tracing::info!("hot switch: post-fork drain complete");

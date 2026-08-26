@@ -137,6 +137,19 @@ impl SkillManager {
         }
     }
 
+    /// Hot-reload from raw parsed definitions — the def→runtime conversion
+    /// stays inside the agents layer so callers (e.g. skill_manage_tool)
+    /// never construct `Skill` directly.
+    pub fn reload_from_definitions(&mut self, defs: Vec<SkillDefinition>) {
+        let skills = defs.iter().map(Skill::from_definition).collect();
+        self.reload(skills);
+    }
+
+    /// Register a single parsed definition (conversion encapsulated here).
+    pub fn register_definition(&mut self, def: &SkillDefinition) {
+        self.register(Skill::from_definition(def));
+    }
+
     /// Get all skill prompts (name, prompt_body) for system prompt injection.
     pub fn skill_prompts(&self) -> Vec<(&str, &str)> {
         self.skills

@@ -385,6 +385,16 @@ fi
 8h. **session_context.rs 拆 TTS+挂起**（1 PR）
 8i. **channels/message.rs 拆 model+chunking**（1 PR）
 
+### Phase 8+：L3 tools→L4 agents 分层债务清偿（39 行存量，1-2 PR）
+
+> 背景：`verify-layering.sh` 对 L3 tools 的 grep 规则是 `crate::(agents|scheduling_runtime|commands|channels)::` 前缀匹配，因此**换符号名/换更浅路径均不减计数**（PR #174 的 `abe355f` 已验证：`skill_loader` → `SkillDefinition` 后仍 39 行）。真正清偿需要结构性解耦：
+
+1. **契约类型下沉**：tools 依赖的纯数据类型（`SkillDefinition`/`SkillManager` 门面、`ToolRegistry`、`RunningAgentInfo`/`DelegationStatus`、`ContactStatus`/`UserMail` 等约 10 组）迁移或镜像到 L1/L0 契约层，tools 只 import 契约层。
+2. **函数依赖改注入**：`send_message.rs` 对 `commands::register::parse_target`、`friends.rs` 对 `commands::friends::rk_for` 这类函数依赖，改为初始化时注入闭包/trait，或函数本体下沉。
+3. **OnceLock 全局态收编**：`shell.rs` 的 `SessionManager`、`friends.rs` 的 `ChannelRegistry` 等 OnceLock 持有的 L4 类型，随契约层下沉一并处理。
+4. **分批验证**：每批迁移后跑 `verify-layering.sh` 确认计数单调下降至 0，再移除 workflow 的 `continue-on-error`。
+5. 建议在 8i 之后、Phase 9 之前执行；`skills.rs` 已提供 `reload_from_definitions`/`register_definition` 封装（#174），为契约层迁移预留了收敛点。
+
 **冲突窗口**：
 - **#146（agent.rs 拆分）**：待合并，agent/ 目录已拆，与 8a-8i 无文件交集
 - **Phase 2（借居域迁出）**：应在 Phase 2 后做 8a（scheduler.rs 随 scheduling 迁出后拆）
