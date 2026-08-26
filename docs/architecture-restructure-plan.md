@@ -374,6 +374,8 @@ fi
 ### Phase 8：巨文件拆分（多 PR，按优先级）
 
 8a. **scheduler.rs 拆 webhook**（1 PR）
+
+> **实施记录（8a = 本 PR）**：`scheduler.rs` 3953 行 → `scheduler.rs` 2293 + `webhook.rs` 1754（git 识别主体为 move）。拆出内容：WebhookContext/WebhookJobDef/WebhookAuth/WebhookGuard/InflightGuard、hyper server（run_webhook_server/handle_request/dispatch_webhook_turn/handle_hooks_agent/handle_hooks_wake）、HMAC 验签、限流/并发/幂等 guard、模板渲染、send_to_target 投递、run_scheduled_task 薄委托；`impl WebhookDef::auth_kind` 与 `impl Scheduler::webhook_jobs`（返回 WebhookJobDef 视图）随迁。**归属判断**：WebhookDef/WebhookFilter 留守（JobEntry.webhook 字段的 serde 模型，属 job 存储域）；is_active_hours/parse_target_string/resolve_tz 等调度 helper 留守（webhook 经 `use super::scheduler::` 引用，同模块树内合法）。测试按被测对象分流：webhook 相关 33 项随迁（含 MockChannel/TestHook/is_silent_ok/wh_entry 测试 helper——仅 webhook 测试使用），scheduler 测试留守；test_scheduler/test_entry 双边共用提为 `pub(crate)` 经 `super::scheduler::tests::` 跨引用。消费方：agents/mod.rs re-export 分流（WebhookContext/run_webhook_server/send_to_target 改自 webhook）；cronjob_tool is_route_slug 改引 webhook（去 scheduler:: 前缀）。daemon 路径零改动（经 agents re-export）。验收：scheduler.rs 无 webhook 符号残留（除 1 处历史注释）；layering 仍仅 L3 39 行。
 8b. **telegram/channel.rs 拆 TurnStream+限流**（1 PR）
 8c. **qqbot/channel.rs 拆限流/防抖/重连**（1 PR）
 8d. **delegation_coordinator.rs 拆 checkpoint/worktree**（1 PR）

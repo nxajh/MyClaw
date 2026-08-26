@@ -9,8 +9,12 @@ use crate::agents::SharedScheduler;
 use crate::scheduling_types::cron_types::{
     DeliveryConfig, DeliveryMode, FailureAlertConfig, RetryConfig, ScheduleKind, ScheduleSpec,
 };
-use crate::scheduling_runtime::scheduler::{
-    self, JobEntry, validate_active_hours, validate_at_timestamp, validate_schedule, validate_tz,
+use crate::scheduling_runtime::{
+    scheduler::{
+        self, JobEntry, validate_active_hours, validate_at_timestamp, validate_schedule,
+        validate_tz,
+    },
+    webhook::is_route_slug,
 };
 use crate::providers::{Tool, ToolResult};
 
@@ -989,7 +993,7 @@ fn parse_webhook_channel(
     }
 
     let route = name.unwrap_or("");
-    if !scheduler::is_route_slug(route) {
+    if !is_route_slug(route) {
         return Err(format!(
             "a URL-safe slug 'name' ([a-z0-9-], 1-64 chars) is required for webhook jobs: got '{:?}' — the name IS the route (POST /hooks/{{name}})",
             route
