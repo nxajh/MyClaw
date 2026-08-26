@@ -2,6 +2,7 @@
 
 // ── Capability traits (defs live here, impls below) ───────────────────────────
 
+pub mod tokens; // Token estimation over ChatMessage (moved from agents, #151 Phase 3d)
 pub mod capability; // Capability, Modality, model configs
 pub mod capability_chat; // ChatProvider, ChatMessage, StreamEvent, etc.
 pub mod capability_embedding; // EmbeddingProvider, EmbedRequest, etc.

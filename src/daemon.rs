@@ -1629,7 +1629,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // without a webhook channel simply isn't in the route table — only
         // the built-in /hooks/* endpoints remain besides it.
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
-            ctx: Arc::clone(orchestrator.ctx()),
+            hook: Arc::clone(orchestrator.ctx())
+                as Arc<dyn crate::scheduling_runtime::scheduler::OrchestratorHook>,
             timezone: tz_name.clone(),
             scheduler: Arc::clone(&shared_scheduler),
         });
