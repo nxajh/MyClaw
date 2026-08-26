@@ -2164,7 +2164,7 @@ fn handle_api_request(
         }
 
         "commands.list" => {
-            let result: Vec<serde_json::Value> = crate::agents::commands::command_catalog()
+            let result: Vec<serde_json::Value> = crate::commands::command_catalog()
                 .into_iter()
                 .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
                 .collect();

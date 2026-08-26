@@ -20,9 +20,9 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::agents::commands::friends::{notify_peer, rk_for};
-use crate::agents::commands::register::parse_target;
-use crate::agents::commands::CommandContext;
+use crate::commands::friends::{notify_peer, rk_for};
+use crate::commands::register::parse_target;
+use crate::commands::CommandContext;
 
 /// 6-digit one-time code lifetime.
 const LINK_TTL_MS: u64 = 10 * 60 * 1000;
