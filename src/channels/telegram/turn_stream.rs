@@ -722,7 +722,7 @@ impl TurnStream for TelegramTurnStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::channel::tests::make_config;
+    use crate::channels::telegram::channel::tests::make_config;
 
     /// edit it in place; no flushed message → None (nothing to fold).
     #[test]
