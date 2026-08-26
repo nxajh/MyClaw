@@ -2,8 +2,7 @@
 //!
 //! Includes ReconnectManager, ReplyLimiter, RateLimiter, and DeliverDebouncer.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use crate::channels::OutboundSendResult;
+use std::time::Duration;
 use super::types::WsDisconnect;
 
 /// Reconnect delay schedule (seconds).
@@ -70,6 +69,8 @@ impl ReconnectManager {
             WsDisconnect::Fatal => Duration::from_secs(0),
         }
     }
+
+    #[cfg(test)]
 
     fn reset(&mut self) {
         self.attempt = 0;
