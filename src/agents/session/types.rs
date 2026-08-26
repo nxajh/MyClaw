@@ -84,7 +84,7 @@ The delegation is killed at the deadline — plan to finish and deliver before i
 /// - `agent_name` identifying which agent in `workspace/agents/` owns this
 ///   session (defaults to "main").
 /// - Token usage tracker — moved from CompactionPolicy so the session owns
-///   its own context budget (C18 will rewire CompactionPolicy/ContextEngine
+///   its own context budget (C18 will rewire CompactionPolicy/CompactionEngine
 ///   to read through `&Session.token_tracker`).
 /// - Transient persist / channel handles — `Option<Arc<dyn …>>` so they
 ///   survive `Clone` cheaply, default to `None` for tests and ephemeral
@@ -121,7 +121,7 @@ pub struct Session {
     /// reconstruct the routing context and resume an interrupted turn.
     pub last_message: Option<PersistedChannelMessage>,
     /// Token usage tracker. Owned by the session so `Agent.run` /
-    /// `ContextEngine` can read budgets without needing a parallel struct.
+    /// `CompactionEngine` can read budgets without needing a parallel struct.
     /// Seeded by `SessionManager` from `backend.load_token_count` on
     /// session reload; updated from API `Usage` events thereafter.
     pub token_tracker: TokenTracker,

@@ -3,7 +3,7 @@
 //!
 //! `Agent::run` is the orchestrator's per-turn entry point. It drives the
 //! LLM stream, executes tool calls, applies the per-turn loop-breaker,
-//! performs context compaction via [`ContextEngine`] when the token count
+//! performs context compaction via [`CompactionEngine`] when the token count
 //! crosses the threshold, and persists history after each step. When the
 //! session has a streaming channel attached, per-chunk `TurnEvent`s
 //! (`Chunk` / `Thinking` / `ToolCall` / `ToolResult`) are pushed to the
@@ -137,8 +137,8 @@ impl Agent {
             None => runtime.loop_breaker.new_counter(),
         };
 
-        // Shared ContextEngine singleton — RFC v2 target shape. Token
-        // tracking lives solely on `Session.token_tracker`; ContextEngine
+        // Shared CompactionEngine singleton — RFC v2 target shape. Token
+        // tracking lives solely on `Session.token_tracker`; CompactionEngine
         // only carries threshold/retain_units + summarizer state.
         let context = &runtime.context_engine;
         // Seed Session.token_tracker from history when fresh (display/usage only).
@@ -1767,7 +1767,7 @@ fn backoff_duration(attempt: usize) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::context_engine::ContextEngine;
+    use crate::agents::compaction_engine::CompactionEngine;
     use crate::agents::resource_provider::ResourceProvider;
     use crate::agents::session::Session;
     use crate::agents::tool_executor::ToolExecutor;
@@ -1905,7 +1905,7 @@ mod tests {
             String::new(),
             0,
         );
-        let context_engine = Arc::new(ContextEngine::new(
+        let context_engine = Arc::new(CompactionEngine::new(
             &crate::config::agent::ContextConfig::default(),
             Arc::clone(&providers),
             resources,

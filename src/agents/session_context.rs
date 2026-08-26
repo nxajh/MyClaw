@@ -805,7 +805,7 @@ impl SessionContext {
                 .collect();
             session.attachments.diff_agents(&agent_list, &history_clone);
             // Date injection respects the configured [prompt] timezone_offset
-            // (sourced from the shared ResourceProvider via ContextEngine).
+            // (sourced from the shared ResourceProvider via CompactionEngine).
             session.attachments.diff_date(runtime.context_engine.timezone_offset(), &history_clone);
             session.attachments.diff_autonomy(&prompt_config.permission_mode, &history_clone);
             // Daily throttled draft-skill backlog reminder (issue #89,

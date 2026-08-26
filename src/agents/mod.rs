@@ -4,7 +4,7 @@ pub mod agent;
 pub mod agent_registry;
 pub mod ask_router;
 pub mod attachment;
-pub mod context_engine;
+pub mod compaction_engine;
 mod delegation;
 mod delegation_coordinator;
 pub mod delegator;

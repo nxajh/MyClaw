@@ -366,7 +366,7 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
 }
 
 /// Stream collector for the fork — simplified version of
-/// `ContextEngine::collect_summary_stream` (no UI streaming).
+/// `CompactionEngine::collect_summary_stream` (no UI streaming).
 struct ForkResponse {
     text: String,
     reasoning_content: Option<String>,
@@ -488,7 +488,7 @@ async fn collect_fork_stream(mut stream: BoxStream<StreamEvent>) -> Result<ForkR
 
 /// Build the extraction prompt for the fork.
 ///
-/// Independent from `context_engine::build_memory_prompt` — tuned for
+/// Independent from `compaction_engine::build_memory_prompt` — tuned for
 /// turn-end extraction (not compaction), with its own taxonomy and rules.
 fn build_extraction_prompt(memory_root: &str, session_id: &str) -> String {
     // Build existing memory index so the model avoids duplicates.

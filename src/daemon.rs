@@ -1505,7 +1505,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // infrastructure bundle (providers, tools, skills, agents,
     // context_engine, executors) that every per-turn `Agent::run` reads.
     let agent_runtime = {
-        // Build the ResourceProvider once so ContextEngine can hold it as
+        // Build the ResourceProvider once so CompactionEngine can hold it as
         // a shared resource (rather than rebuilding per turn).
         let resources = crate::agents::resource_provider::ResourceProvider::new(
             Arc::clone(&skills_arc),
@@ -1516,7 +1516,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             config.memory_root().to_string_lossy().to_string(),
             config.prompt.timezone_offset,
         );
-        let context_engine = Arc::new(crate::agents::context_engine::ContextEngine::new(
+        let context_engine = Arc::new(crate::agents::compaction_engine::CompactionEngine::new(
             &config.context_engine,
             Arc::clone(&registry_arc),
             resources,

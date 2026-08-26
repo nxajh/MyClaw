@@ -1,4 +1,4 @@
-//! `ContextEngine` — unified context-management facade.
+//! `CompactionEngine` — unified context-management facade.
 //!
 //! RFC v2 §三.A: collapses `CompactionPolicy` + `CompactionExecutor` into
 //! a single type so `Agent.run` interacts with one touch point, not two.
@@ -6,7 +6,7 @@
 //! here) — methods that need a token count take it as a parameter.
 //!
 //! Internals are private free functions inside this module; the public
-//! surface is the `ContextEngine` impl block.
+//! surface is the `CompactionEngine` impl block.
 
 use std::sync::Arc;
 
@@ -28,7 +28,7 @@ use crate::providers::{
     ThinkingConfig, ToolCall,
 };
 
-/// Result returned by `ContextEngine::execute_compaction`.
+/// Result returned by `CompactionEngine::execute_compaction`.
 /// Caller is responsible for applying it to the live session (drain /
 /// insert history, update metadata, adjust `Session.token_tracker`).
 pub(crate) struct CompactionResult {
@@ -47,7 +47,7 @@ const COMPRESSION_SAFETY_MARGIN: u64 = 4_000;
 /// Unified context-management facade. Holds the compaction threshold
 /// / retain-units policy plus the summarizer plumbing (provider
 /// registry, memory-tool executor) in one struct.
-pub struct ContextEngine {
+pub struct CompactionEngine {
     compact_threshold: f64,
     retain_work_units: usize,
     registry: Arc<dyn ProviderRegistry>,
@@ -57,7 +57,7 @@ pub struct ContextEngine {
 }
 
 #[allow(dead_code)] // some accessors retained for /compact + future callers
-impl ContextEngine {
+impl CompactionEngine {
     pub fn new(
         context: &ContextConfig,
         registry: Arc<dyn ProviderRegistry>,
