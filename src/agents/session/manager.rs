@@ -42,7 +42,7 @@ use crate::providers::capability_chat::ChatMessage;
 use crate::storage::{SessionBackend, SessionInfo};
 
 use super::backend::InMemoryBackend;
-use super::recovery::{BreakpointItem, identify_breakpoint};
+use super::breakpoint_detect::{BreakpointItem, identify_breakpoint};
 use super::session_override::SessionOverride;
 use super::session_override::sanitize_paired;
 use super::types::{Session, SummaryMetadata};

@@ -2016,10 +2016,10 @@ fn reset_telegram_offset(base_dir: &std::path::Path) {
 }
 
 // ── Sub-agent recovery (hot-switch detection) ─────────────────────────────────
-// Moved to `src/agents/recovery.rs` so that Application-layer types
-// (Orchestrator, OrchestratorParts) can reference `UnfinishedSubAgent` without
-// depending on the Composition Root (`daemon`).  Re-exported via `agents::`.
+// Moved to `src/agents/startup_recovery.rs` (#151 Phase 6: recovery family
+// disambiguation; facade re-exports it via `agents::recovery`) so that
+// Application-layer types (Orchestrator, OrchestratorParts) can reference
+// `UnfinishedSubAgent` without depending on the Composition Root (`daemon`).
 //
 // Helpers used above:
 //   crate::agents::recovery::scan_unfinished_subagents
-//   crate::agents::recovery::cleanup_stale_subagent_markers

@@ -64,6 +64,7 @@ pub use orchestrator::{
 };
 pub use prompt::{PermissionMode, RunMode, SystemPromptBuilder, SystemPromptConfig};
 pub use recovery::UnfinishedSubAgent;
+pub use recovery::scan_unfinished_subagents;
 pub use runtime::AgentRuntime;
 pub use crate::scheduling_types::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 pub use crate::scheduling_runtime::scheduler::{

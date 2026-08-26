@@ -1055,7 +1055,7 @@ mod tests {
     /// `(tg, acc, user1)`. Entries are appended in one instance (dropped
     /// without mark_done), then the spool is reopened as the successor so
     /// `seq <= baseline` makes them replayable — the same shape as
-    /// `recovery::replay_persisted_inbound_and_marks_done`. The `TempDir` is
+    /// `turn_recovery::replay_persisted_inbound_and_marks_done`. The `TempDir` is
     /// returned alongside because `mark_done` rewrites the entry file.
     fn spool_with_pending(entries: &[(&str, &str)]) -> (Arc<InboundSpool>, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
