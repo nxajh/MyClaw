@@ -293,6 +293,15 @@ fi
 - 更新 agents/channels 引用路径
 - 验收：`verify-layering.sh` L4 合规；agents 行数 < 29000
 
+> **实施记录（PR #161）**：实际 2422 行（9 文件），agents 30953 → 28530（达标）。11 处路径改写（域内 6 + inbound 1 + client.rs 1 + tools 3），域内 `super::` 相对引用零改动。零可见性放宽、零新增跨模块耦合（commands→agents 纯单向，评审核实"四个 PR 里唯一没引入新循环依赖的一次"）。
+
+> **Phase 2 总结（2026-08-26 完结，4 PR 全合并）**：agents 38263 → 28530（**-9733 行 / -25.4%**）。
+> - 2a `#158`：identity → L2（known_users/user_registry/user_profile，2723 行；user_messages 留驻因 AgentError 依赖；format_ts 下沉 str_utils）
+> - 2b `#159`：scheduling_types → L1（cron_types，291 行 100% rename）
+> - 2c `#160`：scheduling_runtime → L4（scheduler/work_unit/cron_loader，4290 行；遗留 agents↔scheduling_runtime SCC，见 2c 实施记录）
+> - 2d `#161`：commands → L4（9 文件 2422 行，零遗留）
+> 借居域归位后 agents 仅存自身核心（agent loop/session/orchestrator/prompt/delegation 等）。分层违规基线（Phase 3 起点）：L1 config→providers 4 行、L3 tools→L4 22 行、L4→channels 15 行（agents 13 + scheduling_runtime 1 + commands 1），均存量守恒。
+
 **冲突窗口**：
 - **#144（delegation bug）**：应在 #144 修复后做 2a/2b/2c（先修 bug 后搬家）
 - **#146（agent.rs 拆分）**：待合并，agent/ 目录已拆，与 2a/2b/2c 无文件交集
