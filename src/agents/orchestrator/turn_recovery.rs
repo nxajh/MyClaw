@@ -167,7 +167,7 @@ fn terminal_checkpoint_ids(checkpoints: &[crate::storage::DelegationCheckpoint])
         .collect()
 }
 
-pub(in crate::agents) fn run_startup(
+pub fn run_startup(
     ctx: &Arc<OrchestratorCtx>,
     unfinished: &[UnfinishedSubAgent],
     all_sessions: Vec<crate::storage::SessionInfo>,

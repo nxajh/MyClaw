@@ -22,6 +22,7 @@ pub mod skill_extract;
 pub(crate) mod orchestrator;
 mod prompt;
 pub mod recovery;
+pub mod startup_recovery;
 pub mod resource_provider;
 pub mod runtime;
 pub mod session;
