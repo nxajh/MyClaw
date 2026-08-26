@@ -1004,14 +1004,14 @@ fn ok_response(status: StatusCode, body: &str) -> anyhow::Result<Response<Full<B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::scheduler::tests::{test_entry, test_scheduler};
+    use crate::scheduling_runtime::scheduler::tests::{test_entry, test_scheduler};
     use crate::api::message::Channel;
     use crate::scheduling_runtime::scheduler::JobEntry;
     use crate::scheduling_types::cron_types::{DeliveryMode, ScheduleSpec};
+    use parking_lot::Mutex as ParkMutex;
     use std::time::Duration;
 
     /// Moved from `agents::orchestrator::is_silent_ok` (#151 Phase 3d, SCC
-    #[test]
     fn is_silent_ok(response: &str, prefix: &str) -> bool {
         let trimmed = response.trim().to_lowercase();
         let marker = format!("{}_ok", prefix);
