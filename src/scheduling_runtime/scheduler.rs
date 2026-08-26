@@ -1757,7 +1757,7 @@ pub fn compute_next_run(
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     /// 解环) — its only remaining caller was this test module.
     /// Minimal channel mock for webhook dispatch tests (#151 Phase 3d:
