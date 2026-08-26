@@ -477,7 +477,7 @@ pub(super) async fn route_notice(
             // restart). Dedup: the store's `seen` set returns `None` on a
             // duplicate id — no double file.
             if let (Some(store), Some(meta)) = (&ctx.completion_queue, &notice_meta) {
-                let entry = crate::storage::CompletionNoticeEntry {
+                let entry = crate::agents::orchestrator::CompletionNoticeEntry {
                     seq: 0,
                     id: synthetic_id.clone(),
                     sub_session_id: meta.sub_session_id.clone(),
@@ -488,7 +488,7 @@ pub(super) async fn route_notice(
                     // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
                     sent_message_count: meta.sent_message_count,
                     enqueued_at: chrono::Utc::now().timestamp() as u64,
-                    delivery_state: crate::storage::DeliveryState::Pending,
+                    delivery_state: crate::agents::orchestrator::DeliveryState::Pending,
                 };
                 if let Err(e) = store.append(entry) {
                     tracing::warn!(
@@ -949,7 +949,7 @@ mod tests {
     async fn active_wake_persists_notice_before_enqueue() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(
-            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+            crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
         );
         let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
         let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
@@ -979,7 +979,7 @@ mod tests {
         // intent is false (see route_notice race-fix comment).
         assert_eq!(e.silenced_override, Some(false));
         assert!(e.content.contains("persisted summary"));
-        assert_eq!(e.delivery_state, crate::storage::DeliveryState::Pending);
+        assert_eq!(e.delivery_state, crate::agents::orchestrator::DeliveryState::Pending);
     }
 
     /// issue #129/#140: `route_shell_completion` reuses `route_notice`
@@ -994,7 +994,7 @@ mod tests {
     async fn route_shell_completion_persists_before_enqueue() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(
-            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+            crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
         );
         let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
         let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
@@ -1032,7 +1032,7 @@ mod tests {
     async fn shell_completion_with_unknown_exit_code_maps_to_completed() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(
-            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+            crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
         );
         let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
         let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
@@ -1072,7 +1072,7 @@ mod tests {
     async fn concurrent_shell_completions_silence_intermediate_notice() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(
-            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+            crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
         );
         let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
         let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);

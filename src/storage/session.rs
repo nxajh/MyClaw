@@ -311,7 +311,7 @@ pub trait SessionBackend: Send + Sync {
     fn save_last_message(
         &self,
         _session_id: &str,
-        _msg: &crate::channels::PersistedChannelMessage,
+        _msg: &crate::api::message::PersistedChannelMessage,
     ) -> std::io::Result<()> {
         Ok(())
     }
@@ -320,7 +320,7 @@ pub trait SessionBackend: Send + Sync {
     fn load_last_message(
         &self,
         _session_id: &str,
-    ) -> Option<crate::channels::PersistedChannelMessage> {
+    ) -> Option<crate::api::message::PersistedChannelMessage> {
         None
     }
 

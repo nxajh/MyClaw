@@ -43,7 +43,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::channels::{ChannelInboundMessage, PersistedChannelMessage};
+use crate::api::message::{ChannelInboundMessage, PersistedChannelMessage};
 
 /// Spool state of one persisted inbound message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,7 +344,7 @@ impl InboundSpool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::{ChannelMessageContent, MessageReceiver, MessageSender};
+    use crate::api::message::{ChannelMessageContent, MessageReceiver, MessageSender};
 
     fn msg(id: &str) -> ChannelInboundMessage {
         ChannelInboundMessage {

@@ -343,6 +343,8 @@ fi
 3. **更新 storage/agents 引用路径**
 4. **验收**：`verify-layering.sh` L1 合规；storage→channels 归零
 
+> **实施记录（Phase 5 = 本 PR）**：两个 git mv（completion_queue.rs 0 行变更；inbound_spool.rs 仅 2 行 use 改写）。**预检发现直接搬会引入新 L4→channels 违规**（inbound_spool 2 处 `crate::channels::`——#164 已清零的类别），5 个所引类型经查全部已下沉 api/message.rs，改指 `crate::api::message::` 本体（channels 侧本就是 re-export，零行为变化）。消费面 22 处全在 agents/orchestrator/ 5 文件（ctx/delegation/mod/recovery/inbound），按 4 符号精确 sed 至 `crate::agents::orchestrator::`（同文件 session 类符号不动）；orchestrator/mod.rs 加 2 个 pub mod + re-export（CompletionNoticeEntry/Store、DeliveryState、InboundSpool 共 4 符号；SpoolEntry/SpoolStatus 全仓零消费，CI clippy unused 抓出后移出 re-export——类型仍可经 `inbound_spool::` 模块路径访问，同 #166 run_scheduled_turn 先例），删除原 `use crate::storage::InboundSpool`。**顺手清偿**：session.rs/json_file.rs 存量 5 处 `crate::channels::PersistedChannelMessage`（同符号）改指 api 本体，达成方案验收"storage→channels 归零"——否则该验收项不成立。验收：storage 内 crate::channels 归零；layering 仍仅 L3 39 行存量（无新增）；`crate::storage::{CompletionNotice*,InboundSpool,DeliveryState}` 双口径归零。
+
 **冲突窗口**：无。
 
 ### Phase 6：recovery 家族统一门面（1 PR）

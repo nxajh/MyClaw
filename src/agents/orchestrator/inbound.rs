@@ -803,7 +803,7 @@ mod tests {
 
     use super::super::test_support::{MockChannel, inbound_msg, test_ctx};
     use crate::agents::user_messages::MSG_TURN_FAILED;
-    use crate::storage::InboundSpool;
+    use crate::agents::orchestrator::InboundSpool;
 
     /// Golden test: the inbound chain order is load-bearing (ask-reply must run
     /// before callback before dispatch, etc.). Pin it so reordering is a

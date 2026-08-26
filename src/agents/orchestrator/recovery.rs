@@ -886,10 +886,10 @@ mod tests {
     fn recovery_dead_letters_vanished_parent() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(
-            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+            crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
         );
         store
-            .append(crate::storage::CompletionNoticeEntry {
+            .append(crate::agents::orchestrator::CompletionNoticeEntry {
                 seq: 0,
                 id: "delegation:t1".to_string(),
                 sub_session_id: "t1".to_string(),
@@ -899,7 +899,7 @@ mod tests {
                 silenced_override: None,
                 sent_message_count: 0,
                 enqueued_at: 0,
-                delivery_state: crate::storage::DeliveryState::Pending,
+                delivery_state: crate::agents::orchestrator::DeliveryState::Pending,
             })
             .unwrap();
         let mut ctx = test_ctx(vec![]);
@@ -923,7 +923,7 @@ mod tests {
     async fn recovery_keeps_pending_when_turn_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(
-            crate::storage::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+            crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
         );
         let mut ctx = test_ctx(vec![]);
         ctx.completion_queue = Some(Arc::clone(&store));
@@ -932,7 +932,7 @@ mod tests {
         let session = ctx.sessions.get_or_create("mock:default:u1");
         let sid = session.id.clone();
         store
-            .append(crate::storage::CompletionNoticeEntry {
+            .append(crate::agents::orchestrator::CompletionNoticeEntry {
                 seq: 0,
                 id: "delegation:t1".to_string(),
                 sub_session_id: "t1".to_string(),
@@ -942,7 +942,7 @@ mod tests {
                 silenced_override: None,
                 sent_message_count: 0,
                 enqueued_at: 0,
-                delivery_state: crate::storage::DeliveryState::Pending,
+                delivery_state: crate::agents::orchestrator::DeliveryState::Pending,
             })
             .unwrap();
         recover_completion_queue(&Arc::new(ctx));
@@ -1267,7 +1267,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let spool_dir = tmp.path().join("inbound_spool");
         {
-            let spool = crate::storage::InboundSpool::open(spool_dir.clone()).unwrap();
+            let spool = crate::agents::orchestrator::InboundSpool::open(spool_dir.clone()).unwrap();
             spool
                 .append(
                     "telegram",
@@ -1276,7 +1276,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let spool = Arc::new(crate::storage::InboundSpool::open(spool_dir).unwrap());
+        let spool = Arc::new(crate::agents::orchestrator::InboundSpool::open(spool_dir).unwrap());
         assert_eq!(
             spool.pending().len(),
             1,

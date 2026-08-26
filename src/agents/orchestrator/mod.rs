@@ -16,19 +16,24 @@ pub mod event;
 mod inbound;
 pub mod key;
 mod recovery;
-mod scheduled;
+pub mod scheduled;
+
+// #151 Phase 5: orchestration-domain stores moved from top-level storage/
+pub mod completion_queue;
+pub mod inbound_spool;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod turn;
 
 pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;
+pub use completion_queue::{CompletionNoticeEntry, CompletionNoticeStore, DeliveryState};
+pub use inbound_spool::InboundSpool;
 pub(crate) use scheduled::{run_cron_task, run_distill_task};
 
 use crate::agents::DelegationCoordinator;
 use crate::agents::delegation::DelegationEvent;
 use crate::api::message::{Channel, ChannelInboundMessage};
-use crate::storage::InboundSpool;
 use anyhow::Context;
 use std::sync::Arc;
 use std::time::Duration;
@@ -268,7 +273,7 @@ impl Orchestrator {
         // enters the event loop; marked Done after dispatch returns. `None`
         // degrades to in-memory-only delivery (fail-open, same as tests).
         let inbound_spool_dir = crate::config::inbound_spool_dir(&parts.base_dir);
-        let inbound_spool = match crate::storage::InboundSpool::open(inbound_spool_dir.clone()) {
+        let inbound_spool = match crate::agents::orchestrator::InboundSpool::open(inbound_spool_dir.clone()) {
             Ok(spool) => {
                 // Startup tombstone maintenance (RFC §4.2). Best-effort: a
                 // failure only leaves stale tombstones around (dedup keys),
@@ -321,7 +326,7 @@ impl Orchestrator {
         // `None` degrades to P1 in-memory-only delivery — a crashed notice is
         // then lost, but the daemon still runs (fail-open, same as tests).
         let completion_queue_dir = crate::config::completion_queue_dir(&parts.base_dir);
-        let completion_queue = match crate::storage::CompletionNoticeStore::open(
+        let completion_queue = match crate::agents::orchestrator::CompletionNoticeStore::open(
             completion_queue_dir.clone(),
         ) {
             Ok(store) => {

@@ -98,7 +98,7 @@ struct SessionMeta {
     /// Last incoming message context. Carries sender / receiver / text so
     /// startup recovery can replay the routing context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_message: Option<crate::channels::PersistedChannelMessage>,
+    last_message: Option<crate::api::message::PersistedChannelMessage>,
     /// Optional generated summary of this session's purpose/outcomes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
@@ -1102,7 +1102,7 @@ impl SessionBackend for JsonFileBackend {
     fn save_last_message(
         &self,
         session_id: &str,
-        msg: &crate::channels::PersistedChannelMessage,
+        msg: &crate::api::message::PersistedChannelMessage,
     ) -> std::io::Result<()> {
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.last_message = Some(msg.clone());
@@ -1114,7 +1114,7 @@ impl SessionBackend for JsonFileBackend {
     fn load_last_message(
         &self,
         session_id: &str,
-    ) -> Option<crate::channels::PersistedChannelMessage> {
+    ) -> Option<crate::api::message::PersistedChannelMessage> {
         self.read_meta(session_id)?.last_message
     }
 
