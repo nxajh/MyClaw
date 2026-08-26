@@ -16,7 +16,7 @@ pub async fn run(
     super::init_tracing(&cfg);
     myclaw::tools::shell_env::init(cfg.shell.clone());
 
-    let registry = myclaw::registry::Registry::from_config(cfg.providers.clone(), &cfg.routing)
+    let registry = myclaw::providers::registry::Registry::from_config(cfg.providers.clone(), &cfg.routing)
         .map_err(|e| anyhow::anyhow!("failed to build registry: {}", e))?;
     let registry_arc: Arc<dyn myclaw::ProviderRegistry> = Arc::new(registry);
 
