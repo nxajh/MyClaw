@@ -28,7 +28,7 @@ pub mod turn;
 pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;
 pub use completion_queue::{CompletionNoticeEntry, CompletionNoticeStore, DeliveryState};
-pub use inbound_spool::{InboundSpool, SpoolEntry, SpoolStatus};
+pub use inbound_spool::InboundSpool;
 pub(crate) use scheduled::{run_cron_task, run_distill_task};
 
 use crate::agents::DelegationCoordinator;
