@@ -2767,9 +2767,9 @@ mod tests {
         async fn health_check(&self) -> bool {
             true
         }
-        async fn send_message(&self, msg: &ChannelOutboundMessage) -> anyhow::Result<()> {
+        async fn send_message(&self, msg: &ChannelOutboundMessage) -> anyhow::Result<crate::api::message::OutboundSendResult> {
             self.sent.lock().unwrap().push(msg.clone());
-            Ok(())
+            Ok(crate::api::message::OutboundSendResult::empty())
         }
     }
 
