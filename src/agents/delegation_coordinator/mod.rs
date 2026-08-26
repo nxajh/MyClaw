@@ -56,7 +56,7 @@ const SUB_AGENT_TIMEOUT_DEFAULT_SECS: u64 = 1200;
 /// (`[agent] tool_timeout_secs`, default far below this) would silently
 /// drop the whole `agent_delegate` call before a delegation ever gets to
 /// run for the `timeout` its own caller actually asked for.
-pub(crate) const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
+pub const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
 
 /// Capacity of each running sub-agent's inbox (parent → sub messages).
 const SUB_AGENT_INBOX_CAPACITY: usize = 64;
@@ -180,7 +180,7 @@ pub struct DelegationCoordinator {
     /// passes it (with workspace_dir overlaid when worktree-isolated) to
     /// `SessionContext::process_turn`. `OnceLock` encodes the set-once
     /// contract and gives lock-free reads on the hot delegate path.
-    runtime_cell: Arc<OnceLock<crate::agents::AgentRuntime>>,
+    runtime_cell: Arc<std::sync::OnceLock<crate::agents::runtime::AgentRuntime>>,
     /// In-flight background delegations (sub_session_id → entry). Powers
     /// `/agent_list` (read snapshot with live status) and `/agent_kill`
     /// (abort by session id).
@@ -247,7 +247,7 @@ impl DelegationCoordinator {
     /// by the daemon after both the coordinator and the runtime are
     /// constructed (chicken-egg: runtime construction needs the
     /// AgentRegistry which the coordinator also references).
-    pub fn set_runtime(&self, runtime: crate::agents::AgentRuntime) {
+    pub fn set_runtime(&self, runtime: crate::agents::runtime::AgentRuntime) {
         // Set-once; a second call (should not happen) is ignored.
         let _ = self.runtime_cell.set(runtime);
     }
@@ -349,7 +349,7 @@ impl DelegationCoordinator {
         true
     }
 
-    fn runtime(&self) -> anyhow::Result<crate::agents::AgentRuntime> {
+    pub fn runtime(&self) -> anyhow::Result<crate::agents::runtime::AgentRuntime> {
         self.runtime_cell
             .get()
             .cloned()
