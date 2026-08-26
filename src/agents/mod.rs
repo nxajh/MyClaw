@@ -69,8 +69,11 @@ pub use recovery::scan_unfinished_subagents;
 pub use runtime::AgentRuntime;
 pub use crate::scheduling_types::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 pub use crate::scheduling_runtime::scheduler::{
-    JobEntry, JobUpdate, Scheduler, SharedScheduler, WebhookContext, is_active_hours, resolve_tz,
-    run_webhook_server, scan_prompt_injection, send_to_target,
+    JobEntry, JobUpdate, Scheduler, SharedScheduler, is_active_hours, resolve_tz,
+    scan_prompt_injection,
+};
+pub use crate::scheduling_runtime::webhook::{
+    WebhookContext, run_webhook_server, send_to_target,
 };
 pub use session::SessionManager;
 pub use session::{BackendPersistHook, BreakpointItem, InMemoryBackend, PersistHook, Session};

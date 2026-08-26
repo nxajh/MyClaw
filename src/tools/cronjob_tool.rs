@@ -12,6 +12,7 @@ use crate::scheduling_types::cron_types::{
 use crate::scheduling_runtime::scheduler::{
     self, JobEntry, validate_active_hours, validate_at_timestamp, validate_schedule, validate_tz,
 };
+use crate::scheduling_runtime::webhook::is_route_slug;
 use crate::providers::{Tool, ToolResult};
 
 pub struct CronJobTool {
@@ -989,7 +990,7 @@ fn parse_webhook_channel(
     }
 
     let route = name.unwrap_or("");
-    if !scheduler::is_route_slug(route) {
+    if !is_route_slug(route) {
         return Err(format!(
             "a URL-safe slug 'name' ([a-z0-9-], 1-64 chars) is required for webhook jobs: got '{:?}' — the name IS the route (POST /hooks/{{name}})",
             route
