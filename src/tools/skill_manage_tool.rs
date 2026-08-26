@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::agents::workspace::skill_loader;
-use crate::agents::{Skill, SkillManager};
+use crate::agents::SkillDefinition;
+use crate::agents::SkillManager;
 use crate::providers::{Tool, ToolResult};
 
 const MAX_NAME_LENGTH: usize = 64;

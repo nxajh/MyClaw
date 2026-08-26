@@ -1520,7 +1520,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             &config.context_engine,
             Arc::clone(&registry_arc),
             resources,
-            &tools_arc,
+            Arc::clone(&tools_arc),
         ));
         let tool_executor = Arc::new(
             crate::agents::tool_executor::ToolExecutor::new(
