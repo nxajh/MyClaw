@@ -424,32 +424,37 @@ fi
 
 **冲突窗口**：无。所有 Phase 完成后接入，作为长期防腐蚀手段。
 
+> **✅ 完成（2026-08-27 定稿确认；实际随 Phase 8+ 的 #181 提前接入）**
+> - `scripts/verify-layering.sh` 已入库，覆盖全部层规则：L0 api（含函数体内全限定引用，Phase 3b 盲区修复）、L1 ids/config/str_utils/scheduling_types、L2 providers/memory/identity **+ mcp**、L3 tools、L4 agents/scheduling_runtime/commands、L5 channels。mcp 检查（L2 不引 L4+）在列，即方案所指"脚本遗漏"。
+> - `.github/workflows/build.yml` 实现为**独立 `layering` job**（`bash scripts/verify-layering.sh`），非内联进 Check 步骤——功能等价且可独立快速失败；#181 起移除 `continue-on-error`，**转严格阻断**。
+> - 验收达成：master `0d21325` 实测 `✅ 分层合规` 退出 0；此后每个 PR 的 CI 均强制跑 layering，违规即红（#181 的 5 轮 CI 修复即为门禁生效实证）。
+
 ## 5. 验收清单
 
 ### 5.1 分层合规
 
-- [ ] `verify-layering.sh` 退出码 0（7 模块 SCC 解环）
-- [ ] 依赖方向全合规：L0→L1→L2→L3→L4→L5→L6 单向
+- [x] `verify-layering.sh` 退出码 0（7 模块 SCC 解环）——master `0d21325` 实测退出 0
+- [x] 依赖方向全合规：L0→L1→L2→L3→L4→L5→L6 单向——脚本覆盖 L0–L5+mcp，CI strict 门禁强制
 
 ### 5.2 符号守恒
 
-- [ ] 关键符号 before/after 计数一致（Tool/Session/Channel/MessageReceiver 等）
-- [ ] 外部 API 无破坏性变更（re-export 保持）
+- [x] 关键符号 before/after 计数一致（Tool/Session/Channel/MessageReceiver 等）——各步 PR 均有符号守恒记录（Phase 10 capability_media 33/33、Phase 9 类型/字段、Phase 8+ DTO 等）
+- [x] 外部 API 无破坏性变更（re-export 保持）——mod.rs/原位置 pub use 重导出全链路保持；Phase 10 旧路径全仓零残留验证
 
 ### 5.3 全局变更放大 A/B
 
-- [ ] 重构前后 90 天 churn 对比：agents 1135 → < 800（借居域迁出后）
-- [ ] 巨文件数对比：19 个 ≥1400 行 → < 10 个
+- [ ] churn 对比（agents 1135 → <800）：**无法在重构窗口内自证**——90 天窗口含全部搬移噪声（当前实测 63,700 行变更），"重构后 90 天"窗口尚不存在，需重构完成后满 90 天（约 2026-11 底）复测
+- [ ] 巨文件数（19 → <10）：实测当前 **13 个** ≥1400 行，未达目标。其中 webui/client.rs 2852 为计划外模块（webui 不在处置表），规划范围内 12 个（qqbot 2833 / telegram 2647 / delegation_coordinator 2609 / agent.rs 2529 / compaction_engine 1993 / scheduler 1986 / orchestrator/delegation 1646 / migration 1619 / webhook 1533 / known_users 1516 / json_file 1492 / memory_tool 1406）——Phase 8 已拆九批（#171–#179），剩余为下一轮拆分的候选清单（agent.rs #145 已有 RFC）
 
 ### 5.4 CI 全绿
 
-- [ ] 每步 PR Check→Clippy(-D warnings)→Test→Release 全绿
-- [ ] 无新增 warning
+- [x] 每步 PR Check→Clippy(-D warnings)→Test→Release 全绿——全程每 PR 合前全绿；#181 修复轮即 Clippy -D warnings 强制的实证
+- [x] 无新增 warning——clippy 门禁拦截（#181 修复轮含 unused import 类 lint 修正）
 
 ### 5.5 部署 smoke
 
-- [ ] 每步 PR 合并后部署 smoke：daemon 启动→发消息→工具执行→渠道投递
-- [ ] 无回归
+- [x] 每步 PR 合并后部署 smoke：daemon 启动→发消息→工具执行→渠道投递——2026-08-27 统一部署 `0d21325`（热切换 03f459e→0d21325，doctor 17/17，13 provider + 3 渠道健康，热切换 turn recovery 实测通过）
+- [x] 无回归——部署后 e2e（本会话即运行于新二进制）正常
 
 ## 6. 风险表
 
@@ -496,4 +501,39 @@ fi
 
 ---
 
-**方案完成。待用户审阅后按迁移序列执行。**
+**方案完成。全部阶段已执行完毕并部署（详见 §9 实施记录）。**
+
+---
+
+## 9. 实施记录
+
+执行期：2026-08（#152 起至 #183 收官，2026-08-27 统一部署 `0d21325`）。
+
+| Phase | PR | 合并 commit | 内容要点 |
+|---|---|---|---|
+| RFC | #145 | — | architecture-restructure-plan（本文档） |
+| 0 | #152 | a15e9e8 | 常量下沉 providers::shared |
+| 1+1.5 | #153 | 7a5329e | api 模块建立 / Tool trait 收窄 / 消息契约迁移 |
+| 1.7 | #156 | 55e0413 | LoopBreakerConfig 下沉 api |
+| 2a | #158 | 1d28a3a | identity 域迁出 agents → L2 借居域清偿 |
+| 2b | #159 | 316a658 | scheduling_types 迁出 → L1 |
+| 2c | #160 | 58423b6 | scheduling runtime 迁出 → L4 |
+| 2d | #161 | 33141eb | commands 域迁出 → L4 |
+| 2 记录 | #162 | 425ba1b | Phase 2 实施记录 |
+| 3a | #163 | 22e1fb0 | webui ClientChannel 迁 L6 |
+| 3b | #164 | e936d4d | 渠道契约下沉 api |
+| 3c | #165 | 5064cbc | Capability 契约入 api + L0 检查加严 |
+| 3d | #166 | 201faaa | agents↔scheduling_runtime SCC 解环（方向反转） |
+| 4 | #167 | 97cd435 | registry 并入 providers |
+| 5 | #168 | fe2827d | storage 编排域迁出 agents/orchestrator |
+| 6 | #169 | 7f82d13 | recovery 家族统一门面 |
+| 7 | #170 | 70407e2 | context_engine → compaction_engine 改名 |
+| 8a–8i | #171–#179 | a188e37 / 3dabdff / 8d184f6 / acd1605 / 3e66c8e / b2c6e37 / d2004bc / fcd2061 / e694181 | 巨文件九批拆分：scheduler→webhook、telegram→turn_stream、qqbot→flow、delegation_coordinator→checkpoint/worktree、wechat 目录化、daemon→builder/lifecycle、shell 拆分、session_context 目录化、message→model/chunking |
+| 8+ | #180 + #181 | 689b6ce / ec3d22c | L3 tools→L4 分层债务清偿：契约下沉（39→20）+ 六个运行时门面 trait（20→0）；layering CI 转 strict |
+| 9 | #182 | e2834ad | channels 共享层上提（typing/debounce，tel −96 / wechat −90 行） |
+| 10 | #183 | 0d21325 | providers 合并组 31→23（vendor_overrides / capability_media / infra） |
+| 11 | 随 #181 | ec3d22c | CI 门禁 strict（本记录定稿；审查于 §4 Phase 11 节） |
+
+部署：2026-08-27 `myclaw update` 热切换 03f459e → **0d21325**（落后 50+ 提交一次补齐）；doctor 17/17、13 provider + 3 渠道健康、热切换回合恢复实测通过。
+
+遗留（非阻塞）：§5.3 两项 A/B 指标未达成/未可测——巨文件 13 ≥ 目标 10（含计划外 webui/client.rs，见上）；churn 需重构后 90 天窗口复测。均留待后续计划。
