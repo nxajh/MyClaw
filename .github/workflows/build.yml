@@ -26,7 +26,6 @@ jobs:
 
   layering:
     runs-on: ubuntu-latest
-    continue-on-error: true  # 过渡态：Phase 2/3 迁移完成后转 strict
     steps:
       - name: Checkout MyClaw
         uses: actions/checkout@v4

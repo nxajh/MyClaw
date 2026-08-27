@@ -99,20 +99,15 @@ pub enum WebhookAuth {
     Bearer,
 }
 
-/// Route-segment validity: lowercase URL-safe slug `[a-z0-9-]`, 1-64 chars.
-/// Names are user-facing, so validation is strict (no `_`, no unicode).
-pub fn is_route_slug(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
 /// Render a prompt template, replacing `{{path.to.field}}` placeholders with
 /// values from the JSON payload.
 ///
 /// - `{{issue.title}}` → reads `issue.title` from the payload
 /// - `{{commits[0].message}}` → array indexing supported
 /// - missing fields render as an empty string
+// #151 Phase 8+：is_route_slug 已下沉 scheduling_types::job_types（L3 工具要用），此处 re-export 保持既有路径。
+pub use crate::scheduling_types::job_types::is_route_slug;
+
 pub fn render_template(template: &str, payload: &serde_json::Value) -> String {
     let mut result = template.to_string();
     let mut start = 0;

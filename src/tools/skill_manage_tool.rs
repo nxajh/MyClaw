@@ -27,8 +27,8 @@ pub struct SkillManageTool {
 }
 
 impl SkillManageTool {
-    pub fn new(
-        skills: Arc<dyn SkillRegistry>,
+    pub fn new<R: SkillRegistry + 'static>(
+        skills: Arc<R>,
         skills_root: PathBuf,
         agents_skills_dir: Option<PathBuf>,
     ) -> Self {

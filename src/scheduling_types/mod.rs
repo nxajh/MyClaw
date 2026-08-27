@@ -2,6 +2,7 @@
 
 pub mod cron_types;
 pub mod event;
+pub mod job_types;
 
 pub use cron_types::{
     DeliveryConfig, DeliveryMode, FailureAlertConfig, RetryableError, RetryConfig, RunRecord,
