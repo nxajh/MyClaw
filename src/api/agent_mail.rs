@@ -4,7 +4,7 @@
 //! the [`AgentMessenger`] bus trait shared between the `send_message` tool
 //! and the agents runtime (`DelegationCoordinator`). Sunk from
 //! `agents::delegation` / `agents::delegator` in #151 phase8+ so the tools
-//! layer can hold the contract without reaching into L4; the old
+//! layer can hold the contract without reaching into L4;
 //! the old `agents::` re-export paths stay alive (compat).
 
 use async_trait::async_trait;
