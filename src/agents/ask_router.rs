@@ -196,3 +196,15 @@ mod tests {
         assert_eq!(reply.content.text, "answer");
     }
 }
+
+
+// ── #151 Phase 8+ AskFulfillment facade ──────────────────────────────────────
+// ask_user (L3) 经 api trait 等待回复；fulfill 半边仍留在本层由 orchestrator
+// 入站分发调用。组合根继续传具体 Arc<AskRouter>。
+
+#[async_trait::async_trait]
+impl crate::api::ask_fulfillment::AskFulfillment for AskRouter {
+    async fn wait_for_reply(&self, session_id: &str) -> anyhow::Result<ChannelInboundMessage> {
+        AskRouter::wait_for_reply(self, session_id).await
+    }
+}
