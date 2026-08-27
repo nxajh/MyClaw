@@ -6,6 +6,7 @@
 //!
 //! No layer may depend on another layer's internals for these contracts —
 //! everything goes through `api`.
+pub mod agent_mail;
 pub mod capability;
 pub mod loop_breaker;
 pub mod message;

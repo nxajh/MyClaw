@@ -8,9 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::api::tool::ToolContext;
-use crate::agents::{
-    AgentMail, AgentMessage, AgentMessenger, KnownUsersRegistry, MessageKind, UserRegistry,
-};
+use crate::api::agent_mail::{AgentMail, AgentMessage, AgentMessenger, MessageKind};
+use crate::identity::{KnownUsersRegistry, UserRegistry};
 use crate::api::message::{
     ChannelFile, ChannelFileMeta, ChannelMessageContent, ChannelOutboundMessage, LocalFileBody,
     MessageReceiver, SendOptions,

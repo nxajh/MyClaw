@@ -152,57 +152,7 @@ pub enum DelegationEvent {
     Message(AgentMessage),
 }
 
-/// Kind of a sub-agent → parent message (turn-suspension RFC §2.3).
-///
-/// Defaults to `Final` so every existing sender keeps today's semantics
-/// (mid-flight messages wake the parent); `Progress` is the new opt-in
-/// kind for sub-agents that want to report progress without interrupting
-/// the parent's context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum MessageKind {
-    /// Ordinary sub-agent → parent message (default; today's behavior —
-    /// injected as `[子代理消息]`).
-    #[default]
-    Final,
-    /// Mid-flight progress report — never injected into the parent context
-    /// (suspended or not); folded into `SubResult.progress` when the
-    /// suspension collects the task's terminal event.
-    Progress,
-}
-
-/// A sub-agent → parent message (RFC agent-messaging §3.4/§3.6).
-#[derive(Debug, Clone)]
-pub struct AgentMessage {
-    /// Unique message id (observability / dedup).
-    pub msg_id: String,
-    /// Display name of the sending sub-agent (its agent name).
-    pub sender_name: String,
-    /// The sub-agent's own session FQID (identity — NOT the recipient).
-    pub sub_session_id: String,
-    /// Parent session FQID that spawned the sub-agent.
-    pub parent_session_id: String,
-    pub text: String,
-    /// `Final` (default) wakes/injects; `Progress` is suppressed (§2.3).
-    pub kind: MessageKind,
-}
-
-/// A parent → sub message sitting in a sub-agent's inbox.
-///
-/// Delivered via an mpsc channel so the parent's `send_message` tool never
-/// needs to touch the sub-agent's locked `Session`. `Agent::run` drains the
-/// inbox before every LLM request and renders the batch as a
-/// `<system-reminder>`; anything still queued when the sub-agent finishes
-/// is drained and attached to its result so it is never silently lost.
-#[derive(Debug, Clone)]
-pub struct AgentMail {
-    /// Unique message id (observability).
-    pub msg_id: String,
-    /// Display name of the sender (the parent agent's name).
-    pub sender_name: String,
-    pub text: String,
-    /// Unix timestamp (seconds).
-    pub timestamp: u64,
-}
+pub use crate::api::agent_mail::{AgentMail, AgentMessage, MessageKind};
 
 /// A running async sub-agent's parent → sub mailbox.
 ///

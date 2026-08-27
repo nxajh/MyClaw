@@ -10,8 +10,6 @@
 
 use async_trait::async_trait;
 
-use crate::agents::delegation::{AgentMail, AgentMessage};
-
 
 /// Invokes sub-agents on demand.
 #[async_trait]
@@ -56,21 +54,4 @@ pub trait AgentDelegator: Send + Sync {
     fn list_available(&self) -> Vec<(String, Option<String>)>;
 }
 
-/// Agent-to-agent message bus used by the `send_message` tool
-/// (RFC agent-messaging §3).
-///
-/// Concrete impl is `DelegationCoordinator` (multi-agent mode only). In
-/// single-agent mode the tool runs without a messenger and `recipient`
-/// targeting errors out.
-#[async_trait]
-pub trait AgentMessenger: Send + Sync {
-    /// Parent → sub: deliver a message to a running async sub-agent's inbox.
-    ///
-    /// Returns `Err` with a user-facing message when the session id is
-    /// unknown (never spawned, already finished, or sync-only).
-    fn send_to_sub_agent(&self, sub_session_id: &str, mail: AgentMail) -> Result<(), String>;
-
-    /// Sub → parent: emit a `DelegationEvent::Message` to wake the parent
-    /// agent. Returns `false` when the event channel is not wired.
-    async fn send_to_parent(&self, event: AgentMessage) -> bool;
-}
+pub use crate::api::agent_mail::AgentMessenger;
