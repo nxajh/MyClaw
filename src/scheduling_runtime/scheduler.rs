@@ -1288,6 +1288,7 @@ pub fn compute_next_run(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::scheduling_types::job_types::parse_hhmm;
     /// 解环) — its only remaining caller was this test module.
     /// Minimal channel mock for webhook dispatch tests (#151 Phase 3d:
     pub(crate) fn test_scheduler(dir: &std::path::Path) -> SharedScheduler {

@@ -444,7 +444,7 @@ fn parse_hours(s: &str) -> Option<(u32, u32)> {
     Some((parse_hhmm(start.trim())?, parse_hhmm(end.trim())?))
 }
 
-fn parse_hhmm(s: &str) -> Option<u32> {
+pub(crate) fn parse_hhmm(s: &str) -> Option<u32> {
     let (h, m) = s.split_once(':')?;
     let hours: u32 = h.trim().parse().ok()?;
     let mins: u32 = m.trim().parse().ok()?;

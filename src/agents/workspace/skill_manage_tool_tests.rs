@@ -4,7 +4,7 @@
 //! + 写后热重载），L3 层经 api 门面无法构造具体类型，故整体迁到 L4：
 //! L4→L3 引用方向合法，测试语义与工具对外行为零改动。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -13,6 +13,7 @@ use serde_json::json;
 use crate::agents::workspace::skill_loader;
 use crate::agents::workspace::skills::SkillManager;
 use crate::providers::Tool;
+use crate::tools::SkillManageTool;
 
 fn setup(workspace: &Path, skill_name: &str) -> Arc<RwLock<SkillManager>> {
     let skills_dir = workspace.join("skills").join(skill_name);

@@ -206,6 +206,7 @@ mod tests {
             argument_hint: None,
             agent_invocable: false,
             user_invocable: false,
+            skill_dir: None,
         });
         let tool = SkillsListTool::new(reg);
 

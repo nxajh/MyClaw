@@ -10,7 +10,10 @@ use crate::providers::Tool;
 use crate::scheduling_runtime::scheduler::Scheduler;
 use crate::scheduling_types::cron_types::*;
 use crate::scheduling_types::job_types::{JobEntry, SchedulerApi};
-use crate::tools::cronjob_tool::{format_unknown_job_listing, parse_webhook_channel, CronJobTool};
+use crate::tools::cronjob_tool::{
+    format_unknown_job_listing, parse_webhook_channel, resolve_delivery_for_create,
+    resolve_delivery_for_update, CronJobTool,
+};
 
 fn args(json: serde_json::Value) -> serde_json::Value { json }
 
@@ -50,7 +53,7 @@ fn accepts_valid_filters() {
 
 #[cfg(test)]
 mod update_echo_tests {
-use crate::scheduling_runtime::scheduler::Scheduler;
+use super::*;
 
 fn test_tool(dir: &std::path::Path) -> CronJobTool {
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
@@ -219,7 +222,7 @@ fn update_via_cronjob_tool_honors_delivery_object() {
 /// configured instead of a bare failure.
 #[cfg(test)]
 mod unknown_job_listing_tests {
-use crate::scheduling_runtime::scheduler::Scheduler;
+use super::*;
 
 fn test_tool(dir: &std::path::Path) -> CronJobTool {
     let (tx, _rx) = tokio::sync::mpsc::channel(8);

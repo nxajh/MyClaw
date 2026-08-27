@@ -1169,7 +1169,7 @@ fn parse_delivery_object(v: &serde_json::Value) -> Result<DeliveryConfig, String
 /// `delivery` object (with `mode`) wins when present; the legacy `target`
 /// string ("last" | "none" | "channel[:account]") is a one-version alias;
 /// neither given defaults to `Last` (the old implicit `target: "last"`).
-fn resolve_delivery_for_create(args: &serde_json::Value) -> Result<DeliveryConfig, String> {
+pub(crate) fn resolve_delivery_for_create(args: &serde_json::Value) -> Result<DeliveryConfig, String> {
     if let Some(v) = args.get("delivery") {
         return parse_delivery_object(v);
     }
@@ -1181,7 +1181,7 @@ fn resolve_delivery_for_create(args: &serde_json::Value) -> Result<DeliveryConfi
 
 /// Same resolution as [`resolve_delivery_for_create`], but for `update`:
 /// `Ok(None)` means neither field was provided — "don't change delivery".
-fn resolve_delivery_for_update(args: &serde_json::Value) -> Result<Option<DeliveryConfig>, String> {
+pub(crate) fn resolve_delivery_for_update(args: &serde_json::Value) -> Result<Option<DeliveryConfig>, String> {
     if let Some(v) = args.get("delivery") {
         return parse_delivery_object(v).map(Some);
     }
