@@ -17,7 +17,7 @@ use tracing::warn;
 
 use crate::commands::register::parse_target;
 use crate::commands::CommandContext;
-use crate::agents::{ContactStatus, KnownUsersRegistry, RequestOutcome};
+use crate::agents::{ContactStatus, RequestOutcome};
 use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 
 /// Split a routing key into (channel, account, user_id).

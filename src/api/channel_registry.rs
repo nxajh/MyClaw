@@ -52,7 +52,6 @@ impl ChannelRegistry {
     }
 }
 
-use std::fmt;
 
 /// A user session key: `channel_type:account_id:sender`.
 ///
