@@ -47,7 +47,6 @@ fn accepts_valid_filters() {
     .unwrap();
     assert_eq!(wh.filters.as_deref().map(|f| f.len()), Some(1));
 }
-}
 
 #[cfg(test)]
 mod update_echo_tests {
@@ -365,3 +364,5 @@ fn newest_first_and_capped() {
     assert!(listing.contains("job24"), "newest (i=24) must survive the cap: {listing}");
     assert!(!listing.contains("  job0 "), "oldest (i=0) must be the one dropped: {listing}");
 }
+}
+
