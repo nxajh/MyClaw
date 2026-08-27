@@ -71,6 +71,7 @@ mod suspension_tests {
     use crate::agents::SessionManager;
     use crate::agents::turn::{SubResult, SubStatus};
     use crate::agents::session_context::SessionContext;
+    use crate::agents::session_context::NoticeTurnGuard;
 
     fn make_ctx() -> (Arc<SessionContext>, Arc<SessionManager>) {
         let manager = Arc::new(SessionManager::in_memory());
