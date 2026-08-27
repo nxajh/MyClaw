@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use chrono::Timelike;
 use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
 

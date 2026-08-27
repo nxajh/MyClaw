@@ -8,7 +8,7 @@
 //! 本模块——它的方法签名引用上述 L1 类型，放 api（L0）会反向引用 L1，
 //! 与契约同层是合法且最小的落点。
 
-use chrono::{Timelike, Utc};
+use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 
 use super::cron_types::{DeliveryConfig, DeliveryMode, FailureAlertConfig, RetryConfig, RunRecord, ScheduleSpec};
@@ -195,7 +195,7 @@ pub struct JobUpdate {
     pub trigger_now: bool,
 }
 
-/// The legacy single-file jobs structure (P1-B2: read fallback only).
+// The legacy single-file jobs structure (P1-B2: read fallback only).
 
 /// Forensic summary of a job at the moment it was removed, captured while
 /// its run log JSONL file (the durable evidence source, per §3.4) still
@@ -523,12 +523,12 @@ pub fn cron_delivery_fields(
     }
 }
 
-/// Check if current time is within active hours.
-/// Format: "HH:MM-HH:MM" e.g. "08:00-24:00".
-/// `tz_name` is the IANA timezone (e.g. "Asia/Shanghai").
-/// Compute the next run time for a job from its schedule spec.
-/// Orthogonal trigger model: None = never timer-due (webhook-only or
-/// archived jobs); the HTTP server handles their other channel.
+// Check if current time is within active hours.
+// Format: "HH:MM-HH:MM" e.g. "08:00-24:00".
+// `tz_name` is the IANA timezone (e.g. "Asia/Shanghai").
+// Compute the next run time for a job from its schedule spec.
+// Orthogonal trigger model: None = never timer-due (webhook-only or
+// archived jobs); the HTTP server handles their other channel.
 
 // ── SchedulerApi facade（#151 Phase 8+）──────────────────────────────────────
 // cronjob 工具（L3）只经此方法面操作调度器；Scheduler 的 impl 放在
