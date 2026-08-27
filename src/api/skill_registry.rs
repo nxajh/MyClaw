@@ -26,6 +26,7 @@ pub struct SkillView {
 /// Listing metadata as rendered by `skills_list`.
 #[derive(Debug, Clone)]
 pub struct SkillSummary {
+    pub skill_dir: Option<PathBuf>,
     pub name: String,
     pub description: String,
     pub version: Option<String>,
