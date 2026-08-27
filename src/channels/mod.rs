@@ -4,6 +4,7 @@ pub mod message;
 #[cfg(feature = "qqbot")]
 pub mod qqbot;
 pub mod security;
+pub mod shared;
 pub mod telegram;
 #[cfg(feature = "wechat")]
 pub mod wechat;

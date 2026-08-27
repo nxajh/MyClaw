@@ -39,6 +39,7 @@ use crate::channels::message::{
     ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
     MessageReceiver, MessageSender,
 };
+use crate::channels::shared::{TypingKeepAlive, TypingParams};
 use crate::config::channel::WechatAccountConfig;
 use crate::{Channel, DedupState, ProcessingStatus};
 
@@ -99,7 +100,7 @@ pub struct WechatChannel {
     debounce_buffer: Arc<Mutex<HashMap<String, WechatDebounceEntry>>>,
     allowed_groups: Option<Vec<String>>,
     /// Active typing keep-alive tasks, keyed by recipient (wxid).
-    typing_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    typing: TypingKeepAlive,
 }
 
 struct WechatDebounceEntry {
@@ -118,7 +119,7 @@ impl WechatChannel {
             debounce_ms: config.debounce_ms,
             debounce_buffer: Arc::new(Mutex::new(HashMap::new())),
             allowed_groups: config.allowed_groups.clone(),
-            typing_tasks: Arc::new(Mutex::new(HashMap::new())),
+            typing: TypingKeepAlive::new(),
             config,
             dedup: DedupState::new(),
         };
@@ -286,62 +287,40 @@ impl WechatChannel {
 
     /// Start a typing keep-alive background task for a recipient.
     ///
-    /// WeChat's typing indicator expires after a few seconds. This spawns a
-    /// task that re-sends it every 3 seconds until `stop_typing_keepalive`
-    /// is called.
+    /// WeChat's typing indicator expires after a few seconds. The shared
+    /// keep-alive loop re-sends it every 3 seconds until
+    /// `stop_typing_keepalive` is called, with a 120s TTL cap and a circuit
+    /// breaker on 3 consecutive send failures.
     fn start_typing_keepalive(&self, recipient: &str) {
-        let mut tasks = self.typing_tasks.lock();
-        // Abort existing task for this recipient
-        if let Some(handle) = tasks.remove(recipient) {
-            handle.abort();
-        }
-
         let api = self.api.clone();
         let recipient_key = recipient.to_string();
-        let recipient_clone = recipient_key.clone();
-        let typing_tasks = self.typing_tasks.clone();
 
-        let handle = tokio::spawn(async move {
-            let interval = Duration::from_secs(3);
-            let max_duration = Duration::from_secs(120);
-            let start = tokio::time::Instant::now();
-            let mut consecutive_failures: u32 = 0;
-
-            loop {
-                if start.elapsed() >= max_duration {
-                    break;
+        self.typing.start(
+            recipient,
+            TypingParams {
+                interval: Duration::from_secs(3),
+                max_duration: Some(Duration::from_secs(120)),
+                max_consecutive_failures: 3,
+                on_expired: None,
+                on_breaker: Some(Box::new(|_failures, recipient_key, e| {
+                    debug!("WeChat: typing keep-alive circuit breaker for {recipient_key}: {e}");
+                })),
+                on_exit: None,
+            },
+            move || {
+                let api = api.clone();
+                move || {
+                    let api = api.clone();
+                    let to = recipient_key.clone();
+                    async move { api.send_typing(&to, true).await.map_err(|e| e.to_string()) }
                 }
-                if let Err(e) = api.send_typing(&recipient_key, true).await {
-                    consecutive_failures += 1;
-                    if consecutive_failures >= 3 {
-                        debug!(
-                            "WeChat: typing keep-alive circuit breaker for {recipient_key}: {e}"
-                        );
-                        break;
-                    }
-                } else {
-                    consecutive_failures = 0;
-                }
-                tokio::time::sleep(interval).await;
-            }
-
-            // Clean up entry if no new task has taken over.
-            let mut tasks = typing_tasks.lock();
-            if let Some(h) = tasks.get(&recipient_clone) {
-                if h.is_finished() {
-                    tasks.remove(&recipient_clone);
-                }
-            }
-        });
-        tasks.insert(recipient.to_string(), handle);
+            },
+        );
     }
 
     /// Stop (abort) the typing keep-alive task and send a cancel.
     fn stop_typing_keepalive(&self, recipient: &str) {
-        let mut tasks = self.typing_tasks.lock();
-        if let Some(handle) = tasks.remove(recipient) {
-            handle.abort();
-        }
+        self.typing.stop(recipient);
     }
 }
 

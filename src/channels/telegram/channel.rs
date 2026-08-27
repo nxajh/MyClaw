@@ -14,6 +14,7 @@ use crate::channels::message::{
     ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
     MessageReceiver, MessageSender,
 };
+use crate::channels::shared::{TypingKeepAlive, TypingParams};
 use crate::channels::{FoldCandidate, TurnStream};
 use crate::config::channel::TelegramAccountConfig;
 use crate::{Channel, DedupState, ProcessingStatus};
@@ -109,7 +110,7 @@ pub struct TelegramChannel {
     /// Workspace directory for saving attachments.
     workspace_dir: Option<std::path::PathBuf>,
     /// Active typing keep-alive tasks, keyed by recipient (chat_id).
-    typing_tasks: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
+    typing: TypingKeepAlive,
     /// Whether to send acknowledgement reactions on received messages.
     ack_reactions: bool,
     /// Track ack reactions: reply_target → (chat_id, message_id) for removal after reply.
@@ -157,7 +158,7 @@ impl TelegramChannel {
             dedup: DedupState::new(),
             bot_username: Arc::new(Mutex::new(None)),
             workspace_dir: config.workspace_dir.map(std::path::PathBuf::from),
-            typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            typing: TypingKeepAlive::new(),
             ack_reactions: config.ack_reactions,
             pending_acks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             status_reactions: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -1027,16 +1028,11 @@ impl TelegramChannel {
 
     /// Start a typing keep-alive task for a recipient.
     ///
-    /// Telegram's sendChatAction lasts ~5 seconds. This method spawns a
-    /// background task that refreshes it every 4 seconds until aborted.
+    /// Telegram's sendChatAction lasts ~5 seconds. The shared keep-alive
+    /// loop refreshes it every 4 seconds until aborted, with a 60s TTL cap
+    /// and a circuit breaker on 2 consecutive send failures.
     fn start_internal_typing(&self, recipient: &str) {
         let (chat_id, thread_id) = Self::parse_reply_target(recipient);
-
-        // Abort existing task for this recipient
-        let mut tasks = self.typing_tasks.lock();
-        if let Some(handle) = tasks.remove(recipient) {
-            handle.abort();
-        }
 
         // Record typing start time for stall watchdog.
         self.typing_started_at
@@ -1045,26 +1041,15 @@ impl TelegramChannel {
 
         let bot_token = self.bot_token.clone();
         let api_base = self.api_base.clone();
-        let recipient_key = recipient.to_string();
-        let recipient_key_clone = recipient_key.clone();
-        let typing_tasks = self.typing_tasks.clone();
         let typing_started_at = self.typing_started_at.clone();
 
-        let handle = tokio::spawn(async move {
-            let max_consecutive_failures: u32 = 2;
-            let max_duration = std::time::Duration::from_secs(60);
-            let start = tokio::time::Instant::now();
-            let mut consecutive_failures: u32 = 0;
-
-            // Create a typing-specific client with shorter timeout.
-            let typing_client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
-
-            loop {
-                // TTL check
-                if start.elapsed() >= max_duration {
+        self.typing.start(
+            recipient,
+            TypingParams {
+                interval: std::time::Duration::from_secs(4),
+                max_duration: Some(std::time::Duration::from_secs(60)),
+                max_consecutive_failures: 2,
+                on_expired: Some(Box::new(|max_secs, recipient_key| {
                     // issue #113: this fires whenever a turn simply runs
                     // long (normal for e.g. multi-step tool use) — it is
                     // not itself evidence of a stall. Cross-reference with
@@ -1073,54 +1058,51 @@ impl TelegramChannel {
                     warn!(
                         "Telegram typing TTL exceeded ({}s) for {} — long turn, not necessarily a stall; \
                          cross-reference with LLM/provider logs for this turn before escalating",
-                        max_duration.as_secs(),
-                        recipient_key
+                        max_secs, recipient_key
                     );
-                    break;
-                }
-
-                // Send typing action
-                let url = format!("{}/bot{}/sendChatAction", api_base, bot_token);
-                let req = SendChatActionRequest {
-                    chat_id: chat_id.clone(),
-                    message_thread_id: thread_id.clone(),
-                    action: "typing".to_string(),
-                };
-                match typing_client.post(&url).json(&req).send().await {
-                    Ok(_) => consecutive_failures = 0,
-                    Err(e) => {
-                        consecutive_failures += 1;
-                        if consecutive_failures >= max_consecutive_failures {
-                            warn!(
-                                "Telegram typing circuit breaker tripped after {consecutive_failures} consecutive failures for {}: {e}",
-                                recipient_key
-                            );
-                            break;
-                        }
+                })),
+                on_breaker: Some(Box::new(
+                    |consecutive_failures, recipient_key, e| {
+                        warn!(
+                            "Telegram typing circuit breaker tripped after {consecutive_failures} consecutive failures for {recipient_key}: {e}"
+                        );
+                    },
+                )),
+                on_exit: Some(Box::new(move |recipient_key| {
+                    typing_started_at.lock().remove(recipient_key);
+                })),
+            },
+            move || {
+                // Create a typing-specific client with shorter timeout.
+                let typing_client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+                move || {
+                    let client = typing_client.clone();
+                    let url = format!("{}/bot{}/sendChatAction", api_base, bot_token);
+                    let req = SendChatActionRequest {
+                        chat_id: chat_id.clone(),
+                        message_thread_id: thread_id.clone(),
+                        action: "typing".to_string(),
+                    };
+                    async move {
+                        client
+                            .post(&url)
+                            .json(&req)
+                            .send()
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
                     }
                 }
-
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-            }
-
-            // Task exiting: clean up only if no new task has taken over.
-            let mut tasks = typing_tasks.lock();
-            if let Some(h) = tasks.get(&recipient_key_clone) {
-                if h.is_finished() {
-                    tasks.remove(&recipient_key_clone);
-                    typing_started_at.lock().remove(&recipient_key_clone);
-                }
-            }
-        });
-        tasks.insert(recipient.to_string(), handle);
+            },
+        );
     }
 
     /// Stop (abort) the typing keep-alive task for a recipient.
     fn stop_internal_typing(&self, recipient: &str) {
-        let mut tasks = self.typing_tasks.lock();
-        if let Some(handle) = tasks.remove(recipient) {
-            handle.abort();
-        }
+        self.typing.stop(recipient);
         // Remove stall watchdog tracking.
         self.typing_started_at.lock().remove(recipient);
     }
