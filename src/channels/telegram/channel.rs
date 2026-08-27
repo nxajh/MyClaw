@@ -14,7 +14,7 @@ use crate::channels::message::{
     ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
     MessageReceiver, MessageSender,
 };
-use crate::channels::shared::{TypingKeepAlive, TypingParams};
+use crate::channels::shared::{InboundDebouncer, TypingKeepAlive, TypingParams};
 use crate::channels::{FoldCandidate, TurnStream};
 use crate::config::channel::TelegramAccountConfig;
 use crate::{Channel, DedupState, ProcessingStatus};
@@ -78,16 +78,6 @@ fn is_table_delimiter_local(line: &str) -> bool {
 
 // ── TelegramChannel ────────────────────────────────────────────────────────────
 
-/// Entry in the debounce buffer for merging rapid consecutive messages from the same sender.
-struct DebounceEntry {
-    sender: MessageSender,
-    receiver: MessageReceiver,
-    texts: Vec<String>,
-    files: Vec<ChannelFile>,
-    first_ts: u64,
-    timer: tokio::task::JoinHandle<()>,
-}
-
 /// Reaction tracker: reply_target → Vec<(chat_id, message_id)>.
 type ReactionTracker = Arc<Mutex<std::collections::HashMap<String, Vec<(i64, i64)>>>>;
 
@@ -117,10 +107,9 @@ pub struct TelegramChannel {
     pending_acks: ReactionTracker,
     /// Status reactions: reply_target → Vec<(chat_id, msg_id)>.
     status_reactions: ReactionTracker,
-    /// Debounce window in milliseconds (0 = disabled).
-    debounce_ms: u64,
-    /// Debounce buffer: "sender|reply_target" → pending entry.
-    debounce_buffer: Arc<Mutex<std::collections::HashMap<String, DebounceEntry>>>,
+    /// Debounce window in milliseconds (0 = disabled) + merge buffer
+    /// ("sender|reply_target" key).
+    debouncer: InboundDebouncer,
     /// Stall watchdog timeout in seconds (0 = disabled).
     stall_timeout_secs: u64,
     /// Track when typing started for each recipient: reply_target → Instant.
@@ -162,8 +151,7 @@ impl TelegramChannel {
             ack_reactions: config.ack_reactions,
             pending_acks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             status_reactions: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            debounce_ms: config.debounce_ms,
-            debounce_buffer: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            debouncer: InboundDebouncer::new(config.debounce_ms, Some("Telegram")),
             stall_timeout_secs: config.stall_timeout_secs,
             typing_started_at: Arc::new(Mutex::new(std::collections::HashMap::new())),
             stall_messages: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -1114,80 +1102,14 @@ impl TelegramChannel {
     /// Messages from the same sender in the same conversation are merged
     /// and dispatched as a single `ChannelInboundMessage` after the debounce window
     /// expires. If debounce is disabled (`debounce_ms == 0`), the message is
-    /// sent immediately via `tx`.
+    /// sent immediately via `tx`. Buffer/merge/timer mechanics live in the
+    /// shared `InboundDebouncer`.
     async fn debounce_send(
         &self,
-        mut msg: ChannelInboundMessage,
+        msg: ChannelInboundMessage,
         tx: mpsc::Sender<ChannelInboundMessage>,
     ) {
-        if self.debounce_ms == 0 {
-            if let Err(e) = tx.send(msg).await {
-                warn!("Telegram dispatch error: {e}");
-            }
-            return;
-        }
-
-        let key = format!("{}|{}", msg.sender.id, msg.receiver.id);
-        let debounce_ms = self.debounce_ms;
-        let buffer = self.debounce_buffer.clone();
-        let sender_key = key.clone();
-
-        // Create timer task (starts sleeping immediately).
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)).await;
-            let entry = buffer.lock().remove(&sender_key);
-            if let Some(entry) = entry {
-                let channel_msg = ChannelInboundMessage {
-                    id: format!("debounced_{}", entry.first_ts),
-                    sender: entry.sender,
-                    receiver: entry.receiver,
-                    content: ChannelMessageContent {
-                        text: entry.texts.join("\n"),
-                        files: entry.files,
-                        buttons: vec![],
-                    },
-                    timestamp: entry.first_ts,
-                    interruption_scope_id: None,
-                    silenced_override: None,
-                    run_mode: Default::default(),
-                };
-                let _ = tx.send(channel_msg).await;
-            }
-        });
-
-        // Lock the buffer and update/create entry.
-        {
-            let mut buf = self.debounce_buffer.lock();
-            if let Some(entry) = buf.get_mut(&key) {
-                // Merge into existing entry.
-                if !msg.content.text.is_empty() {
-                    entry.texts.push(msg.content.text);
-                }
-                if !msg.content.files.is_empty() {
-                    entry.files.append(&mut msg.content.files);
-                }
-                // Cancel old timer, set new one.
-                entry.timer.abort();
-                entry.timer = handle;
-            } else {
-                // New entry.
-                buf.insert(
-                    key,
-                    DebounceEntry {
-                        sender: msg.sender,
-                        receiver: msg.receiver,
-                        texts: if msg.content.text.is_empty() {
-                            vec![]
-                        } else {
-                            vec![msg.content.text]
-                        },
-                        files: msg.content.files,
-                        first_ts: msg.timestamp,
-                        timer: handle,
-                    },
-                );
-            }
-        }
+        self.debouncer.push(msg, tx).await;
     }
 
     /// Background task that monitors for stalled conversations.
@@ -1729,7 +1651,7 @@ impl TelegramChannel {
                     run_mode: Default::default(),
                 };
 
-                if self.debounce_ms > 0 {
+                if self.debouncer.window_ms() > 0 {
                     // Clean up stale error reactions from previous interactions
                     let stale_status = self
                         .status_reactions
@@ -1751,9 +1673,9 @@ impl TelegramChannel {
                             .push((chat.id, msg.message_id));
                     }
 
-                    let debounce_key =
-                        format!("{}|{}", channel_msg.sender.id, channel_msg.receiver.id);
-                    let is_new = !self.debounce_buffer.lock().contains_key(&debounce_key);
+                    let is_new = !self
+                        .debouncer
+                        .is_pending(&channel_msg.sender.id, &channel_msg.receiver.id);
                     if is_new {
                         self.start_internal_typing(&channel_msg.receiver.id);
                     }
