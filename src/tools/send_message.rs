@@ -283,10 +283,10 @@ impl SendMessageTool {
             });
         }
         match known_users.delivery_verdict(&owner_uid, &peer) {
-            crate::agents::DeliveryVerdict::Allowed => {
+            crate::identity::DeliveryVerdict::Allowed => {
                 known_users.push_user_mail(
                     &peer,
-                    crate::agents::UserMail {
+                    crate::identity::UserMail {
                         msg_id: Fqid::new(&self.namespace, TYPE_MSG).to_string(),
                         sender_user_id: owner_uid.clone(),
                         sender_nickname: user_registry.display(&owner_uid),
@@ -303,14 +303,14 @@ impl SendMessageTool {
                     error: None,
                 })
             }
-            crate::agents::DeliveryVerdict::Blocked => Ok(ToolResult {
+            crate::identity::DeliveryVerdict::Blocked => Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("the recipient {} has blocked you", recipient)),
             }),
             // RFC §4.2 工具通道: 未建立关系 → 返回"发送好友请求?"引导,由 bot
             // 确认后调 friend_request 工具;框架不自动发请求。
-            crate::agents::DeliveryVerdict::NotFriends => Ok(ToolResult {
+            crate::identity::DeliveryVerdict::NotFriends => Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!(
@@ -813,7 +813,7 @@ mod tests {
     /// 登记 alice/bob 两个 User（FQID）+ 绑定各自 rk（P4 前置：gate 依赖
     /// rk → FQID 绑定，联系人键折叠到 FQID）。
     fn registered_users() -> (Arc<KnownUsersRegistry>, Arc<UserRegistry>) {
-        let resolver = Arc::new(crate::agents::UserResolver::new());
+        let resolver = Arc::new(crate::identity::UserResolver::new());
         let reg = Arc::new(KnownUsersRegistry::in_memory().with_resolver(resolver));
         reg.record("qqbot", "xiaoer", "alice", "default");
         reg.record("qqbot", "xiaoer", "bob", "default");

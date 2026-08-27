@@ -21,7 +21,7 @@ use tracing::warn;
 use crate::commands::friends::rk_for;
 use crate::commands::register::parse_target;
 use crate::api::tool::ToolContext;
-use crate::agents::{ContactStatus, KnownUsersRegistry, RequestOutcome, UserMail, UserRegistry};
+use crate::identity::{ContactStatus, KnownUsersRegistry, RequestOutcome, UserMail, UserRegistry};
 use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::ids::{DEFAULT_NAMESPACE, Fqid, TYPE_MSG};
 use crate::providers::{Tool, ToolResult};
@@ -102,7 +102,7 @@ impl FriendToolsCtx {
 }
 
 /// 在联系人表里按 FQID 精确查找 peer 键（P4: 联系人键一律是 user.id）。
-fn find_peer<'a>(contacts: &'a [(String, crate::agents::ContactEntry)], target: &str) -> Option<&'a str> {
+fn find_peer<'a>(contacts: &'a [(String, crate::identity::ContactEntry)], target: &str) -> Option<&'a str> {
     contacts
         .iter()
         .find(|(peer, _)| peer == target)
@@ -522,7 +522,7 @@ impl Tool for FriendListTool {
         for (peer, entry) in contacts {
             let state = match entry.status {
                 ContactStatus::Pending
-                    if entry.direction == crate::agents::ContactDirection::In =>
+                    if entry.direction == crate::identity::ContactDirection::In =>
                 {
                     "pending-in"
                 }
