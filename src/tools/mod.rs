@@ -50,6 +50,11 @@ pub use agent_resume::AgentResumeTool;
 pub use ask_user::AskUserTool;
 pub use calculator::CalculatorTool;
 pub use cronjob_tool::CronJobTool;
+#[cfg(test)]
+pub(crate) use cronjob_tool::{
+    format_unknown_job_listing, parse_webhook_channel, resolve_delivery_for_create,
+    resolve_delivery_for_update,
+};
 pub use delegate::AgentDelegateTool;
 pub use file_ops::{FileEditTool, FileReadTool, FileWriteTool};
 pub use friends::{

@@ -3,16 +3,16 @@
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::agents::DelegationCoordinator;
+use crate::api::agent_lifecycle::AgentLifecycle;
 use crate::providers::{Tool, ToolResult};
 
 /// The agent_list tool — shows running sub-agents.
 pub struct AgentListTool {
-    delegator: Arc<DelegationCoordinator>,
+    delegator: Arc<dyn AgentLifecycle>,
 }
 
 impl AgentListTool {
-    pub fn new(delegator: Arc<DelegationCoordinator>) -> Self {
+    pub fn new<D: AgentLifecycle + 'static>(delegator: Arc<D>) -> Self {
         Self { delegator }
     }
 }

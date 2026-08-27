@@ -11,19 +11,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::agents::ask_router::AskRouter;
+use crate::api::ask_fulfillment::AskFulfillment;
 use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::providers::{Tool, ToolResult};
 
 pub struct AskUserTool {
-    router: Arc<AskRouter>,
+    router: Arc<dyn AskFulfillment>,
 }
 
 impl AskUserTool {
     /// Construct an `ask_user` tool bound to the shared `AskRouter`.
     /// Orchestrator's inbound dispatch must use the *same* router so
     /// `fulfill(session_id, msg)` wakes the wait registered here.
-    pub fn new(router: Arc<AskRouter>) -> Self {
+    pub fn new<R: AskFulfillment + 'static>(router: Arc<R>) -> Self {
         Self { router }
     }
 }

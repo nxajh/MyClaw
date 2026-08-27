@@ -1,21 +1,20 @@
 //! SkillTool — loads skill full text or auxiliary file on demand via the LLM.
 
 use async_trait::async_trait;
-use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::agents::SkillManager;
+use crate::api::skill_registry::SkillRegistry;
 use crate::providers::{Tool, ToolResult};
 
 pub struct SkillTool {
-    skills: Arc<RwLock<SkillManager>>,
+    skills: Arc<dyn SkillRegistry>,
 }
 
 impl SkillTool {
-    pub fn new(skills: Arc<RwLock<SkillManager>>) -> Self {
+    pub fn new<R: SkillRegistry + 'static>(skills: Arc<R>) -> Self {
         Self { skills }
     }
 }
@@ -63,12 +62,10 @@ impl Tool for SkillTool {
             .ok_or_else(|| anyhow::anyhow!("'name' is required"))?;
         let file_path = args["file_path"].as_str();
 
-        let skills = self.skills.read();
-
-        let skill = match skills.get(name) {
+        let skill = match self.skills.find(name) {
             Some(s) => s,
             None => {
-                let available: Vec<&str> = skills.skills_iter().map(|(n, _)| n).collect();
+                let available = self.skills.skill_names();
                 return Ok(ToolResult {
                     success: false,
                     output: json!({
@@ -309,28 +306,31 @@ fn substitute_template_vars(content: &str, skill_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::Skill;
+    use crate::api::skill_registry::{InMemorySkillRegistry, SkillView};
 
-    fn make_skill(name: &str, agent_invocable: bool) -> Skill {
-        Skill {
+    fn make_skill(name: &str, agent_invocable: bool) -> SkillView {
+        SkillView {
             name: name.to_string(),
             description: "test desc".to_string(),
-            keywords: vec![],
             prompt_body: "## Instructions\nDo the thing.".to_string(),
-            version: None,
-            when_to_use: None,
-            argument_hint: None,
-            arguments: vec![],
-            user_invocable: true,
             agent_invocable,
             skill_dir: None,
         }
     }
 
+    fn registry_with(skill: SkillView) -> Arc<InMemorySkillRegistry> {
+        let reg = InMemorySkillRegistry::new();
+        reg.upsert(skill);
+        Arc::new(reg)
+    }
+
+    fn empty_registry() -> Arc<InMemorySkillRegistry> {
+        Arc::new(InMemorySkillRegistry::new())
+    }
+
     #[test]
     fn test_skill_tool_spec() {
-        let mgr = Arc::new(RwLock::new(SkillManager::new()));
-        let tool = SkillTool::new(mgr);
+        let tool = SkillTool::new(empty_registry());
         assert_eq!(tool.name(), "skill_view");
         let schema = tool.parameters_schema();
         assert_eq!(schema["required"][0], "name");
@@ -338,9 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_known_skill() {
-        let mut mgr = SkillManager::new();
-        mgr.register(make_skill("test", true));
-        let tool = SkillTool::new(Arc::new(RwLock::new(mgr)));
+        let tool = SkillTool::new(registry_with(make_skill("test", true)));
 
         let result = tool
             .execute(
@@ -357,7 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_unknown_skill() {
-        let tool = SkillTool::new(Arc::new(RwLock::new(SkillManager::new())));
+        let tool = SkillTool::new(empty_registry());
         let result = tool
             .execute(
                 json!({"name": "nonexistent"}),
@@ -372,9 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_non_agent_invocable() {
-        let mut mgr = SkillManager::new();
-        mgr.register(make_skill("private", false));
-        let tool = SkillTool::new(Arc::new(RwLock::new(mgr)));
+        let tool = SkillTool::new(registry_with(make_skill("private", false)));
 
         let result = tool
             .execute(
@@ -390,9 +386,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_traversal_rejected() {
-        let mut mgr = SkillManager::new();
-        mgr.register(make_skill("test", true));
-        let tool = SkillTool::new(Arc::new(RwLock::new(mgr)));
+        let tool = SkillTool::new(registry_with(make_skill("test", true)));
 
         let result = tool
             .execute(

@@ -3,7 +3,7 @@
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::agents::DelegationCoordinator;
+use crate::api::agent_lifecycle::AgentLifecycle;
 use crate::api::delegation::RunningAgentInfo;
 use crate::providers::{Tool, ToolResult};
 use crate::str_utils::{UNKNOWN_ID_LISTING_CAP, UNKNOWN_ID_PREVIEW_CHARS};
@@ -49,11 +49,11 @@ fn format_unknown_agent_listing(mut records: Vec<RunningAgentInfo>) -> String {
 
 /// The agent_kill tool — terminates a running sub-agent.
 pub struct AgentKillTool {
-    delegator: Arc<DelegationCoordinator>,
+    delegator: Arc<dyn AgentLifecycle>,
 }
 
 impl AgentKillTool {
-    pub fn new(delegator: Arc<DelegationCoordinator>) -> Self {
+    pub fn new<D: AgentLifecycle + 'static>(delegator: Arc<D>) -> Self {
         Self { delegator }
     }
 }
