@@ -25,7 +25,7 @@ fn format_unknown_resumable_listing(mut checkpoints: Vec<ResumableAgent>) -> Str
     if checkpoints.is_empty() {
         return " No timed-out sub-agents are currently resumable.".to_string();
     }
-    checkpoints.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    checkpoints.sort_by(|a, b| b.started_at_rfc3339.cmp(&a.started_at_rfc3339));
     let total = checkpoints.len();
     let shown: Vec<String> = checkpoints
         .into_iter()

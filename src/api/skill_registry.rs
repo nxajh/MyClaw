@@ -43,6 +43,10 @@ pub trait SkillRegistry: Send + Sync {
     /// All registered skill names (not-found listings).
     fn skill_names(&self) -> Vec<String>;
 
+    /// On-disk directory of a skill (shared-library read-only check in
+    /// `skill_manage`).
+    fn skill_dir(&self, name: &str) -> Option<PathBuf>;
+
     /// Listing metadata for every skill (`skills_list`).
     fn list(&self) -> Vec<SkillSummary>;
 
@@ -102,6 +106,10 @@ impl SkillRegistry for InMemorySkillRegistry {
 
     fn skill_names(&self) -> Vec<String> {
         self.skills.read().unwrap().iter().map(|s| s.name.clone()).collect()
+    }
+
+    fn skill_dir(&self, name: &str) -> Option<PathBuf> {
+        self.find(name).and_then(|v| v.skill_dir)
     }
 
     fn list(&self) -> Vec<SkillSummary> {

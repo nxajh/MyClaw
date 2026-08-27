@@ -241,6 +241,10 @@ impl crate::api::skill_registry::SkillRegistry for parking_lot::RwLock<SkillMana
         self.read().skills_iter().map(|(n, _)| n.to_string()).collect()
     }
 
+    fn skill_dir(&self, name: &str) -> Option<std::path::PathBuf> {
+        self.read().skill_dir(name).map(|p| p.to_path_buf())
+    }
+
     fn list(&self) -> Vec<crate::api::skill_registry::SkillSummary> {
         use crate::api::skill_registry::SkillSummary;
         self.read()
@@ -253,6 +257,7 @@ impl crate::api::skill_registry::SkillRegistry for parking_lot::RwLock<SkillMana
                 argument_hint: s.argument_hint.clone(),
                 agent_invocable: s.agent_invocable,
                 user_invocable: s.user_invocable,
+                skill_dir: s.skill_dir.clone(),
             })
             .collect()
     }

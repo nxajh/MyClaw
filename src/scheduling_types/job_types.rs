@@ -496,7 +496,7 @@ pub fn parse_target_string(target: &str) -> DeliveryConfig {
 /// time (the response goes to whoever most recently messaged in, which may
 /// differ from trigger time for a long-running turn) - existing behavior,
 /// unchanged by #78.
-fn cron_delivery_fields(
+pub fn cron_delivery_fields(
     delivery: &DeliveryConfig,
 ) -> (
     Option<String>,

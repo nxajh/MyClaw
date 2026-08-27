@@ -29,9 +29,9 @@ use super::webhook::{WebhookJobDef, is_route_slug};
 
 // #151 Phase 8+：契约类型/纯函数已下沉 scheduling_types::job_types，此处 re-export 保持既有路径。
 pub use crate::scheduling_types::job_types::{
-    cron_delivery_fields, is_active_hours, parse_target_string, resolve_tz, scan_prompt_injection,
-    validate_active_hours, validate_at_timestamp, validate_schedule, validate_tz, JobEntry,
-    JobRemovalAudit, JobUpdate, WebhookDef, WebhookFilter,
+    cron_delivery_fields, is_active_hours, normalize_weekday_unix, parse_target_string, resolve_tz,
+    scan_prompt_injection, validate_active_hours, validate_at_timestamp, validate_schedule,
+    validate_tz, JobEntry, JobRemovalAudit, JobUpdate, WebhookDef, WebhookFilter,
 };
 
 // ── #151 Phase 8+ SchedulerApi facade impl ───────────────────────────────────

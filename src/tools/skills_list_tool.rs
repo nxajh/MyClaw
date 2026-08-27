@@ -67,7 +67,7 @@ impl Tool for SkillsListTool {
                 if !skill.user_invocable {
                     entry["user_invocable"] = json!(false);
                 }
-                if let Some(ref dir) = skill.skill_dir {
+                if let Some(dir) = skill.skill_dir {
                     entry["skill_dir"] = json!(dir.display().to_string());
                     let files = scan_skill_files(dir);
                     if !files.is_empty() {

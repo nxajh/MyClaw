@@ -375,11 +375,7 @@ impl SkillManageTool {
     /// shared-only skill, the writes/deletes silently succeeded against the
     /// shared library).
     fn get_skill_dir(&self, name: &str) -> Result<PathBuf, String> {
-        let dir = self
-            .skills
-            .read()
-            .skill_dir(name)
-            .map(|p| p.to_path_buf())
+        let dir = self.skills.skill_dir(name)
             .ok_or_else(|| format!("Skill '{}' not found.", name))?;
 
         if let Some(shared) = &self.agents_skills_dir {
