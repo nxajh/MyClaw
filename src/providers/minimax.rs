@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 
-use crate::providers::anthropic::AnthropicProvider;
+use crate::providers::vendor_overrides::AnthropicProvider;
 use crate::providers::credential_pool::SharedApiKey;
 use crate::providers::search::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};

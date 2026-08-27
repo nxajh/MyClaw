@@ -45,25 +45,22 @@ pub use video::{VideoGenerationProvider, VideoRequest, VideoResponse};
 
 // ── Implementations ────────────────────────────────────────────────────────────
 
-pub mod anthropic;
+pub mod vendor_overrides; // Anthropic/Kimi shells + DeepSeek/Qwen body overrides (merged, #151 Phase 10)
 pub mod credential_pool;
-pub mod deepseek;
 pub mod fallback;
 pub mod glm;
 pub mod glm_mcp;
 pub mod google;
 pub mod http;
-pub mod kimi;
 pub mod media;
 pub mod provider_factory;
 pub mod provider_id;
-pub mod qwen;
 pub mod minimax;
 pub mod openai;
 pub mod shared;
 pub mod xiaomi;
 
-pub use anthropic::AnthropicProvider;
+pub use vendor_overrides::{AnthropicProvider, KimiProvider};
 pub use credential_pool::{
     CredentialEntry, CredentialPool, CredentialStatus, RotationStrategy, SharedApiKey,
     SharedCredentialPool,
@@ -71,7 +68,6 @@ pub use credential_pool::{
 pub use fallback::FallbackChatProvider;
 pub use glm::GlmProvider;
 pub use google::GoogleProvider;
-pub use kimi::KimiProvider;
 pub use media::{
     FileModality, MediaCaps, MediaInlineDecision, MediaInputPolicy, MediaLoweringProvider,
     MediaMarkerReason, MediaPolicy, MediaTransport, age_media_in_message, audio_marker,

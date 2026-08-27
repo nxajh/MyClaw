@@ -160,7 +160,7 @@ impl ProviderFactory {
             // ── DeepSeek: OpenAI client + DeepSeek body override (interleaved thinking) ──
             (well_known::DEEPSEEK, _) => {
                 let client = OpenAiChatCompletionsClient::new(request.api_key, request.base_url)
-                    .with_body_override(crate::providers::deepseek::deepseek_body_override);
+                    .with_body_override(crate::providers::vendor_overrides::deepseek_body_override);
                 let client = match request.user_agent {
                     Some(ua) => client.with_user_agent(ua),
                     None => client,
@@ -170,7 +170,7 @@ impl ProviderFactory {
             // ── Qwen: OpenAI client + Qwen body override (enable_thinking + reasoning echo) ──
             (well_known::QWEN, _) => {
                 let client = OpenAiChatCompletionsClient::new(request.api_key, request.base_url)
-                    .with_body_override(crate::providers::qwen::qwen_body_override);
+                    .with_body_override(crate::providers::vendor_overrides::qwen_body_override);
                 let client = match request.user_agent {
                     Some(ua) => client.with_user_agent(ua),
                     None => client,
