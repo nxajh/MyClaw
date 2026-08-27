@@ -48,16 +48,6 @@ use crate::ids::{Fqid, TYPE_SESSION};
 /// sub-agents on CI-only hosts.
 const SUB_AGENT_TIMEOUT_DEFAULT_SECS: u64 = 1200;
 
-/// Hard ceiling: no delegation may run longer than this, tool-call `timeout`
-/// included — there is no per-agent override. `pub(crate)` so
-/// `tools::delegate::AgentDelegateTool::preferred_timeout_secs` can use it
-/// as the floor for the *generic* per-tool-call timeout `ToolExecutor`
-/// applies to every tool — without that override, that outer wrapper
-/// (`[agent] tool_timeout_secs`, default far below this) would silently
-/// drop the whole `agent_delegate` call before a delegation ever gets to
-/// run for the `timeout` its own caller actually asked for.
-pub const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
-
 /// Capacity of each running sub-agent's inbox (parent → sub messages).
 const SUB_AGENT_INBOX_CAPACITY: usize = 64;
 
@@ -144,17 +134,7 @@ pub struct RunningEntry {
     pub allowed_tools: Option<Vec<String>>,
 }
 
-/// Snapshot view of a running-table entry for `agent_list` / logging.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RunningAgentInfo {
-    /// The sub-agent's session FQID (`<ns>/s/<uuidv7>`) — its identity and
-    /// the addressing key for `agent_kill` / `send_message`.
-    pub sub_session_id: String,
-    pub agent_name: String,
-    pub status: DelegationStatus,
-    /// Seconds since the sub-agent was spawned.
-    pub elapsed_secs: u64,
-}
+pub use crate::api::delegation::{RunningAgentInfo, SUB_AGENT_TIMEOUT_MAX_SECS};
 
 /// Holds sub-agent configs and creates temporary `Agent::run` invocations
 /// for delegation.

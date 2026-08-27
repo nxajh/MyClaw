@@ -3,7 +3,8 @@
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::agents::{DelegationCoordinator, RunningAgentInfo};
+use crate::agents::DelegationCoordinator;
+use crate::api::delegation::RunningAgentInfo;
 use crate::providers::{Tool, ToolResult};
 use crate::str_utils::{UNKNOWN_ID_LISTING_CAP, UNKNOWN_ID_PREVIEW_CHARS};
 
@@ -122,7 +123,7 @@ impl Tool for AgentKillTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::DelegationStatus;
+    use crate::api::delegation::DelegationStatus;
 
     fn record(id: &str, elapsed_secs: u64) -> RunningAgentInfo {
         RunningAgentInfo {

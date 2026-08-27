@@ -18,10 +18,10 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::warn;
 
-use crate::commands::friends::rk_for;
-use crate::commands::register::parse_target;
+use crate::identity::known_users::rk_for;
+use crate::identity::user_registry::parse_target;
 use crate::api::tool::ToolContext;
-use crate::agents::{ContactStatus, KnownUsersRegistry, RequestOutcome, UserMail, UserRegistry};
+use crate::identity::{ContactStatus, KnownUsersRegistry, RequestOutcome, UserMail, UserRegistry};
 use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::ids::{DEFAULT_NAMESPACE, Fqid, TYPE_MSG};
 use crate::providers::{Tool, ToolResult};
@@ -33,7 +33,7 @@ pub struct FriendToolsCtx {
     user_registry: Arc<UserRegistry>,
     /// Live channel registry, injected by the daemon after the Orchestrator
     /// is assembled (peer notifications, RFC §4.3).
-    channels: OnceLock<crate::agents::ChannelRegistry>,
+    channels: OnceLock<crate::api::channel_registry::ChannelRegistry>,
     /// Namespace for generated message FQIDs (`<ns>/msg/<uuidv7>`). Bound at
     /// construction from `[system] namespace`; `new()` defaults to
     /// `DEFAULT_NAMESPACE` (tests / single-agent).
@@ -61,11 +61,11 @@ impl FriendToolsCtx {
     }
 
     /// Install the live channel registry (set-once, called by the daemon).
-    pub fn set_channels(&self, channels: crate::agents::ChannelRegistry) {
+    pub fn set_channels(&self, channels: crate::api::channel_registry::ChannelRegistry) {
         let _ = self.channels.set(channels);
     }
 
-    fn channels(&self) -> Option<&crate::agents::ChannelRegistry> {
+    fn channels(&self) -> Option<&crate::api::channel_registry::ChannelRegistry> {
         self.channels.get()
     }
 
@@ -102,7 +102,7 @@ impl FriendToolsCtx {
 }
 
 /// 在联系人表里按 FQID 精确查找 peer 键（P4: 联系人键一律是 user.id）。
-fn find_peer<'a>(contacts: &'a [(String, crate::agents::ContactEntry)], target: &str) -> Option<&'a str> {
+fn find_peer<'a>(contacts: &'a [(String, crate::identity::ContactEntry)], target: &str) -> Option<&'a str> {
     contacts
         .iter()
         .find(|(peer, _)| peer == target)
@@ -522,7 +522,7 @@ impl Tool for FriendListTool {
         for (peer, entry) in contacts {
             let state = match entry.status {
                 ContactStatus::Pending
-                    if entry.direction == crate::agents::ContactDirection::In =>
+                    if entry.direction == crate::identity::ContactDirection::In =>
                 {
                     "pending-in"
                 }

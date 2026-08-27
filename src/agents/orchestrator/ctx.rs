@@ -14,50 +14,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use dashmap::DashMap;
 use tokio::sync::Notify;
 
-use super::key::SessionKey;
 use crate::agents::{AgentRuntime, AskRouter, DelegationCoordinator, SessionContext};
 use crate::api::message::Channel;
 
-/// The set of live channels, keyed by `(channel_type, account_id)`.
-///
-/// A thin newtype over the underlying map so lookups go through a typed seam
-/// (`get` / `get_by_key`) instead of raw `DashMap` access scattered across the
-/// codebase. Cheap to clone (the map is behind an `Arc`).
-#[derive(Clone, Default)]
-pub struct ChannelRegistry {
-    inner: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-}
-
-impl ChannelRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert(&self, account: (String, String), channel: Arc<dyn Channel>) {
-        self.inner.insert(account, channel);
-    }
-
-    /// Look up a channel by its `(channel_type, account_id)` pair.
-    pub fn get(&self, account: &(String, String)) -> Option<Arc<dyn Channel>> {
-        self.inner.get(account).map(|r| r.clone())
-    }
-
-    /// Look up the channel that owns `key`'s session.
-    pub fn get_by_key(&self, key: &SessionKey) -> Option<Arc<dyn Channel>> {
-        self.get(&key.account_key())
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-}
+pub use crate::api::channel_registry::ChannelRegistry;
 
 /// Tracks the number of in-flight turn tasks so the orchestrator can drain
 /// them before a hot switch (fork+execv). Without draining, a turn executing
