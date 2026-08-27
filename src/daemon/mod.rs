@@ -651,7 +651,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         (Arc::new(parent_tools), Some(delegator_arc))
     };
 
-    warn_super::builder::missing_agent_tool_references(&sub_agent_configs, &tools_arc);
+    warn_missing_agent_tool_references(&sub_agent_configs, &tools_arc);
 
     // ── Delegation channel (conditional — only when sub-agents configured) ─────
     // The DelegationCoordinator is the single owner of the sender and
@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_super::builder::missing_agent_tool_references() {
+    fn detects_missing_agent_tool_references() {
         let agent = SubAgentConfig {
             name: "coder".to_string(),
             system_prompt: String::new(),
