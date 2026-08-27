@@ -8,9 +8,9 @@
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::agents::DelegationCoordinator;
+use crate::api::agent_lifecycle::AgentLifecycle;
 use crate::providers::{Tool, ToolResult};
-use crate::storage::DelegationCheckpoint;
+use crate::api::agent_lifecycle::ResumableAgent;
 use crate::str_utils::UNKNOWN_ID_LISTING_CAP;
 
 /// issue #134 (P2): build the "here's what can actually be resumed" listing
@@ -21,7 +21,7 @@ use crate::str_utils::UNKNOWN_ID_LISTING_CAP;
 /// Newest-first (`started_at` descending), matching #133's reviewed
 /// convention: a copied or hallucinated id is most likely to reference
 /// something that timed out recently.
-fn format_unknown_resumable_listing(mut checkpoints: Vec<DelegationCheckpoint>) -> String {
+fn format_unknown_resumable_listing(mut checkpoints: Vec<ResumableAgent>) -> String {
     if checkpoints.is_empty() {
         return " No timed-out sub-agents are currently resumable.".to_string();
     }
@@ -35,7 +35,7 @@ fn format_unknown_resumable_listing(mut checkpoints: Vec<DelegationCheckpoint>) 
                 "  {} agent={:?} started_at={}",
                 cp.sub_session_id,
                 cp.agent_name,
-                cp.started_at.to_rfc3339()
+                cp.started_at_rfc3339
             )
         })
         .collect();
@@ -53,11 +53,11 @@ fn format_unknown_resumable_listing(mut checkpoints: Vec<DelegationCheckpoint>) 
 }
 
 pub struct AgentResumeTool {
-    delegator: Arc<DelegationCoordinator>,
+    delegator: Arc<dyn AgentLifecycle>,
 }
 
 impl AgentResumeTool {
-    pub fn new(delegator: Arc<DelegationCoordinator>) -> Self {
+    pub fn new<D: AgentLifecycle + 'static>(delegator: Arc<D>) -> Self {
         Self { delegator }
     }
 }
@@ -122,7 +122,7 @@ impl Tool for AgentResumeTool {
                 error: Some(format!(
                     "resume failed: {:#}.{}",
                     e,
-                    format_unknown_resumable_listing(self.delegator.timed_out_checkpoints())
+                    format_unknown_resumable_listing(self.delegator.timed_out_resumables())
                 )),
             }),
         }
@@ -133,16 +133,11 @@ impl Tool for AgentResumeTool {
 mod tests {
     use super::*;
 
-    fn checkpoint(id: &str, started_at: chrono::DateTime<chrono::Utc>) -> DelegationCheckpoint {
-        DelegationCheckpoint {
-            parent_session_id: "myclaw/s/parent".to_string(),
+    fn checkpoint(id: &str, started_at: chrono::DateTime<chrono::Utc>) -> ResumableAgent {
+        ResumableAgent {
             sub_session_id: id.to_string(),
             agent_name: "coder".to_string(),
-            status: "timed_out".to_string(),
-            started_at,
-            timeout_secs: 120,
-            allowed_tools: None,
-            last_checkpoint: None,
+            started_at_rfc3339: started_at.to_rfc3339(),
         }
     }
 
@@ -167,7 +162,7 @@ mod tests {
     #[test]
     fn newest_first_and_capped() {
         let base = chrono::Utc::now();
-        let checkpoints: Vec<DelegationCheckpoint> = (0..25)
+        let checkpoints: Vec<ResumableAgent> = (0..25)
             .map(|i| checkpoint(&format!("s{i}"), base - chrono::Duration::seconds(i)))
             .collect();
         let listing = format_unknown_resumable_listing(checkpoints);
