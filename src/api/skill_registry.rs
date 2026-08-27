@@ -132,6 +132,7 @@ impl SkillRegistry for InMemorySkillRegistry {
                         argument_hint: None,
                         agent_invocable: s.agent_invocable,
                         user_invocable: true,
+                        skill_dir: None,
                     })
             })
             .collect()

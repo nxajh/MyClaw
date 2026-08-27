@@ -69,7 +69,7 @@ impl Tool for SkillsListTool {
                 }
                 if let Some(dir) = skill.skill_dir {
                     entry["skill_dir"] = json!(dir.display().to_string());
-                    let files = scan_skill_files(dir);
+                    let files = scan_skill_files(&dir);
                     if !files.is_empty() {
                         entry["files"] = json!(files);
                     }
