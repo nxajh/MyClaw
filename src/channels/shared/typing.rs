@@ -31,6 +31,13 @@ pub struct TypingKeepAlive {
     tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
+/// TTL 超限 hook：参数为 (上限秒数, recipient)。
+pub type TypingExpiredHook = Box<dyn Fn(u64, &str) + Send + Sync>;
+/// 熔断 hook：参数为 (连续失败次数, recipient, 错误信息)。
+pub type TypingBreakerHook = Box<dyn Fn(u32, &str, &str) + Send + Sync>;
+/// 任务自我清理后的退出 hook（recipient）。
+pub type TypingExitHook = Box<dyn Fn(&str) + Send + Sync>;
+
 /// 一次保活循环的节奏与终止策略 + 日志 hook。
 pub struct TypingParams {
     /// 两次 typing 发送之间的睡眠时长。
@@ -39,13 +46,13 @@ pub struct TypingParams {
     pub max_duration: Option<Duration>,
     /// 连续发送失败 N 次后熔断退出（0 = 永不熔断）。
     pub max_consecutive_failures: u32,
-    /// 超过 TTL 时触发，参数为 (上限秒数, recipient)。`None` = 静默退出。
-    pub on_expired: Option<Box<dyn Fn(u64, &str) + Send + Sync>>,
-    /// 熔断时触发，参数为 (连续失败次数, recipient, 错误信息)。
-    pub on_breaker: Option<Box<dyn Fn(u32, &str, &str) + Send + Sync>>,
+    /// 超过 TTL 时触发。`None` = 静默退出。
+    pub on_expired: Option<TypingExpiredHook>,
+    /// 熔断时触发。
+    pub on_breaker: Option<TypingBreakerHook>,
     /// 任务自我清理成功后触发（用于清理渠道侧的伴生状态，如
     /// Telegram 的 stall-watchdog 计时表）。
-    pub on_exit: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    pub on_exit: Option<TypingExitHook>,
 }
 
 impl TypingParams {
