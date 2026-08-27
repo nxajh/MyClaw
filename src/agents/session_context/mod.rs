@@ -1189,3 +1189,11 @@ impl SessionContext {
     }
 }
 
+
+
+// ── #151 Phase 8+ PendingWorkSession facade ──────────────────────────────────
+impl crate::api::session_store::PendingWorkSession for SessionContext {
+    fn add_pending_task(&self, task_id: String) {
+        SessionContext::add_pending_task(self, task_id);
+    }
+}

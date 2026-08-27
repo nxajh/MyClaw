@@ -1,6 +1,6 @@
 //! skill_registry — L0 facade over `agents::SkillManager`.
 //!
-//! #151 Phase 8+: the skill tools (L3) must not reference `crate::agents`.
+//! #151 Phase 8+: the skill tools (L3) must not reference the agents layer.
 //! They only need a read view (find / names / listing metadata) plus the
 //! #174 `reload_from_definitions` convergence point for post-edit
 //! refresh. `SkillManager` (with its def→runtime conversion) stays in the

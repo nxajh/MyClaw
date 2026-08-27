@@ -566,7 +566,7 @@ mod tests {
     /// — once `ShellTool` has a `SessionManager` wired in.
     #[tokio::test]
     async fn background_spawn_registers_pending_via_session_manager() {
-        let sm = Arc::new(crate::agents::session::SessionManager::default());
+        let sm = Arc::new(crate::api::session_store::InMemorySessionStore::new());
         let sctx = sm.get_or_create_context("test:routing:key");
         let sid = sctx.session_id.clone();
         assert!(!sctx.has_pending_async_work());
@@ -602,7 +602,7 @@ mod tests {
     /// spawn-time path.
     #[tokio::test]
     async fn timeout_conversion_registers_pending_via_session_manager() {
-        let sm = Arc::new(crate::agents::session::SessionManager::default());
+        let sm = Arc::new(crate::api::session_store::InMemorySessionStore::new());
         let sctx = sm.get_or_create_context("test:routing:key2");
         let sid = sctx.session_id.clone();
 

@@ -827,3 +827,18 @@ mod ownership_tests {
         assert!(sm.backend().get_session(&info.id).is_none());
     }
 }
+
+
+// ── #151 Phase 8+ SessionStore facade ────────────────────────────────────────
+// shell 工具（L3）经 api::session_store 只拿到「按 session_id 查上下文并挂
+// pending 任务」这一个方法面；具体 SessionManager/SessionContext 留在本层。
+
+impl crate::api::session_store::SessionStore for SessionManager {
+    fn registered_context_by_session_id(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<dyn crate::api::session_store::PendingWorkSession>> {
+        SessionManager::registered_context_by_session_id(self, session_id)
+            .map(|ctx| ctx as Arc<dyn crate::api::session_store::PendingWorkSession>)
+    }
+}

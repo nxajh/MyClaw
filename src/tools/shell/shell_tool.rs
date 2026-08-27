@@ -27,7 +27,8 @@ pub struct ShellTool {
     /// `daemon.rs`'s composition order (mirrors `set_runtime`/`set_messenger`
     /// elsewhere for the same reason). `None` for bare CLI usage / tests —
     /// nothing to register against.
-    session_manager: std::sync::OnceLock<Arc<crate::agents::SessionManager>>,
+    session_manager:
+        std::sync::OnceLock<Arc<dyn crate::api::session_store::SessionStore>>,
 }
 
 impl Default for ShellTool {
@@ -69,7 +70,10 @@ impl ShellTool {
     /// issue #140: wire the `SessionManager` in after construction (daemon.rs
     /// builds `ShellTool` before `SessionManager` exists). Idempotent no-op
     /// if already set.
-    pub fn set_session_manager(&self, sm: Arc<crate::agents::SessionManager>) {
+    pub fn set_session_manager<S: crate::api::session_store::SessionStore + 'static>(
+        &self,
+        sm: Arc<S>,
+    ) {
         let _ = self.session_manager.set(sm);
     }
 
