@@ -123,7 +123,7 @@ impl ShellTool {
         // ancestry) inherits a PATH that's missing user-installed CLIs
         // (npm global, nvm, pyenv, Homebrew, …). Layer in a fix-up before
         // spawning — see `tools::shell_env` for the three-layer strategy.
-        super::shell_env::apply(&mut cmd);
+        crate::tools::shell_env::apply(&mut cmd);
         if let Some(dir) = workdir {
             cmd.current_dir(dir);
         }
