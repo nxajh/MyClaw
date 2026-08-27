@@ -33,7 +33,7 @@ pub struct FriendToolsCtx {
     user_registry: Arc<UserRegistry>,
     /// Live channel registry, injected by the daemon after the Orchestrator
     /// is assembled (peer notifications, RFC §4.3).
-    channels: OnceLock<crate::agents::ChannelRegistry>,
+    channels: OnceLock<crate::api::channel_registry::ChannelRegistry>,
     /// Namespace for generated message FQIDs (`<ns>/msg/<uuidv7>`). Bound at
     /// construction from `[system] namespace`; `new()` defaults to
     /// `DEFAULT_NAMESPACE` (tests / single-agent).
@@ -61,11 +61,11 @@ impl FriendToolsCtx {
     }
 
     /// Install the live channel registry (set-once, called by the daemon).
-    pub fn set_channels(&self, channels: crate::agents::ChannelRegistry) {
+    pub fn set_channels(&self, channels: crate::api::channel_registry::ChannelRegistry) {
         let _ = self.channels.set(channels);
     }
 
-    fn channels(&self) -> Option<&crate::agents::ChannelRegistry> {
+    fn channels(&self) -> Option<&crate::api::channel_registry::ChannelRegistry> {
         self.channels.get()
     }
 
