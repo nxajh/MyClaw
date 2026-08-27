@@ -14,6 +14,7 @@ use crate::channels::message::{
     ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
     MessageReceiver, MessageSender,
 };
+use crate::channels::shared::{InboundDebouncer, TypingKeepAlive, TypingParams};
 use crate::channels::{FoldCandidate, TurnStream};
 use crate::config::channel::TelegramAccountConfig;
 use crate::{Channel, DedupState, ProcessingStatus};
@@ -77,16 +78,6 @@ fn is_table_delimiter_local(line: &str) -> bool {
 
 // ── TelegramChannel ────────────────────────────────────────────────────────────
 
-/// Entry in the debounce buffer for merging rapid consecutive messages from the same sender.
-struct DebounceEntry {
-    sender: MessageSender,
-    receiver: MessageReceiver,
-    texts: Vec<String>,
-    files: Vec<ChannelFile>,
-    first_ts: u64,
-    timer: tokio::task::JoinHandle<()>,
-}
-
 /// Reaction tracker: reply_target → Vec<(chat_id, message_id)>.
 type ReactionTracker = Arc<Mutex<std::collections::HashMap<String, Vec<(i64, i64)>>>>;
 
@@ -109,17 +100,16 @@ pub struct TelegramChannel {
     /// Workspace directory for saving attachments.
     workspace_dir: Option<std::path::PathBuf>,
     /// Active typing keep-alive tasks, keyed by recipient (chat_id).
-    typing_tasks: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
+    typing: TypingKeepAlive,
     /// Whether to send acknowledgement reactions on received messages.
     ack_reactions: bool,
     /// Track ack reactions: reply_target → (chat_id, message_id) for removal after reply.
     pending_acks: ReactionTracker,
     /// Status reactions: reply_target → Vec<(chat_id, msg_id)>.
     status_reactions: ReactionTracker,
-    /// Debounce window in milliseconds (0 = disabled).
-    debounce_ms: u64,
-    /// Debounce buffer: "sender|reply_target" → pending entry.
-    debounce_buffer: Arc<Mutex<std::collections::HashMap<String, DebounceEntry>>>,
+    /// Debounce window in milliseconds (0 = disabled) + merge buffer
+    /// ("sender|reply_target" key).
+    debouncer: InboundDebouncer,
     /// Stall watchdog timeout in seconds (0 = disabled).
     stall_timeout_secs: u64,
     /// Track when typing started for each recipient: reply_target → Instant.
@@ -157,12 +147,11 @@ impl TelegramChannel {
             dedup: DedupState::new(),
             bot_username: Arc::new(Mutex::new(None)),
             workspace_dir: config.workspace_dir.map(std::path::PathBuf::from),
-            typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            typing: TypingKeepAlive::new(),
             ack_reactions: config.ack_reactions,
             pending_acks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             status_reactions: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            debounce_ms: config.debounce_ms,
-            debounce_buffer: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            debouncer: InboundDebouncer::new(config.debounce_ms, Some("Telegram")),
             stall_timeout_secs: config.stall_timeout_secs,
             typing_started_at: Arc::new(Mutex::new(std::collections::HashMap::new())),
             stall_messages: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -1027,16 +1016,11 @@ impl TelegramChannel {
 
     /// Start a typing keep-alive task for a recipient.
     ///
-    /// Telegram's sendChatAction lasts ~5 seconds. This method spawns a
-    /// background task that refreshes it every 4 seconds until aborted.
+    /// Telegram's sendChatAction lasts ~5 seconds. The shared keep-alive
+    /// loop refreshes it every 4 seconds until aborted, with a 60s TTL cap
+    /// and a circuit breaker on 2 consecutive send failures.
     fn start_internal_typing(&self, recipient: &str) {
         let (chat_id, thread_id) = Self::parse_reply_target(recipient);
-
-        // Abort existing task for this recipient
-        let mut tasks = self.typing_tasks.lock();
-        if let Some(handle) = tasks.remove(recipient) {
-            handle.abort();
-        }
 
         // Record typing start time for stall watchdog.
         self.typing_started_at
@@ -1045,26 +1029,15 @@ impl TelegramChannel {
 
         let bot_token = self.bot_token.clone();
         let api_base = self.api_base.clone();
-        let recipient_key = recipient.to_string();
-        let recipient_key_clone = recipient_key.clone();
-        let typing_tasks = self.typing_tasks.clone();
         let typing_started_at = self.typing_started_at.clone();
 
-        let handle = tokio::spawn(async move {
-            let max_consecutive_failures: u32 = 2;
-            let max_duration = std::time::Duration::from_secs(60);
-            let start = tokio::time::Instant::now();
-            let mut consecutive_failures: u32 = 0;
-
-            // Create a typing-specific client with shorter timeout.
-            let typing_client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
-
-            loop {
-                // TTL check
-                if start.elapsed() >= max_duration {
+        self.typing.start(
+            recipient,
+            TypingParams {
+                interval: std::time::Duration::from_secs(4),
+                max_duration: Some(std::time::Duration::from_secs(60)),
+                max_consecutive_failures: 2,
+                on_expired: Some(Box::new(|max_secs, recipient_key| {
                     // issue #113: this fires whenever a turn simply runs
                     // long (normal for e.g. multi-step tool use) — it is
                     // not itself evidence of a stall. Cross-reference with
@@ -1073,54 +1046,51 @@ impl TelegramChannel {
                     warn!(
                         "Telegram typing TTL exceeded ({}s) for {} — long turn, not necessarily a stall; \
                          cross-reference with LLM/provider logs for this turn before escalating",
-                        max_duration.as_secs(),
-                        recipient_key
+                        max_secs, recipient_key
                     );
-                    break;
-                }
-
-                // Send typing action
-                let url = format!("{}/bot{}/sendChatAction", api_base, bot_token);
-                let req = SendChatActionRequest {
-                    chat_id: chat_id.clone(),
-                    message_thread_id: thread_id.clone(),
-                    action: "typing".to_string(),
-                };
-                match typing_client.post(&url).json(&req).send().await {
-                    Ok(_) => consecutive_failures = 0,
-                    Err(e) => {
-                        consecutive_failures += 1;
-                        if consecutive_failures >= max_consecutive_failures {
-                            warn!(
-                                "Telegram typing circuit breaker tripped after {consecutive_failures} consecutive failures for {}: {e}",
-                                recipient_key
-                            );
-                            break;
-                        }
+                })),
+                on_breaker: Some(Box::new(
+                    |consecutive_failures, recipient_key, e| {
+                        warn!(
+                            "Telegram typing circuit breaker tripped after {consecutive_failures} consecutive failures for {recipient_key}: {e}"
+                        );
+                    },
+                )),
+                on_exit: Some(Box::new(move |recipient_key| {
+                    typing_started_at.lock().remove(recipient_key);
+                })),
+            },
+            move || {
+                // Create a typing-specific client with shorter timeout.
+                let typing_client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+                move || {
+                    let client = typing_client.clone();
+                    let url = format!("{}/bot{}/sendChatAction", api_base, bot_token);
+                    let req = SendChatActionRequest {
+                        chat_id: chat_id.clone(),
+                        message_thread_id: thread_id.clone(),
+                        action: "typing".to_string(),
+                    };
+                    async move {
+                        client
+                            .post(&url)
+                            .json(&req)
+                            .send()
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
                     }
                 }
-
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-            }
-
-            // Task exiting: clean up only if no new task has taken over.
-            let mut tasks = typing_tasks.lock();
-            if let Some(h) = tasks.get(&recipient_key_clone) {
-                if h.is_finished() {
-                    tasks.remove(&recipient_key_clone);
-                    typing_started_at.lock().remove(&recipient_key_clone);
-                }
-            }
-        });
-        tasks.insert(recipient.to_string(), handle);
+            },
+        );
     }
 
     /// Stop (abort) the typing keep-alive task for a recipient.
     fn stop_internal_typing(&self, recipient: &str) {
-        let mut tasks = self.typing_tasks.lock();
-        if let Some(handle) = tasks.remove(recipient) {
-            handle.abort();
-        }
+        self.typing.stop(recipient);
         // Remove stall watchdog tracking.
         self.typing_started_at.lock().remove(recipient);
     }
@@ -1132,80 +1102,14 @@ impl TelegramChannel {
     /// Messages from the same sender in the same conversation are merged
     /// and dispatched as a single `ChannelInboundMessage` after the debounce window
     /// expires. If debounce is disabled (`debounce_ms == 0`), the message is
-    /// sent immediately via `tx`.
+    /// sent immediately via `tx`. Buffer/merge/timer mechanics live in the
+    /// shared `InboundDebouncer`.
     async fn debounce_send(
         &self,
-        mut msg: ChannelInboundMessage,
+        msg: ChannelInboundMessage,
         tx: mpsc::Sender<ChannelInboundMessage>,
     ) {
-        if self.debounce_ms == 0 {
-            if let Err(e) = tx.send(msg).await {
-                warn!("Telegram dispatch error: {e}");
-            }
-            return;
-        }
-
-        let key = format!("{}|{}", msg.sender.id, msg.receiver.id);
-        let debounce_ms = self.debounce_ms;
-        let buffer = self.debounce_buffer.clone();
-        let sender_key = key.clone();
-
-        // Create timer task (starts sleeping immediately).
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)).await;
-            let entry = buffer.lock().remove(&sender_key);
-            if let Some(entry) = entry {
-                let channel_msg = ChannelInboundMessage {
-                    id: format!("debounced_{}", entry.first_ts),
-                    sender: entry.sender,
-                    receiver: entry.receiver,
-                    content: ChannelMessageContent {
-                        text: entry.texts.join("\n"),
-                        files: entry.files,
-                        buttons: vec![],
-                    },
-                    timestamp: entry.first_ts,
-                    interruption_scope_id: None,
-                    silenced_override: None,
-                    run_mode: Default::default(),
-                };
-                let _ = tx.send(channel_msg).await;
-            }
-        });
-
-        // Lock the buffer and update/create entry.
-        {
-            let mut buf = self.debounce_buffer.lock();
-            if let Some(entry) = buf.get_mut(&key) {
-                // Merge into existing entry.
-                if !msg.content.text.is_empty() {
-                    entry.texts.push(msg.content.text);
-                }
-                if !msg.content.files.is_empty() {
-                    entry.files.append(&mut msg.content.files);
-                }
-                // Cancel old timer, set new one.
-                entry.timer.abort();
-                entry.timer = handle;
-            } else {
-                // New entry.
-                buf.insert(
-                    key,
-                    DebounceEntry {
-                        sender: msg.sender,
-                        receiver: msg.receiver,
-                        texts: if msg.content.text.is_empty() {
-                            vec![]
-                        } else {
-                            vec![msg.content.text]
-                        },
-                        files: msg.content.files,
-                        first_ts: msg.timestamp,
-                        timer: handle,
-                    },
-                );
-            }
-        }
+        self.debouncer.push(msg, tx).await;
     }
 
     /// Background task that monitors for stalled conversations.
@@ -1747,7 +1651,7 @@ impl TelegramChannel {
                     run_mode: Default::default(),
                 };
 
-                if self.debounce_ms > 0 {
+                if self.debouncer.window_ms() > 0 {
                     // Clean up stale error reactions from previous interactions
                     let stale_status = self
                         .status_reactions
@@ -1769,9 +1673,9 @@ impl TelegramChannel {
                             .push((chat.id, msg.message_id));
                     }
 
-                    let debounce_key =
-                        format!("{}|{}", channel_msg.sender.id, channel_msg.receiver.id);
-                    let is_new = !self.debounce_buffer.lock().contains_key(&debounce_key);
+                    let is_new = !self
+                        .debouncer
+                        .is_pending(&channel_msg.sender.id, &channel_msg.receiver.id);
                     if is_new {
                         self.start_internal_typing(&channel_msg.receiver.id);
                     }

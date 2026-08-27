@@ -1,4 +1,4 @@
-use super::*;
+use std::collections::HashMap;
 // ── Shared state ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]

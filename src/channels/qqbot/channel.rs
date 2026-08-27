@@ -24,6 +24,7 @@ use crate::channels::message::{
     ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
     MessageReceiver, MessageSender, ProcessingStatus,
 };
+use crate::channels::shared::{TypingKeepAlive, TypingParams};
 use crate::config::channel::QQBotAccountConfig;
 use crate::{Channel, DedupState};
 
@@ -350,8 +351,7 @@ pub struct QQBotChannel {
     pub(super) last_seq: Arc<Mutex<Option<u64>>>,
     pub(super) http_client: reqwest::Client,
     /// Active typing keep-alive tasks, keyed by recipient (e.g. "c2c:xxx").
-    pub(super) typing_tasks:
-        Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
+    pub(super) typing: TypingKeepAlive,
     /// WebSocket session for Resume support.
     pub(super) session: Arc<Mutex<Option<SessionState>>>,
     /// Monotonic counter for proactive message msg_seq to avoid collisions.
@@ -390,7 +390,7 @@ impl QQBotChannel {
                 .timeout(Duration::from_secs(120))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
-            typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            typing: TypingKeepAlive::new(),
             session: Arc::new(Mutex::new(None)),
             msg_seq_counter: Arc::new(AtomicU32::new(1)),
             started_at: std::time::Instant::now(),
@@ -1469,54 +1469,53 @@ impl QQBotChannel {
     /// Start a typing keep-alive task for a C2C recipient.
     ///
     /// QQ Bot typing indicator (msg_type=6) expires after 60 seconds.
-    /// This method spawns a background task that refreshes it every 50 seconds
-    /// until the task is aborted (typically when the response is sent).
+    /// The shared keep-alive loop refreshes it every 50 seconds until the
+    /// task is aborted (typically when the response is sent). QQ Bot has no
+    /// TTL cap or send-failure circuit breaker: the loop simply refreshes
+    /// until aborted.
     fn start_internal_typing(&self, recipient: &str) {
         let openid = match recipient.strip_prefix("c2c:") {
             Some(id) => id.to_string(),
             None => return, // 群聊 no-op
         };
 
-        // Abort existing task for this recipient
-        let mut tasks = self.typing_tasks.lock();
-        if let Some(handle) = tasks.remove(recipient) {
-            handle.abort();
-        }
-
         let http = self.http_client.clone();
         let token_mgr = self.token_manager.clone();
-        let recipient_key = recipient.to_string();
 
-        let handle = tokio::spawn(async move {
-            loop {
-                // 发 typing indicator
-                if let Ok(token) = token_mgr.get_token().await {
+        self.typing.start(
+            recipient,
+            TypingParams::interval_only(Duration::from_secs(50)),
+            move || {
+                move || {
+                    let http = http.clone();
+                    let token_mgr = token_mgr.clone();
                     let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
-                    let body = serde_json::json!({
-                        "msg_type": 6,
-                        "input_notify": { "input_type": 1, "input_second": 60 },
-                    });
-                    let _ = http
-                        .post(&url)
-                        .header("Authorization", format!("QQBot {}", token))
-                        .header("Content-Type", "application/json")
-                        .header("User-Agent", user_agent())
-                        .json(&body)
-                        .send()
-                        .await;
+                    async move {
+                        // 发 typing indicator
+                        if let Ok(token) = token_mgr.get_token().await {
+                            let body = serde_json::json!({
+                                "msg_type": 6,
+                                "input_notify": { "input_type": 1, "input_second": 60 },
+                            });
+                            let _ = http
+                                .post(&url)
+                                .header("Authorization", format!("QQBot {}", token))
+                                .header("Content-Type", "application/json")
+                                .header("User-Agent", user_agent())
+                                .json(&body)
+                                .send()
+                                .await;
+                        }
+                        Ok(())
+                    }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(50)).await;
-            }
-        });
-        tasks.insert(recipient_key, handle);
+            },
+        );
     }
 
     /// Stop (abort) the typing keep-alive task for a recipient.
     fn stop_internal_typing(&self, recipient: &str) {
-        let mut tasks = self.typing_tasks.lock();
-        if let Some(handle) = tasks.remove(recipient) {
-            handle.abort();
-        }
+        self.typing.stop(recipient);
     }
 
     /// Send a C2C message with an inline keyboard.
