@@ -19,20 +19,20 @@ use super::*;
 /// entries in-memory only — there's no daemon to restart in that mode).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcEntry {
-    process_id: String,
-    session_id: String,
-    command: String,
-    workdir: Option<String>,
-    pid: i32,
+    pub(crate) process_id: String,
+    pub(crate) session_id: String,
+    pub(crate) command: String,
+    pub(crate) workdir: Option<String>,
+    pub(crate) pid: i32,
     /// `/proc/{pid}/stat` field 22 (starttime, in clock ticks since boot) at
     /// spawn time — cheap sanity check against PID reuse when re-verifying
     /// liveness after a hot switch.
-    pid_start_ticks: Option<u64>,
-    spawned_at_ms: i64,
-    output_path: String,
+    pub(crate) pid_start_ticks: Option<u64>,
+    pub(crate) spawned_at_ms: i64,
+    pub(crate) output_path: String,
     /// "running" | "exited" | "killed" | "lost_on_restart"
-    state: String,
-    exit_code: Option<i32>,
+    pub(crate) state: String,
+    pub(crate) exit_code: Option<i32>,
     /// issue #129/#131: whether this process's eventual exit should wake the
     /// session with a completion notice. True for an explicit `background:
     /// true` spawn from the start; a plain foreground call starts `false`
@@ -45,7 +45,7 @@ pub struct ProcEntry {
     /// entries persisted before this field existed still deserialize (as
     /// `false`, the old behavior).
     #[serde(default)]
-    notify_on_exit: bool,
+    pub(crate) notify_on_exit: bool,
 }
 
 impl ProcEntry {
