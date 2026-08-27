@@ -33,7 +33,7 @@
 
 \* webui/client.rs 的 Channel 实现属 L5 职责；layering 脚本按目录前缀递归匹配（已核实），层内目录化不影响判定。
 
-**边界观察名单**（<1400 不拆，避免为指标而指标）：turn_recovery 1397、daemon/mod 1299、cronjob_tool 1228、inbound 1213。终态若全库最大文件是 daemon/mod 1299，即历史最优。
+**边界观察名单**（<1400 不拆，避免为指标而指标）：agents/orchestrator/turn_recovery.rs 1397、daemon/mod.rs 1299、tools/cronjob_tool.rs 1228、agents/orchestrator/inbound.rs 1213。终态若全库最大文件是 daemon/mod.rs 1299，即历史最优。
 
 ## 2. 逐文件拆分设计
 
@@ -86,7 +86,7 @@ churn=1（全库最冷）× 规模第一（2852），零冲突、立收益。
 3. **主代理**：gh run watch 后台跟 CI；clippy -D warnings 机械修复在主代理 worktree 直接做。
 4. **实测复核**：wc -l 逐文件、`#[test]`+`#[tokio::test]` 计数守恒、关键符号唯一性、git diff 外部消费者为空。
 5. **质量闸**：深模块比（对外符号/私有行数，转发壳=红旗，mod.rs 壳豁免）、信息隐藏（flag 收 struct）、变更放大 A/B（2–3 类代表性改动 touch 文件数）。
-6. **module_score.py 重写**（PR #146 分支已删，脚本佚失；纯 grep/regex 半天活）：基线跑一次（13 文件 + churn 补测），每文件拆后复测，advisory 不阻断。
+6. **module_score.py 找回**（评审更正：源分支已删但 `refs/pull/146/head` 引用仍存——`git fetch origin refs/pull/146/head && git show FETCH_HEAD:scripts/module_score.py > scripts/module_score.py`，170 行 advisory 脚本，无需重写）：基线跑一次（13 文件 + churn 补测），每文件拆后复测，advisory 不阻断。
 
 ## 4. 验收（对齐 §5.3）
 
