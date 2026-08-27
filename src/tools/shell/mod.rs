@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Shell execution tool.
 //!
 //! Every command is a **tracked process**: spawned once, its stdout/stderr
