@@ -6,15 +6,11 @@
 
 use crate::config::provider::Protocol;
 use crate::providers::capability_chat::ChatProvider;
-use crate::providers::capability_embedding::EmbeddingProvider;
-use crate::providers::image::ImageGenerationProvider;
+use crate::providers::capability_media::{EmbeddingProvider, ImageGenerationProvider, SttProvider, TtsProvider, VideoGenerationProvider};
 use crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient;
 use crate::providers::protocols::openai::responses::OpenAiResponsesClient;
 use crate::providers::provider_id::well_known;
 use crate::providers::search::SearchProvider;
-use crate::providers::stt::SttProvider;
-use crate::providers::tts::TtsProvider;
-use crate::providers::video::VideoGenerationProvider;
 use crate::providers::{AuthStyle, ProviderId, SharedApiKey};
 
 // ── Build requests ────────────────────────────────────────────────────────────

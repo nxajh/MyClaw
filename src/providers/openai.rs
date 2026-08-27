@@ -104,14 +104,14 @@ impl ImageGenerationProvider for OpenAiProvider {
             "prompt": req.prompt,
             "n": req.n.unwrap_or(1),
             "size": match req.size {
-                Some(crate::providers::image::ImageSize::Square1024) => "1024x1024",
-                Some(crate::providers::image::ImageSize::Landscape1792) => "1792x1024",
-                Some(crate::providers::image::ImageSize::Portrait1024) => "1024x1792",
+                Some(crate::providers::capability_media::ImageSize::Square1024) => "1024x1024",
+                Some(crate::providers::capability_media::ImageSize::Landscape1792) => "1792x1024",
+                Some(crate::providers::capability_media::ImageSize::Portrait1024) => "1024x1792",
                 None => "1024x1024",
             },
             "quality": match req.quality {
-                Some(crate::providers::image::ImageQuality::HD) => "hd",
-                Some(crate::providers::image::ImageQuality::Standard) | None => "standard",
+                Some(crate::providers::capability_media::ImageQuality::HD) => "hd",
+                Some(crate::providers::capability_media::ImageQuality::Standard) | None => "standard",
             },
             "response_format": match req.response_format {
                 Some(ImageFormat::Url) | None => "url",
@@ -166,7 +166,7 @@ impl ImageGenerationProvider for OpenAiProvider {
 
 #[async_trait]
 impl TtsProvider for OpenAiProvider {
-    fn synthesize(&self, req: TtsRequest) -> anyhow::Result<crate::providers::tts::AudioResponse> {
+    fn synthesize(&self, req: TtsRequest) -> anyhow::Result<crate::providers::capability_media::AudioResponse> {
         let url = self.tts_url();
         let auth = self.auth();
 
@@ -207,8 +207,8 @@ impl TtsProvider for OpenAiProvider {
             })
         })?;
 
-        Ok(crate::providers::tts::AudioResponse {
-            audio: crate::providers::tts::AudioData {
+        Ok(crate::providers::capability_media::AudioResponse {
+            audio: crate::providers::capability_media::AudioData {
                 bytes: bytes.to_vec(),
                 mime_type: "audio/mp3".to_string(),
             },

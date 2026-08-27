@@ -7,7 +7,7 @@ use std::process::Command;
 
 use async_trait::async_trait;
 
-use crate::providers::tts::{AudioData, AudioResponse, TtsProvider, TtsRequest, TtsVoice};
+use crate::providers::capability_media::{AudioData, AudioResponse, TtsProvider, TtsRequest, TtsVoice};
 
 const DEFAULT_VOICE: &str = "zh-CN-XiaoxiaoNeural";
 
