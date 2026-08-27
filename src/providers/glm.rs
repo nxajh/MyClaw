@@ -82,7 +82,7 @@ impl GlmProvider {
         Self {
             base_url,
             api_key: api_key.into(),
-            client: crate::providers::http::build_reqwest_client(),
+            client: crate::providers::infra::build_reqwest_client(),
             user_agent: None,
         }
     }
@@ -93,8 +93,8 @@ impl GlmProvider {
     }
 
     fn auth(&self) -> String {
-        crate::providers::shared::build_auth(
-            &crate::providers::shared::AuthStyle::Bearer,
+        crate::providers::infra::build_auth(
+            &crate::providers::infra::AuthStyle::Bearer,
             &self.api_key.get(),
         )
     }

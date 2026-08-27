@@ -11,13 +11,9 @@ use crate::providers::Capability;
 use crate::providers::SharedApiKey;
 use crate::providers::SharedCredentialPool;
 use crate::providers::capability_chat::ChatProvider;
-use crate::providers::capability_embedding::EmbeddingProvider;
-use crate::providers::image::ImageGenerationProvider;
+use crate::providers::capability_media::{EmbeddingProvider, ImageGenerationProvider, SttProvider, TtsProvider, VideoGenerationProvider};
 use crate::providers::provider_registry::{ProviderRegistry, SearchFallbackEntry};
 use crate::providers::search::SearchProvider;
-use crate::providers::stt::SttProvider;
-use crate::providers::tts::TtsProvider;
-use crate::providers::video::VideoGenerationProvider;
 
 use self::routing::{RouteEntry, RoutingConfig, RoutingStrategy};
 

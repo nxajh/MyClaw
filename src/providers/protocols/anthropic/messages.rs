@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
-use crate::providers::http::build_reqwest_client;
+use crate::providers::infra::build_reqwest_client;
 use crate::providers::protocols::anthropic::message_rendering::build_anthropic_body;
 use crate::providers::{BoxStream, ChatProvider, ChatRequest, SharedApiKey, StreamEvent};
 use reqwest::Client;
@@ -83,7 +83,7 @@ impl AnthropicMessagesClient {
             }
 
             let resp = match tokio::time::timeout(
-                crate::providers::shared::REQUEST_SEND_TIMEOUT,
+                crate::providers::infra::REQUEST_SEND_TIMEOUT,
                 client.post(&url).headers(headers).json(&body).send(),
             )
             .await
@@ -97,13 +97,13 @@ impl AnthropicMessagesClient {
                 Err(_) => {
                     tracing::warn!(
                         url = %url,
-                        timeout_secs = crate::providers::shared::REQUEST_SEND_TIMEOUT.as_secs(),
+                        timeout_secs = crate::providers::infra::REQUEST_SEND_TIMEOUT.as_secs(),
                         "request send timed out — no response from provider"
                     );
                     let _ = tx
                         .send(StreamEvent::Error(format!(
                             "request timed out after {}s",
-                            crate::providers::shared::REQUEST_SEND_TIMEOUT.as_secs()
+                            crate::providers::infra::REQUEST_SEND_TIMEOUT.as_secs()
                         )))
                         .await;
                     return;
@@ -113,7 +113,7 @@ impl AnthropicMessagesClient {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = match tokio::time::timeout(
-                    crate::providers::shared::ERROR_BODY_TIMEOUT,
+                    crate::providers::infra::ERROR_BODY_TIMEOUT,
                     resp.text(),
                 )
                 .await
@@ -153,7 +153,7 @@ impl AnthropicMessagesClient {
             // stream ends without one, the connection was closed mid-response.
             let mut saw_terminal = false;
             let mut buffer = String::new();
-            let mut utf8_decoder = crate::providers::shared::Utf8StreamDecoder::new();
+            let mut utf8_decoder = crate::providers::infra::Utf8StreamDecoder::new();
             let mut stream = resp.bytes_stream();
 
             while let Some(item) = stream.next().await {

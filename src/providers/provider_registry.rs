@@ -2,14 +2,10 @@
 
 use super::capability::{Capability, ChatModelConfig, Modality};
 use super::capability_chat::ChatProvider;
-use super::capability_embedding::EmbeddingProvider;
+use super::capability_media::{EmbeddingProvider, ImageGenerationProvider, SttProvider, TtsProvider, VideoGenerationProvider};
 use super::credential_pool::{SharedApiKey, SharedCredentialPool};
-use super::image::ImageGenerationProvider;
 use super::media::MediaPolicy;
 use super::search::SearchProvider;
-use super::stt::SttProvider;
-use super::tts::TtsProvider;
-use super::video::VideoGenerationProvider;
 use std::sync::Arc;
 
 /// A single entry in the search fallback chain, with optional credential pool.

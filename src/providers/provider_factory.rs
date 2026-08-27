@@ -6,15 +6,11 @@
 
 use crate::config::provider::Protocol;
 use crate::providers::capability_chat::ChatProvider;
-use crate::providers::capability_embedding::EmbeddingProvider;
-use crate::providers::image::ImageGenerationProvider;
+use crate::providers::capability_media::{EmbeddingProvider, ImageGenerationProvider, SttProvider, TtsProvider, VideoGenerationProvider};
 use crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient;
 use crate::providers::protocols::openai::responses::OpenAiResponsesClient;
 use crate::providers::provider_id::well_known;
 use crate::providers::search::SearchProvider;
-use crate::providers::stt::SttProvider;
-use crate::providers::tts::TtsProvider;
-use crate::providers::video::VideoGenerationProvider;
 use crate::providers::{AuthStyle, ProviderId, SharedApiKey};
 
 // ── Build requests ────────────────────────────────────────────────────────────
@@ -160,7 +156,7 @@ impl ProviderFactory {
             // ── DeepSeek: OpenAI client + DeepSeek body override (interleaved thinking) ──
             (well_known::DEEPSEEK, _) => {
                 let client = OpenAiChatCompletionsClient::new(request.api_key, request.base_url)
-                    .with_body_override(crate::providers::deepseek::deepseek_body_override);
+                    .with_body_override(crate::providers::vendor_overrides::deepseek_body_override);
                 let client = match request.user_agent {
                     Some(ua) => client.with_user_agent(ua),
                     None => client,
@@ -170,7 +166,7 @@ impl ProviderFactory {
             // ── Qwen: OpenAI client + Qwen body override (enable_thinking + reasoning echo) ──
             (well_known::QWEN, _) => {
                 let client = OpenAiChatCompletionsClient::new(request.api_key, request.base_url)
-                    .with_body_override(crate::providers::qwen::qwen_body_override);
+                    .with_body_override(crate::providers::vendor_overrides::qwen_body_override);
                 let client = match request.user_agent {
                     Some(ua) => client.with_user_agent(ua),
                     None => client,

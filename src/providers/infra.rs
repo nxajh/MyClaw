@@ -1,6 +1,31 @@
-//! Shared utilities for providers: HTTP auth helpers, streaming UTF-8 decode.
+//! Infrastructure shared by provider implementations: HTTP client
+//! construction, timeouts, auth helpers, and streaming UTF-8 decode.
+//!
+//! Merged from `shared.rs` + `http.rs` (#151 Phase 10, pure relocation —
+//! no behavior change).
 
+use reqwest::Client;
 use std::time::Duration;
+
+// ── HTTP client (was http.rs) ─────────────────────────────────────────────────
+
+/// Build a reqwest Client suitable for streaming LLM responses.
+///
+/// No overall request timeout — per-chunk timeouts are enforced at the
+/// application layer by `collect_stream_inner`.  We do configure:
+/// - `connect_timeout`: fail fast when the remote is unreachable
+/// - `tcp_keepalive`: OS-level probes detect half-open (stale) connections
+/// - `pool_idle_timeout`: expire idle pooled connections before they go stale
+pub fn build_reqwest_client() -> Client {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .tcp_keepalive(Duration::from_secs(15))
+        .pool_idle_timeout(Duration::from_secs(60))
+        .build()
+        .expect("reqwest client must build")
+}
+
+// ── Timeouts / auth / UTF-8 decode (was shared.rs) ────────────────────────────
 
 // ── Timeouts ──────────────────────────────────────────────────────────────────
 
@@ -8,7 +33,7 @@ use std::time::Duration;
 ///
 /// This is the one spot a hung upstream can stall forever: a request that
 /// never completes keeps us in `send().await` with no stream to time out.
-/// Provider-side "no overall request timeout" (see `providers/http.rs`)
+/// Provider-side "no overall request timeout" (see `providers/infra.rs`)
 /// means nothing bounds this unless we do. On expiry the request is dropped
 /// and a `StreamEvent::Error` is emitted so the routing fallback chain can
 /// classify the timeout and fail over to the next provider.

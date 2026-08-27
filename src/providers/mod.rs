@@ -6,17 +6,13 @@ pub mod tokens; // Token estimation over ChatMessage (moved from agents, #151 Ph
 pub mod registry; // Registry facade over providers (moved from top level, #151 Phase 4)
 pub mod capability; // Capability, Modality, model configs
 pub mod capability_chat; // ChatProvider, ChatMessage, StreamEvent, etc.
-pub mod capability_embedding; // EmbeddingProvider, EmbedRequest, etc.
+pub mod capability_media; // Embedding/STT/TTS/Video/Image capabilities (merged, #151 Phase 10)
 pub mod capability_tool; // Tool, ToolResult
 pub mod error_class; // FailoverReason, ClassifiedError
-pub mod image; // ImageGenerationProvider
 pub mod protocols; // Protocol-specific message rendering & clients
 pub mod provider_registry;
 pub mod search; // SearchProvider
-pub mod stt; // SttProvider
-pub mod tts; // TtsProvider
 pub mod edge_tts; // EdgeTtsProvider (free Microsoft Edge TTS via subprocess)
-pub mod video; // VideoGenerationProvider // ProviderRegistry trait
 
 // Re-export traits at crate level for external consumers
 pub use capability::{
@@ -27,7 +23,7 @@ pub use capability_chat::{
     BoxStream, ChatMessage, ChatMessageUsage, ChatProvider, ChatRequest, ChatResponse, ChatUsage,
     ContentPart, StopReason, StreamEvent, ThinkingConfig, ToolCall, ToolSpec as ChatToolSpec,
 };
-pub use capability_embedding::{
+pub use capability_media::{
     EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider, EmbeddingUsage,
 };
 pub use capability_tool::{Tool, ToolResult, ToolSource, ToolSpec};
@@ -35,35 +31,31 @@ pub use error_class::{
     ClassifiedError, ErrorCategory, FailoverReason, LONG_COOLDOWN_THRESHOLD, ProviderHttpError,
     RecoveryHints, format_cooldown_zh,
 };
-pub use image::{ImageFormat, ImageGenerationProvider, ImageOutput, ImageRequest, ImageResponse};
+pub use capability_media::{ImageFormat, ImageGenerationProvider, ImageOutput, ImageRequest, ImageResponse};
 pub use provider_registry::{ProviderRegistry, ProviderSummary, SearchFallbackEntry};
 pub use registry::Registry;
 pub use search::{SearchProvider, SearchRequest, SearchResult, SearchResults};
-pub use stt::{SttProvider, SttRequest, SttSegment, TranscriptionResponse};
-pub use tts::{TtsFormat, TtsProvider, TtsRequest, TtsVoice};
-pub use video::{VideoGenerationProvider, VideoRequest, VideoResponse};
+pub use capability_media::{SttProvider, SttRequest, SttSegment, TranscriptionResponse};
+pub use capability_media::{TtsFormat, TtsProvider, TtsRequest, TtsVoice};
+pub use capability_media::{VideoGenerationProvider, VideoRequest, VideoResponse};
 
 // ── Implementations ────────────────────────────────────────────────────────────
 
-pub mod anthropic;
+pub mod vendor_overrides; // Anthropic/Kimi shells + DeepSeek/Qwen body overrides (merged, #151 Phase 10)
 pub mod credential_pool;
-pub mod deepseek;
 pub mod fallback;
 pub mod glm;
 pub mod glm_mcp;
 pub mod google;
-pub mod http;
-pub mod kimi;
+pub mod infra; // HTTP client, timeouts, auth, UTF-8 decode (merged shared+http, #151 Phase 10)
 pub mod media;
 pub mod provider_factory;
 pub mod provider_id;
-pub mod qwen;
 pub mod minimax;
 pub mod openai;
-pub mod shared;
 pub mod xiaomi;
 
-pub use anthropic::AnthropicProvider;
+pub use vendor_overrides::{AnthropicProvider, KimiProvider};
 pub use credential_pool::{
     CredentialEntry, CredentialPool, CredentialStatus, RotationStrategy, SharedApiKey,
     SharedCredentialPool,
@@ -71,7 +63,6 @@ pub use credential_pool::{
 pub use fallback::FallbackChatProvider;
 pub use glm::GlmProvider;
 pub use google::GoogleProvider;
-pub use kimi::KimiProvider;
 pub use media::{
     FileModality, MediaCaps, MediaInlineDecision, MediaInputPolicy, MediaLoweringProvider,
     MediaMarkerReason, MediaPolicy, MediaTransport, age_media_in_message, audio_marker,
@@ -87,6 +78,6 @@ pub use provider_factory::{
     BuildVideoProviderRequest, ProviderFactory,
 };
 pub use provider_id::{ProviderId, detect_from_url, well_known};
-pub use shared::AuthStyle;
+pub use infra::AuthStyle;
 
 pub use reqwest::Client;
