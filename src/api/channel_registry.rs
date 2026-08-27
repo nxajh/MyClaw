@@ -52,7 +52,6 @@ impl ChannelRegistry {
     }
 }
 
-
 /// A user session key: `channel_type:account_id:sender`.
 ///
 /// The (channel_type, account_id) pair selects the channel instance;
