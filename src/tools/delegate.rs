@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::agents::AgentDelegator;
+use crate::api::delegation::AgentDelegator;
 use crate::providers::{Tool, ToolResult};
 
 /// The agent_delegate tool — injectable delegator for runtime dispatch.
@@ -120,7 +120,7 @@ impl Tool for AgentDelegateTool {
     /// fire. Floor it at the delegation system's own hard ceiling so the
     /// generic wrapper can never fire first for any valid `timeout`.
     fn preferred_timeout_secs(&self) -> Option<u64> {
-        Some(crate::agents::SUB_AGENT_TIMEOUT_MAX_SECS)
+        Some(crate::api::delegation::SUB_AGENT_TIMEOUT_MAX_SECS)
     }
 
     async fn execute(
@@ -257,7 +257,7 @@ mod tests {
         let tool = AgentDelegateTool::new(Arc::new(StubDelegator));
         assert_eq!(
             tool.preferred_timeout_secs(),
-            Some(crate::agents::SUB_AGENT_TIMEOUT_MAX_SECS)
+            Some(crate::api::delegation::SUB_AGENT_TIMEOUT_MAX_SECS)
         );
     }
 

@@ -8,6 +8,7 @@
 //! everything goes through `api`.
 pub mod agent_mail;
 pub mod capability;
+pub mod delegation;
 pub mod loop_breaker;
 pub mod message;
 pub mod run_mode;

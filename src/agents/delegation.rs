@@ -22,66 +22,9 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::agents::tokens::estimate_tokens;
 
-/// Delegation lifecycle status for a sub-agent task.
-///
-/// Consumed by the coordinator's running table and surfaced through
-/// `agent_list` so the parent agent can distinguish a healthy in-flight
-/// task from one killed by the wall-clock timeout or `agent_kill`.
-///
-/// `Idle` is reserved for the future "parked waiting for parent message"
-/// mode (RFC agent-messaging §3): async sub-agents currently run to
-/// completion without parking, so no live entry ever transitions to
-/// `Idle` today. The variant exists so the state machine is complete and
-/// callers (`agent_list`) can render it once the parked mode lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DelegationStatus {
-    /// Spawned into the background and processing (the only live state
-    /// today — entries are removed from the running table on exit).
-    Running,
-    /// Parked waiting for a parent message (reserved; see enum doc).
-    Idle,
-    /// Finished successfully (transient — recorded in the event, the
-    /// entry is removed from the running table immediately after).
-    Completed,
-    /// Finished with an error (transient).
-    Failed,
-    /// Killed by the wall-clock timeout (transient).
-    TimedOut,
-    /// Cancelled by the parent via `agent_kill` (transient).
-    Cancelled,
-    /// Persisted to disk during shutdown; the task is resumable on restart.
-    /// On startup, checkpointed tasks are resumed (not marked Failed).
-    Checkpointed,
-}
+pub use crate::api::delegation::DelegationStatus;
 
-impl DelegationStatus {
-    /// Whether this status means the task is no longer executing.
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            DelegationStatus::Completed
-                | DelegationStatus::Failed
-                | DelegationStatus::TimedOut
-                | DelegationStatus::Cancelled
-        )
-    }
-
-    /// Snake-case string form — matches the serde representation and the
-    /// `DelegationCheckpoint.status` field, so persisted statuses can be
-    /// compared/written without going through serde.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            DelegationStatus::Running => "running",
-            DelegationStatus::Idle => "idle",
-            DelegationStatus::Completed => "completed",
-            DelegationStatus::Failed => "failed",
-            DelegationStatus::TimedOut => "timed_out",
-            DelegationStatus::Cancelled => "cancelled",
-            DelegationStatus::Checkpointed => "checkpointed",
-        }
-    }
-}
+pub use crate::api::agent_mail::{AgentMail, AgentMessage, MessageKind};
 
 /// Structured error for a sub-agent killed by its wall-clock timeout.
 ///
@@ -152,7 +95,6 @@ pub enum DelegationEvent {
     Message(AgentMessage),
 }
 
-pub use crate::api::agent_mail::{AgentMail, AgentMessage, MessageKind};
 
 /// A running async sub-agent's parent → sub mailbox.
 ///
