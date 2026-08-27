@@ -158,6 +158,7 @@ fn cap_output_for_display(raw: &str, output_path: &Path) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::shell_tool::UNKNOWN_PROCESS_LISTING_CAP;
 
     fn test_entry(state: &str) -> ProcEntry {
         ProcEntry {

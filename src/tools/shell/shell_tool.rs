@@ -323,7 +323,7 @@ impl Tool for ShellTool {
 /// calling session only (other sessions' process ids aren't this model's
 /// business), newest-first, capped so a long-running session with many
 /// tracked processes doesn't blow up the error message.
-const UNKNOWN_PROCESS_LISTING_CAP: usize = 20;
+pub(crate) const UNKNOWN_PROCESS_LISTING_CAP: usize = 20;
 const UNKNOWN_PROCESS_COMMAND_PREVIEW_CHARS: usize = 60;
 
 pub(crate) fn format_unknown_process_listing(registry: &HashMap<String, ProcEntry>, session_id: &str) -> String {
