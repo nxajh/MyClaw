@@ -3,6 +3,8 @@
 //! Supports create / update / list / pause / resume / run / remove / log actions.
 //! Includes schedule validation, retry strategy, failure alerts, per-job model/provider settings.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::scheduling_types::cron_types::{
