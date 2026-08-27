@@ -187,8 +187,6 @@ fn print_banner(
 // Composition Root — assemble all components
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Build the Registry and register all providers from config.
-
 /// Run the MyClaw daemon, blocking until shutdown.
 pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Initialize global safety config from the loaded config.
