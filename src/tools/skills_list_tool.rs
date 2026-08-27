@@ -1,21 +1,20 @@
 //! SkillsListTool — list metadata of all skills.
 
 use async_trait::async_trait;
-use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::agents::SkillManager;
+use crate::api::skill_registry::SkillRegistry;
 use crate::providers::{Tool, ToolResult};
 
 pub struct SkillsListTool {
-    skills: Arc<RwLock<SkillManager>>,
+    skills: Arc<dyn SkillRegistry>,
 }
 
 impl SkillsListTool {
-    pub fn new(skills: Arc<RwLock<SkillManager>>) -> Self {
+    pub fn new<R: SkillRegistry + 'static>(skills: Arc<R>) -> Self {
         Self { skills }
     }
 }
@@ -44,22 +43,22 @@ impl Tool for SkillsListTool {
         _args: serde_json::Value,
         _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        let skills = self.skills.read();
-
-        let mut entries: Vec<serde_json::Value> = skills
-            .skills_iter()
-            .map(|(_, skill)| {
+        let mut entries: Vec<serde_json::Value> = self
+            .skills
+            .list()
+            .into_iter()
+            .map(|skill| {
                 let mut entry = json!({
                     "name": skill.name,
                     "description": skill.description,
                 });
-                if let Some(ref v) = skill.when_to_use {
+                if let Some(v) = skill.when_to_use {
                     entry["when_to_use"] = json!(v);
                 }
-                if let Some(ref v) = skill.argument_hint {
+                if let Some(v) = skill.argument_hint {
                     entry["argument_hint"] = json!(v);
                 }
-                if let Some(ref v) = skill.version {
+                if let Some(v) = skill.version {
                     entry["version"] = json!(v);
                 }
                 if !skill.agent_invocable {
@@ -142,27 +141,25 @@ fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::Skill;
+    use crate::api::skill_registry::{InMemorySkillRegistry, SkillSummary, SkillView};
 
-    fn make_skill(name: &str, desc: &str) -> Skill {
-        Skill {
+    fn make_skill(name: &str, desc: &str) -> SkillView {
+        SkillView {
             name: name.to_string(),
             description: desc.to_string(),
-            keywords: vec![],
             prompt_body: String::new(),
-            version: None,
-            when_to_use: None,
-            argument_hint: None,
-            arguments: vec![],
-            user_invocable: true,
             agent_invocable: true,
             skill_dir: None,
         }
     }
 
+    fn registry() -> Arc<InMemorySkillRegistry> {
+        Arc::new(InMemorySkillRegistry::new())
+    }
+
     #[tokio::test]
     async fn test_empty_skills() {
-        let tool = SkillsListTool::new(Arc::new(RwLock::new(SkillManager::new())));
+        let tool = SkillsListTool::new(registry());
         let result = tool
             .execute(
                 json!({}),
@@ -178,10 +175,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_lists_all_skills() {
-        let mut mgr = SkillManager::new();
-        mgr.register(make_skill("beta", "Beta skill"));
-        mgr.register(make_skill("alpha", "Alpha skill"));
-        let tool = SkillsListTool::new(Arc::new(RwLock::new(mgr)));
+        let reg = registry();
+        reg.upsert(make_skill("beta", "Beta skill"));
+        reg.upsert(make_skill("alpha", "Alpha skill"));
+        let tool = SkillsListTool::new(reg);
 
         let result = tool
             .execute(
@@ -200,12 +197,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_invocable_fields_included() {
-        let mut mgr = SkillManager::new();
-        let mut skill = make_skill("private", "Private");
-        skill.agent_invocable = false;
-        skill.user_invocable = false;
-        mgr.register(skill);
-        let tool = SkillsListTool::new(Arc::new(RwLock::new(mgr)));
+        let reg = registry();
+        reg.upsert_summary(SkillSummary {
+            name: "private".to_string(),
+            description: "Private".to_string(),
+            version: None,
+            when_to_use: None,
+            argument_hint: None,
+            agent_invocable: false,
+            user_invocable: false,
+        });
+        let tool = SkillsListTool::new(reg);
 
         let result = tool
             .execute(

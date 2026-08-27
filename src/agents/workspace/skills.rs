@@ -217,3 +217,48 @@ mod tests {
         assert!(injected.ends_with("..."));
     }
 }
+
+
+// ── #151 Phase 8+ SkillRegistry facade ───────────────────────────────────────
+// skill 工具（L3）经 api::skill_registry 只看到 find/names/list/reload_layered
+// 方法面；Skill→SkillView/SkillSummary 的 DTO 转换与 #174 的
+// reload_from_definitions 收敛点（def 解析）都留在本层。组合根继续传共享的
+// Arc<RwLock<SkillManager>>——与系统提示词注入用的是同一个活实例。
+
+impl crate::api::skill_registry::SkillRegistry for parking_lot::RwLock<SkillManager> {
+    fn find(&self, name: &str) -> Option<crate::api::skill_registry::SkillView> {
+        use crate::api::skill_registry::SkillView;
+        self.read().get(name).map(|s| SkillView {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            prompt_body: s.prompt_body.clone(),
+            agent_invocable: s.agent_invocable,
+            skill_dir: s.skill_dir.clone(),
+        })
+    }
+
+    fn skill_names(&self) -> Vec<String> {
+        self.read().skills_iter().map(|(n, _)| n.to_string()).collect()
+    }
+
+    fn list(&self) -> Vec<crate::api::skill_registry::SkillSummary> {
+        use crate::api::skill_registry::SkillSummary;
+        self.read()
+            .skills_iter()
+            .map(|(n, s)| SkillSummary {
+                name: n.to_string(),
+                description: s.description.clone(),
+                version: s.version.clone(),
+                when_to_use: s.when_to_use.clone(),
+                argument_hint: s.argument_hint.clone(),
+                agent_invocable: s.agent_invocable,
+                user_invocable: s.user_invocable,
+            })
+            .collect()
+    }
+
+    fn reload_layered(&self, skills_dir: &Path, agents_skills_dir: Option<&Path>) {
+        let defs = super::skill_loader::load_skills_layered(skills_dir, agents_skills_dir);
+        self.write().reload_from_definitions(defs);
+    }
+}

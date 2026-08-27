@@ -58,6 +58,7 @@ pub trait SkillRegistry: Send + Sync {
 #[derive(Default)]
 pub struct InMemorySkillRegistry {
     skills: std::sync::RwLock<Vec<SkillView>>,
+    summary_overrides: std::sync::Mutex<Vec<SkillSummary>>,
 }
 
 impl InMemorySkillRegistry {
@@ -69,6 +70,28 @@ impl InMemorySkillRegistry {
         let mut skills = self.skills.write().unwrap();
         skills.retain(|s| s.name != view.name);
         skills.push(view);
+    }
+
+    /// Register an explicit listing entry (when a test needs summary
+    /// fields the derived defaults can't express, e.g. `user_invocable`).
+    pub fn upsert_summary(&self, summary: SkillSummary) {
+        let view = SkillView {
+            name: summary.name.clone(),
+            description: summary.description.clone(),
+            prompt_body: String::new(),
+            agent_invocable: summary.agent_invocable,
+            skill_dir: None,
+        };
+        self.insert_summary(summary, view);
+    }
+
+    fn insert_summary(&self, summary: SkillSummary, view: SkillView) {
+        self.summary_overrides
+            .lock()
+            .unwrap()
+            .retain(|s| s.name != summary.name);
+        self.summary_overrides.lock().unwrap().push(summary);
+        self.upsert(view);
     }
 }
 
@@ -82,18 +105,25 @@ impl SkillRegistry for InMemorySkillRegistry {
     }
 
     fn list(&self) -> Vec<SkillSummary> {
+        let overrides = self.summary_overrides.lock().unwrap();
         self.skills
             .read()
             .unwrap()
             .iter()
-            .map(|s| SkillSummary {
-                name: s.name.clone(),
-                description: s.description.clone(),
-                version: None,
-                when_to_use: None,
-                argument_hint: None,
-                agent_invocable: s.agent_invocable,
-                user_invocable: true,
+            .map(|s| {
+                overrides
+                    .iter()
+                    .find(|o| o.name == s.name)
+                    .cloned()
+                    .unwrap_or(SkillSummary {
+                        name: s.name.clone(),
+                        description: s.description.clone(),
+                        version: None,
+                        when_to_use: None,
+                        argument_hint: None,
+                        agent_invocable: s.agent_invocable,
+                        user_invocable: true,
+                    })
             })
             .collect()
     }
