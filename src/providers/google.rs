@@ -18,7 +18,7 @@
 //!   [providers.google.search.models."gemini-2.0-flash"]
 
 use crate::providers::credential_pool::SharedApiKey;
-use crate::providers::http::build_reqwest_client;
+use crate::providers::infra::build_reqwest_client;
 use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";

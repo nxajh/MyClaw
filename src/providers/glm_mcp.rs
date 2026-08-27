@@ -11,7 +11,7 @@
 
 use crate::providers::{
     SearchProvider, SearchRequest, SearchResult, SearchResults, SharedApiKey,
-    http::build_reqwest_client,
+    infra::build_reqwest_client,
 };
 use reqwest::Client;
 use std::time::Duration;

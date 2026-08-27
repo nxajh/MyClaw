@@ -47,13 +47,12 @@ pub mod fallback;
 pub mod glm;
 pub mod glm_mcp;
 pub mod google;
-pub mod http;
+pub mod infra; // HTTP client, timeouts, auth, UTF-8 decode (merged shared+http, #151 Phase 10)
 pub mod media;
 pub mod provider_factory;
 pub mod provider_id;
 pub mod minimax;
 pub mod openai;
-pub mod shared;
 pub mod xiaomi;
 
 pub use vendor_overrides::{AnthropicProvider, KimiProvider};
@@ -79,6 +78,6 @@ pub use provider_factory::{
     BuildVideoProviderRequest, ProviderFactory,
 };
 pub use provider_id::{ProviderId, detect_from_url, well_known};
-pub use shared::AuthStyle;
+pub use infra::AuthStyle;
 
 pub use reqwest::Client;

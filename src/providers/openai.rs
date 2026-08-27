@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 
-use crate::providers::http::build_reqwest_client;
+use crate::providers::infra::build_reqwest_client;
 use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
 use crate::providers::{EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider};
 use crate::providers::{
