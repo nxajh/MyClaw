@@ -11,9 +11,8 @@
 
 use crate::agents::AgentDelegator;
 use crate::agents::{
-    AgentMessenger, DelegationCoordinator, InMemoryBackend, McpManager, Orchestrator,
-    OrchestratorParts, RunMode, SessionManager, Skill, SkillManager, SystemPromptConfig,
-    ToolRegistry,
+    AgentMessenger, DelegationCoordinator, McpManager, Orchestrator, OrchestratorParts,
+    SessionManager, SkillManager, ToolRegistry,
 };
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -327,7 +326,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // 允许这种状态长期存在——裸化是 B9 迁移步骤的职责，发现残留就拒绝启动，
     // 逼着先跑迁移脚本，而不是让两种目录命名无限期共存。
     {
-        let stale = super::builder::find_legacy_session_dirs(&config.sessions_root());
+        let stale = builder::find_legacy_session_dirs(&config.sessions_root());
         if !stale.is_empty() {
             eprintln!(
                 "检测到 {} 个非裸-uuid 会话目录（举例：{}）。\n\
@@ -1256,7 +1255,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(NamedTool("shell")));
 
-        let missing = super::builder::missing_agent_tool_references(&[agent], &registry);
+        let missing = builder::missing_agent_tool_references(&[agent], &registry);
 
         assert_eq!(
             missing,
@@ -1275,7 +1274,7 @@ mod tests {
         std::fs::create_dir_all(sessions.join(".migration-backups")).unwrap();
         std::fs::write(sessions.join("active.json"), "{}").unwrap();
 
-        let stale = super::builder::find_legacy_session_dirs(&sessions);
+        let stale = builder::find_legacy_session_dirs(&sessions);
         assert_eq!(
             stale,
             vec!["myclaw_s_019fe564-15dd-7a40-af78-ed900edac08d".to_string()]
@@ -1285,7 +1284,7 @@ mod tests {
     #[test]
     fn find_legacy_session_dirs_empty_when_missing_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let stale = super::builder::find_legacy_session_dirs(&dir.path().join("sessions"));
+        let stale = builder::find_legacy_session_dirs(&dir.path().join("sessions"));
         assert!(stale.is_empty());
     }
 }

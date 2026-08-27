@@ -1,17 +1,6 @@
-use crate::agents::AgentDelegator;
-use crate::agents::{
-    AgentMessenger, DelegationCoordinator, InMemoryBackend, McpManager, Orchestrator,
-    OrchestratorParts, RunMode, SessionManager, Skill, SkillManager, SystemPromptConfig,
-    ToolRegistry,
-};
-use anyhow::{Context, Result};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use anyhow::Result;
+use std::sync::atomic::Ordering;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::watch;
-
-use crate::channels::Channel;
 
 pub(crate) async fn wait_for_signal() -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
