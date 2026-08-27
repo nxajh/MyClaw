@@ -11,23 +11,6 @@ pub use crate::api::message::{
     OutboundSendResult, PersistedChannelMessage, ProcessingStatus, SendOptions, ToolEvent,
 };
 
-
-// ── File types ──────────────────────────────────────────────────────────────
-
-
-
-
-
-// ── ChannelMessageContent ───────────────────────────────────────────────────
-
-
-
-
-
-
-// ── Core message types ─────────────────────────────────────────────────────────
-
-
 // ── Callback actions (RFC §11 Phase 5) ─────────────────────────────────────────
 // ProcessingStatus / ToolEvent moved to crate::api::message (#151 Phase 3c).
 
