@@ -35,6 +35,9 @@ pub(crate) async fn wait_for_signal() -> Result<()> {
     Ok(())
 }
 
+/// Reset the persisted Telegram update offset so that `getUpdates` returns
+/// recent messages instead of skipping everything the old process already
+/// fetched.  The dedup layer in TelegramChannel will filter any duplicates.
 pub(crate) fn reset_telegram_offset(base_dir: &std::path::Path) {
     let offset_path = crate::config::telegram_offset_path(base_dir);
     if offset_path.exists() {

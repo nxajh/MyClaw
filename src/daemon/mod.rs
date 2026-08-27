@@ -1292,10 +1292,6 @@ mod tests {
 
 // ── Hot-switch helpers ──────────────────────────────────────────────────────
 
-/// Reset the persisted Telegram update offset so that `getUpdates` returns
-/// recent messages instead of skipping everything the old process already
-/// fetched.  The dedup layer in TelegramChannel will filter any duplicates.
-
 // ── Sub-agent recovery (hot-switch detection) ─────────────────────────────────
 // Moved to `src/agents/startup_recovery.rs` (#151 Phase 6: recovery family
 // disambiguation; facade re-exports it via `agents::recovery`) so that
