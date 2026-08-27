@@ -7,15 +7,15 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::agents::ToolRegistry;
+use crate::api::tool_listing::ToolListing;
 use crate::providers::{Tool, ToolResult};
 
 pub struct ToolSearchTool {
-    tools: Arc<ToolRegistry>,
+    tools: Arc<dyn ToolListing>,
 }
 
 impl ToolSearchTool {
-    pub fn new(tools: Arc<ToolRegistry>) -> Self {
+    pub fn new<T: ToolListing + 'static>(tools: Arc<T>) -> Self {
         Self { tools }
     }
 }
@@ -127,7 +127,7 @@ impl Tool for ToolSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::ToolRegistry;
+    use crate::api::tool_listing::ToolListing;
 
     struct FakeTool {
         name: &'static str,
@@ -154,29 +154,30 @@ mod tests {
         }
     }
 
-    fn registry() -> Arc<ToolRegistry> {
-        let mut reg = ToolRegistry::new();
-        reg.register(Arc::new(FakeTool {
-            name: "view_image",
-            description: "View an image file.",
-        }));
-        reg.register(Arc::new(FakeTool {
-            name: "hear_audio",
-            description: "Listen to an audio file.",
-        }));
-        reg.register(Arc::new(FakeTool {
-            name: "view_video",
-            description: "View a video file.",
-        }));
-        reg.register(Arc::new(FakeTool {
-            name: "media_download",
-            description: "Download image, audio, or video media from a URL.",
-        }));
-        reg.register(Arc::new(FakeTool {
-            name: "calculator",
-            description: "Evaluate an arithmetic expression.",
-        }));
-        Arc::new(reg)
+    fn registry() -> Arc<StaticToolListing> {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(FakeTool {
+                name: "view_image",
+                description: "View an image file.",
+            }),
+            Arc::new(FakeTool {
+                name: "hear_audio",
+                description: "Listen to an audio file.",
+            }),
+            Arc::new(FakeTool {
+                name: "view_video",
+                description: "View a video file.",
+            }),
+            Arc::new(FakeTool {
+                name: "media_download",
+                description: "Download image, audio, or video media from a URL.",
+            }),
+            Arc::new(FakeTool {
+                name: "calculator",
+                description: "Evaluate an arithmetic expression.",
+            }),
+        ];
+        Arc::new(StaticToolListing::new(tools))
     }
 
     async fn search(query: &str, limit: Option<u64>) -> serde_json::Value {

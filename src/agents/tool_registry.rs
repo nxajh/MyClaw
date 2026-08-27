@@ -58,3 +58,13 @@ impl ToolRegistry {
         names
     }
 }
+
+
+// ── #151 Phase 8+ ToolListing facade ─────────────────────────────────────────
+// tool_search (L3) 只读清单；register/get 变更面留在本层。
+
+impl crate::api::tool_listing::ToolListing for ToolRegistry {
+    fn all_tools(&self) -> Vec<Arc<dyn Tool>> {
+        ToolRegistry::all_tools(self)
+    }
+}
