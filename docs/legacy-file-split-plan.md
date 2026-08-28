@@ -94,7 +94,7 @@ churn=1（全库最冷）× 规模第一（2852），零冲突、立收益。
 - [x] 终态（P0–P4 全完成）：全库最大 .rs 文件 = qqbot/channel/api.rs **1399**（≥1400 清零；daemon/mod.rs 1299 居第三）
 - [x] 每文件：CI 三绿（build/layering/migrate-script-tests）× 每批——五批 PR #188–#192 全绿合入
 - [x] 每文件：测试计数守恒、外部 diff 空、深模块比不劣化——累计 12+78+84+49+44 = 267 测试零丢失；外部消费者零改动
-- [x] module_score 基线/终态 JSON 进 PR 描述——终态 `scripts/module-score-final.json`（328 文件）；基线见 `scripts/module-score-baseline.json`（P0 时点）
+- [x] module_score 基线/终态 JSON 进 PR 描述——终态 `scripts/module-score-final.json`（328 文件）；基线见 PR #188 描述（无落地文件）
 - [ ] 2026-11 底 churn 复测时，本计划搬移噪声计入说明（远期，唯一未勾项）
 
 ## 5. 风险与对策
