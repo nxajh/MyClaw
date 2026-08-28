@@ -4,4 +4,4 @@
 pub mod server;
 
 #[cfg(feature = "websocket")]
-pub use client::WebSocketChannel;
+pub use server::WebSocketChannel;
