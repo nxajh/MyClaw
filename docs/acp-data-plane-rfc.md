@@ -7,7 +7,7 @@
 
 ## 1. 背景与动机
 
-现状（`src/websocket/server/`，3061 行：channel.rs 874 + bus.rs 199 + turn.rs 234 + api/ 五文件）：WS 通道用自定义 type 标签 JSON 协议，数据面（`message`/`cancel` → TurnEvent 流）与管理面（`api` 帧，25+ method）复用同一连接同一信封。对比竞品后的核心结论：
+现状（`src/websocket/server/`，3061 行：channel.rs 874 + bus.rs 199 + turn.rs 230 + api/ 五文件）：WS 通道用自定义 type 标签 JSON 协议，数据面（`message`/`cancel` → TurnEvent 流）与管理面（`api` 帧，25+ method）复用同一连接同一信封。对比竞品后的核心结论：
 
 1. 协议自造、无生态：标准客户端（编辑器/ACP 生态）无法驱动 MyClaw；
 2. 鉴权单薄：仅首条消息鉴权（channel.rs L381），header 鉴权弃置（L218 自注 Phase 1）；
