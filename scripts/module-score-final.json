@@ -1,0 +1,4957 @@
+{
+  "files": [
+    {
+      "file": "src/agents/agent/exec_marker.rs",
+      "total_lines": 217,
+      "pub_symbols": 7,
+      "private_fns": 4,
+      "struct_pub_fields": 2,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ExecMarkerGuard",
+        "exec_marker_clear",
+        "exec_marker_read",
+        "exec_marker_write",
+        "last_user_text",
+        "llm_usage",
+        "persist_last"
+      ]
+    },
+    {
+      "file": "src/agents/agent/finalize.rs",
+      "total_lines": 234,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "OverflowRecovery"
+      ]
+    },
+    {
+      "file": "src/agents/agent/injections.rs",
+      "total_lines": 212,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/agent/mod.rs",
+      "total_lines": 480,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "Agent",
+        "new"
+      ]
+    },
+    {
+      "file": "src/agents/agent/retry.rs",
+      "total_lines": 118,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "backoff_duration",
+        "is_transient_llm_error"
+      ]
+    },
+    {
+      "file": "src/agents/agent/run_recovery.rs",
+      "total_lines": 181,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/agent/stream_collect.rs",
+      "total_lines": 443,
+      "pub_symbols": 1,
+      "private_fns": 1,
+      "struct_pub_fields": 8,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "CollectedResponse"
+      ]
+    },
+    {
+      "file": "src/agents/agent/tests.rs",
+      "total_lines": 231,
+      "pub_symbols": 2,
+      "private_fns": 25,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "bailing_runtime",
+        "empty_config"
+      ]
+    },
+    {
+      "file": "src/agents/agent/tool_filter.rs",
+      "total_lines": 420,
+      "pub_symbols": 5,
+      "private_fns": 10,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "allowed_tools",
+        "filter_modality_redundant_tools",
+        "filter_turn_scoped_tools",
+        "fold_absent_tool",
+        "native_media_availability"
+      ]
+    },
+    {
+      "file": "src/agents/agent/tool_phase.rs",
+      "total_lines": 323,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ToolBatchOutcome"
+      ]
+    },
+    {
+      "file": "src/agents/agent/turn_state.rs",
+      "total_lines": 175,
+      "pub_symbols": 2,
+      "private_fns": 6,
+      "struct_pub_fields": 6,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "TurnState",
+        "has_pending"
+      ]
+    },
+    {
+      "file": "src/agents/agent_registry.rs",
+      "total_lines": 145,
+      "pub_symbols": 11,
+      "private_fns": 4,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentRegistry",
+        "contains",
+        "from_vec",
+        "get",
+        "is_empty",
+        "len",
+        "names",
+        "new",
+        "reload_from_dir",
+        "replace_all",
+        "values_cloned"
+      ]
+    },
+    {
+      "file": "src/agents/ask_router.rs",
+      "total_lines": 210,
+      "pub_symbols": 3,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AskRouter",
+        "fulfill",
+        "new"
+      ]
+    },
+    {
+      "file": "src/agents/attachment.rs",
+      "total_lines": 1034,
+      "pub_symbols": 13,
+      "private_fns": 29,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AttachmentManager",
+        "build_message",
+        "build_text",
+        "clear_pending",
+        "diff_agents",
+        "diff_autonomy",
+        "diff_date",
+        "diff_mcp",
+        "diff_memory",
+        "diff_skills",
+        "new",
+        "pending_keys",
+        "push_skill_draft_reminder"
+      ]
+    },
+    {
+      "file": "src/agents/compaction_engine/engine.rs",
+      "total_lines": 1059,
+      "pub_symbols": 10,
+      "private_fns": 0,
+      "struct_pub_fields": 6,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "CompactionEngine",
+        "CompactionResult",
+        "compact_threshold",
+        "compaction_boundary",
+        "compaction_boundary_with_retain",
+        "new",
+        "rebuild_messages",
+        "retain_work_units",
+        "should_compact",
+        "timezone_offset"
+      ]
+    },
+    {
+      "file": "src/agents/compaction_engine/evidence.rs",
+      "total_lines": 150,
+      "pub_symbols": 2,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "append_evidence_index",
+        "extract_file_paths"
+      ]
+    },
+    {
+      "file": "src/agents/compaction_engine/fold.rs",
+      "total_lines": 276,
+      "pub_symbols": 8,
+      "private_fns": 4,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "HARD_PRIOR_SUMMARY_CHARS",
+        "HARD_TOTAL_CHARS",
+        "find_incremental_range",
+        "hard_fold_history",
+        "is_empty_compact_error",
+        "open_user_protected_from",
+        "strip_images",
+        "truncate_chars"
+      ]
+    },
+    {
+      "file": "src/agents/compaction_engine/mod.rs",
+      "total_lines": 20,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/compaction_engine/summarizer.rs",
+      "total_lines": 133,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 5,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SummaryResponse",
+        "audit_summary_quality",
+        "build_summarizer_prompt"
+      ]
+    },
+    {
+      "file": "src/agents/compaction_engine/tests.rs",
+      "total_lines": 386,
+      "pub_symbols": 0,
+      "private_fns": 18,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/delegation.rs",
+      "total_lines": 284,
+      "pub_symbols": 6,
+      "private_fns": 8,
+      "struct_pub_fields": 4,
+      "pub_use_reexports": 2,
+      "pub_symbol_names": [
+        "DelegationEvent",
+        "DelegationTimeout",
+        "INJECTION_BUDGET_TOKENS",
+        "SubAgentMailbox",
+        "render_agent_mail_reminder",
+        "select_within_injection_budget"
+      ]
+    },
+    {
+      "file": "src/agents/delegation_coordinator/agent_lifecycle.rs",
+      "total_lines": 40,
+      "pub_symbols": 0,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/delegation_coordinator/checkpoint.rs",
+      "total_lines": 108,
+      "pub_symbols": 4,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "checkpoint_and_cancel_all",
+        "load_checkpoints",
+        "persist_terminal_checkpoint",
+        "timed_out_checkpoints"
+      ]
+    },
+    {
+      "file": "src/agents/delegation_coordinator/delegate.rs",
+      "total_lines": 684,
+      "pub_symbols": 3,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "check_depth",
+        "delegate_with_parent",
+        "session_depth"
+      ]
+    },
+    {
+      "file": "src/agents/delegation_coordinator/delegator.rs",
+      "total_lines": 74,
+      "pub_symbols": 0,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/delegation_coordinator/lifecycle.rs",
+      "total_lines": 571,
+      "pub_symbols": 5,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "recover_async",
+        "resolve_timeout",
+        "resume_timed_out",
+        "should_gc_sub_session",
+        "spawn_delegate_async"
+      ]
+    },
+    {
+      "file": "src/agents/delegation_coordinator/messenger.rs",
+      "total_lines": 71,
+      "pub_symbols": 0,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/delegation_coordinator/mod.rs",
+      "total_lines": 122,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "DelegationCoordinator"
+      ]
+    },
+    {
+      "file": "src/agents/delegation_coordinator/registry.rs",
+      "total_lines": 196,
+      "pub_symbols": 10,
+      "private_fns": 0,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "RunningEntry",
+        "event_sender",
+        "find_agent",
+        "new",
+        "running_count",
+        "running_records",
+        "running_snapshot",
+        "runtime",
+        "set_event_sender",
+        "set_runtime"
+      ]
+    },
+    {
+      "file": "src/agents/delegation_coordinator/tests.rs",
+      "total_lines": 914,
+      "pub_symbols": 0,
+      "private_fns": 13,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/delegation_coordinator/worktree.rs",
+      "total_lines": 44,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "cleanup_stale_worktrees",
+        "worktree_branch_name"
+      ]
+    },
+    {
+      "file": "src/agents/delegator.rs",
+      "total_lines": 14,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 2,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/error.rs",
+      "total_lines": 66,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentError"
+      ]
+    },
+    {
+      "file": "src/agents/llm_stream.rs",
+      "total_lines": 77,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "STREAM_CHUNK_INTERVAL_TIMEOUT",
+        "STREAM_FIRST_CHUNK_TIMEOUT",
+        "STREAM_TOTAL_TIMEOUT"
+      ]
+    },
+    {
+      "file": "src/agents/loop_breaker.rs",
+      "total_lines": 842,
+      "pub_symbols": 12,
+      "private_fns": 28,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "LoopBreak",
+        "LoopBreakReason",
+        "LoopBreaker",
+        "LoopBreakerCounter",
+        "max_tool_calls",
+        "new",
+        "new_counter",
+        "new_counter_with_max",
+        "record_and_check",
+        "reset",
+        "total_calls"
+      ]
+    },
+    {
+      "file": "src/agents/mcp_manager.rs",
+      "total_lines": 193,
+      "pub_symbols": 2,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "McpManager",
+        "new"
+      ]
+    },
+    {
+      "file": "src/agents/media_e2e_test.rs",
+      "total_lines": 469,
+      "pub_symbols": 0,
+      "private_fns": 11,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/memory_distill.rs",
+      "total_lines": 1086,
+      "pub_symbols": 7,
+      "private_fns": 20,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "DistillInput",
+        "DistillState",
+        "has_pending_user_memories",
+        "in_backoff",
+        "load",
+        "record_attempt",
+        "save"
+      ]
+    },
+    {
+      "file": "src/agents/memory_fork.rs",
+      "total_lines": 721,
+      "pub_symbols": 1,
+      "private_fns": 7,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ForkInput"
+      ]
+    },
+    {
+      "file": "src/agents/mention.rs",
+      "total_lines": 361,
+      "pub_symbols": 7,
+      "private_fns": 19,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MentionResolution",
+        "RefRenderer",
+        "flush",
+        "new",
+        "push",
+        "render_refs",
+        "resolve_mentions"
+      ]
+    },
+    {
+      "file": "src/agents/mod.rs",
+      "total_lines": 90,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 37,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/orchestrator/completion_queue.rs",
+      "total_lines": 329,
+      "pub_symbols": 9,
+      "private_fns": 8,
+      "struct_pub_fields": 10,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "CompletionNoticeEntry",
+        "CompletionNoticeStore",
+        "DeliveryState",
+        "append",
+        "is_empty",
+        "len",
+        "mark_delivered",
+        "open",
+        "pending"
+      ]
+    },
+    {
+      "file": "src/agents/orchestrator/ctx.rs",
+      "total_lines": 264,
+      "pub_symbols": 9,
+      "private_fns": 11,
+      "struct_pub_fields": 12,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "OrchestratorCtx",
+        "SharedTurnTracker",
+        "TurnGuard",
+        "TurnTracker",
+        "active_count",
+        "channel",
+        "new",
+        "session_context_for",
+        "track"
+      ]
+    },
+    {
+      "file": "src/agents/orchestrator/delegation/dispatch.rs",
+      "total_lines": 318,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "notice_fallback_sender",
+        "notice_receiver",
+        "split_batch_ids"
+      ]
+    },
+    {
+      "file": "src/agents/orchestrator/delegation/mod.rs",
+      "total_lines": 51,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 2,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/orchestrator/delegation/notice.rs",
+      "total_lines": 539,
+      "pub_symbols": 2,
+      "private_fns": 1,
+      "struct_pub_fields": 3,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "NoticeMeta",
+        "maybe_append_silence_guidance"
+      ]
+    },
+    {
+      "file": "src/agents/orchestrator/delegation/tests.rs",
+      "total_lines": 768,
+      "pub_symbols": 0,
+      "private_fns": 9,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/orchestrator/event.rs",
+      "total_lines": 55,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "OrchestratorEvent"
+      ]
+    },
+    {
+      "file": "src/agents/orchestrator/inbound.rs",
+      "total_lines": 1213,
+      "pub_symbols": 1,
+      "private_fns": 18,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "dispatch_turn_spawn"
+      ]
+    },
+    {
+      "file": "src/agents/orchestrator/inbound_spool.rs",
+      "total_lines": 556,
+      "pub_symbols": 11,
+      "private_fns": 15,
+      "struct_pub_fields": 6,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "InboundSpool",
+        "SpoolEntry",
+        "SpoolStatus",
+        "append",
+        "compact_if_needed",
+        "is_empty",
+        "len",
+        "mark_done",
+        "open",
+        "pending",
+        "pending_for"
+      ]
+    },
+    {
+      "file": "src/agents/orchestrator/key.rs",
+      "total_lines": 9,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/orchestrator/mod.rs",
+      "total_lines": 710,
+      "pub_symbols": 9,
+      "private_fns": 9,
+      "struct_pub_fields": 18,
+      "pub_use_reexports": 6,
+      "pub_symbol_names": [
+        "ChannelMsgSender",
+        "InboundEnvelope",
+        "Orchestrator",
+        "OrchestratorParts",
+        "ctx",
+        "delegator",
+        "history_has_incomplete_turn",
+        "new",
+        "turn_tracker"
+      ]
+    },
+    {
+      "file": "src/agents/orchestrator/scheduled.rs",
+      "total_lines": 361,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/orchestrator/test_support.rs",
+      "total_lines": 163,
+      "pub_symbols": 5,
+      "private_fns": 18,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MockChannel",
+        "inbound_msg",
+        "new",
+        "test_ctx",
+        "texts"
+      ]
+    },
+    {
+      "file": "src/agents/orchestrator/turn.rs",
+      "total_lines": 55,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 5,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ResolvedTurn",
+        "resolve",
+        "turn_context"
+      ]
+    },
+    {
+      "file": "src/agents/orchestrator/turn_recovery.rs",
+      "total_lines": 1397,
+      "pub_symbols": 1,
+      "private_fns": 17,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "run_startup"
+      ]
+    },
+    {
+      "file": "src/agents/prompt.rs",
+      "total_lines": 441,
+      "pub_symbols": 5,
+      "private_fns": 21,
+      "struct_pub_fields": 8,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "SystemPromptBuilder",
+        "SystemPromptConfig",
+        "build",
+        "build_with_profile",
+        "new"
+      ]
+    },
+    {
+      "file": "src/agents/recovery/mod.rs",
+      "total_lines": 22,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 2,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/resource_provider.rs",
+      "total_lines": 53,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 7,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ResourceProvider",
+        "new",
+        "timezone_offset"
+      ]
+    },
+    {
+      "file": "src/agents/runtime.rs",
+      "total_lines": 189,
+      "pub_symbols": 11,
+      "private_fns": 1,
+      "struct_pub_fields": 17,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentRuntime",
+        "RuntimeDefaults",
+        "build_system_prompt",
+        "new",
+        "with_agents_skills_dir",
+        "with_defaults",
+        "with_mcp_manager",
+        "with_search_cooldown",
+        "with_sessions_dir",
+        "with_task_boards",
+        "with_user_registry"
+      ]
+    },
+    {
+      "file": "src/agents/session/backend.rs",
+      "total_lines": 503,
+      "pub_symbols": 6,
+      "private_fns": 52,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "BackendPersistHook",
+        "InMemoryBackend",
+        "PersistHook",
+        "new",
+        "with_namespace"
+      ]
+    },
+    {
+      "file": "src/agents/session/breakpoint_detect.rs",
+      "total_lines": 65,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 3,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "BreakpointItem",
+        "detect_incomplete_turn",
+        "identify_breakpoint"
+      ]
+    },
+    {
+      "file": "src/agents/session/manager.rs",
+      "total_lines": 844,
+      "pub_symbols": 34,
+      "private_fns": 12,
+      "struct_pub_fields": 2,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SessionManager",
+        "SessionNotOwned",
+        "active_session_id",
+        "append_message",
+        "backend",
+        "build_persist_hook",
+        "create_sub_session",
+        "create_sub_session_context",
+        "delete_session",
+        "drop_context",
+        "get_by_id",
+        "get_context",
+        "get_or_create",
+        "get_or_create_context",
+        "get_or_create_context_with",
+        "get_session_override",
+        "in_memory",
+        "list_all_sessions",
+        "list_sessions",
+        "list_sessions_for_user",
+        "list_sub_sessions",
+        "load_context_by_session_id",
+        "new",
+        "new_session",
+        "register_context",
+        "registered_context_by_session_id",
+        "rename_session",
+        "resolver",
+        "save_session_override",
+        "session_id_for_routing_key",
+        "set_channel_registry",
+        "switch_session",
+        "with_agents",
+        "with_resolver"
+      ]
+    },
+    {
+      "file": "src/agents/session/mod.rs",
+      "total_lines": 15,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 5,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/session/session_override.rs",
+      "total_lines": 472,
+      "pub_symbols": 5,
+      "private_fns": 10,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SessionOverride",
+        "is_empty",
+        "sanitize_history",
+        "sanitize_paired",
+        "to_thinking_config"
+      ]
+    },
+    {
+      "file": "src/agents/session/types.rs",
+      "total_lines": 746,
+      "pub_symbols": 28,
+      "private_fns": 9,
+      "struct_pub_fields": 29,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "DelegationDeadline",
+        "Session",
+        "SummaryMetadata",
+        "add_assistant",
+        "add_assistant_text",
+        "add_assistant_with_tools",
+        "add_system_text",
+        "add_tool_result",
+        "add_user",
+        "add_user_text",
+        "add_user_with_media",
+        "apply_compaction",
+        "close_incomplete_turn_on_abort",
+        "drop_pre_boundary",
+        "from_now",
+        "is_low",
+        "new",
+        "pop_last_assistant",
+        "record_inbound",
+        "remaining_secs",
+        "render_reminder",
+        "reply_target",
+        "resolve_channel",
+        "rollback_to",
+        "save_to_disk",
+        "strip_trailing_tool_calls",
+        "with_channels",
+        "with_persist"
+      ]
+    },
+    {
+      "file": "src/agents/session_context/helpers.rs",
+      "total_lines": 110,
+      "pub_symbols": 3,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "age_session_media",
+        "history_looks_incomplete",
+        "is_bare_continue"
+      ]
+    },
+    {
+      "file": "src/agents/session_context/mod.rs",
+      "total_lines": 1199,
+      "pub_symbols": 17,
+      "private_fns": 6,
+      "struct_pub_fields": 14,
+      "pub_use_reexports": 4,
+      "pub_symbol_names": [
+        "DelegationNotice",
+        "SessionContext",
+        "add_pending_task",
+        "add_progress",
+        "bump_notice_turn",
+        "clear_suspension_if_collected",
+        "enqueue_delegation_notice",
+        "finish_notice_turn",
+        "has_notice_turns_in_flight",
+        "has_pending_async_work",
+        "has_queued_delegation_notices",
+        "new",
+        "record_terminal",
+        "set_preview",
+        "suspension_snapshot",
+        "take_delegation_notices",
+        "with_profile"
+      ]
+    },
+    {
+      "file": "src/agents/session_context/suspension.rs",
+      "total_lines": 459,
+      "pub_symbols": 3,
+      "private_fns": 19,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "TerminalRecord",
+        "decide_silenced",
+        "semantic_stop_reason"
+      ]
+    },
+    {
+      "file": "src/agents/session_context/tts.rs",
+      "total_lines": 207,
+      "pub_symbols": 2,
+      "private_fns": 7,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "normalize_symbols_for_tts",
+        "prepare_text_for_tts"
+      ]
+    },
+    {
+      "file": "src/agents/skill_draft_reminder.rs",
+      "total_lines": 160,
+      "pub_symbols": 1,
+      "private_fns": 7,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "check_and_arm"
+      ]
+    },
+    {
+      "file": "src/agents/skill_extract.rs",
+      "total_lines": 544,
+      "pub_symbols": 1,
+      "private_fns": 3,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SkillExtractInput"
+      ]
+    },
+    {
+      "file": "src/agents/startup_recovery.rs",
+      "total_lines": 109,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 8,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "UnfinishedSubAgent",
+        "scan_unfinished_subagents"
+      ]
+    },
+    {
+      "file": "src/agents/tokens.rs",
+      "total_lines": 5,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/tool_executor.rs",
+      "total_lines": 659,
+      "pub_symbols": 6,
+      "private_fns": 27,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MemoryToolExecutor",
+        "ToolExecutor",
+        "new",
+        "parse_tool_args",
+        "with_ask_router"
+      ]
+    },
+    {
+      "file": "src/agents/tool_registry.rs",
+      "total_lines": 70,
+      "pub_symbols": 7,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ToolRegistry",
+        "all_tools",
+        "get",
+        "new",
+        "register",
+        "tool_count",
+        "tool_names_sorted"
+      ]
+    },
+    {
+      "file": "src/agents/turn.rs",
+      "total_lines": 190,
+      "pub_symbols": 8,
+      "private_fns": 0,
+      "struct_pub_fields": 27,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "PreviewState",
+        "SubResult",
+        "SubStatus",
+        "TurnContext",
+        "TurnResult",
+        "TurnSuspension",
+        "add_pending",
+        "new"
+      ]
+    },
+    {
+      "file": "src/agents/user_messages.rs",
+      "total_lines": 354,
+      "pub_symbols": 9,
+      "private_fns": 17,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MSG_ABORT_ACK",
+        "MSG_BARE_CONTINUE",
+        "MSG_EMPTY_RESPONSE",
+        "MSG_IMAGE_ONLY_HINT",
+        "MSG_NO_PENDING_RETRY",
+        "MSG_TURN_FAILED",
+        "msg_empty_response",
+        "msg_empty_response_override",
+        "user_facing_error_message"
+      ]
+    },
+    {
+      "file": "src/agents/workspace/agent_loader.rs",
+      "total_lines": 361,
+      "pub_symbols": 3,
+      "private_fns": 9,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "load_agents_from_dir",
+        "parse_agent_file",
+        "validate_agents"
+      ]
+    },
+    {
+      "file": "src/agents/workspace/mod.rs",
+      "total_lines": 7,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/workspace/skill_loader.rs",
+      "total_lines": 777,
+      "pub_symbols": 5,
+      "private_fns": 25,
+      "struct_pub_fields": 12,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SkillDefinition",
+        "list_draft_skill_names",
+        "load_skills_from_dir",
+        "load_skills_layered",
+        "parse_skill_file"
+      ]
+    },
+    {
+      "file": "src/agents/workspace/skill_manage_tool_tests.rs",
+      "total_lines": 311,
+      "pub_symbols": 0,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/agents/workspace/skills.rs",
+      "total_lines": 269,
+      "pub_symbols": 15,
+      "private_fns": 10,
+      "struct_pub_fields": 11,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "Skill",
+        "SkillManager",
+        "agent_skills_iter",
+        "from_definition",
+        "get",
+        "injected_summary",
+        "new",
+        "register",
+        "register_definition",
+        "reload",
+        "reload_from_definitions",
+        "skill_count",
+        "skill_dir",
+        "skill_prompts",
+        "skills_iter"
+      ]
+    },
+    {
+      "file": "src/agents/workspace/watcher.rs",
+      "total_lines": 214,
+      "pub_symbols": 5,
+      "private_fns": 1,
+      "struct_pub_fields": 6,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ChangeSet",
+        "ManagedWatcherGuard",
+        "WorkspaceWatcher",
+        "new",
+        "spawn_managed"
+      ]
+    },
+    {
+      "file": "src/api/agent_lifecycle.rs",
+      "total_lines": 44,
+      "pub_symbols": 2,
+      "private_fns": 3,
+      "struct_pub_fields": 3,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentLifecycle",
+        "ResumableAgent"
+      ]
+    },
+    {
+      "file": "src/api/agent_mail.rs",
+      "total_lines": 81,
+      "pub_symbols": 4,
+      "private_fns": 1,
+      "struct_pub_fields": 10,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentMail",
+        "AgentMessage",
+        "AgentMessenger",
+        "MessageKind"
+      ]
+    },
+    {
+      "file": "src/api/ask_fulfillment.rs",
+      "total_lines": 16,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AskFulfillment"
+      ]
+    },
+    {
+      "file": "src/api/capability.rs",
+      "total_lines": 183,
+      "pub_symbols": 14,
+      "private_fns": 3,
+      "struct_pub_fields": 16,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AuthStyle",
+        "BasicModelConfig",
+        "BasicPricing",
+        "Capability",
+        "ChatModelConfig",
+        "ChatPricing",
+        "EmbeddingModelConfig",
+        "EmbeddingPricing",
+        "Modality",
+        "RotationStrategy",
+        "as_str",
+        "supports_image_input",
+        "supports_input"
+      ]
+    },
+    {
+      "file": "src/api/channel_registry.rs",
+      "total_lines": 166,
+      "pub_symbols": 13,
+      "private_fns": 6,
+      "struct_pub_fields": 5,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ChannelRegistry",
+        "SessionKey",
+        "SubAgentKey",
+        "account_key",
+        "get",
+        "get_by_key",
+        "insert",
+        "is_empty",
+        "len",
+        "new",
+        "parse"
+      ]
+    },
+    {
+      "file": "src/api/delegation.rs",
+      "total_lines": 136,
+      "pub_symbols": 6,
+      "private_fns": 2,
+      "struct_pub_fields": 4,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentDelegator",
+        "DelegationStatus",
+        "RunningAgentInfo",
+        "SUB_AGENT_TIMEOUT_MAX_SECS",
+        "as_str",
+        "is_terminal"
+      ]
+    },
+    {
+      "file": "src/api/loop_breaker.rs",
+      "total_lines": 81,
+      "pub_symbols": 1,
+      "private_fns": 8,
+      "struct_pub_fields": 7,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "LoopBreakerConfig"
+      ]
+    },
+    {
+      "file": "src/api/message.rs",
+      "total_lines": 665,
+      "pub_symbols": 43,
+      "private_fns": 15,
+      "struct_pub_fields": 48,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "CallbackAction",
+        "Channel",
+        "ChannelCapabilities",
+        "ChannelFile",
+        "ChannelFileBody",
+        "ChannelFileMeta",
+        "ChannelInboundMessage",
+        "ChannelMessageContent",
+        "ChannelOutboundMessage",
+        "GroupStat",
+        "InlineButton",
+        "LenUnit",
+        "LocalFileBody",
+        "MINIMAL_CAPABILITIES",
+        "MessageId",
+        "MessageReceiver",
+        "MessageSender",
+        "OutboundChannel",
+        "OutboundSendResult",
+        "PersistedChannelMessage",
+        "ProcessingStatus",
+        "SendOptions",
+        "ToolEvent",
+        "as_str",
+        "empty",
+        "fn",
+        "into_runtime",
+        "new",
+        "parse",
+        "serialize",
+        "single",
+        "text",
+        "to_persisted",
+        "with_reply_to",
+        "with_thread"
+      ]
+    },
+    {
+      "file": "src/api/mod.rs",
+      "total_lines": 25,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/api/run_mode.rs",
+      "total_lines": 14,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "RunMode"
+      ]
+    },
+    {
+      "file": "src/api/security.rs",
+      "total_lines": 310,
+      "pub_symbols": 12,
+      "private_fns": 8,
+      "struct_pub_fields": 3,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AllowList",
+        "AuthDecision",
+        "ChannelSecurityPolicy",
+        "GroupAuthMode",
+        "MessageScope",
+        "allowed",
+        "allows",
+        "dm_only",
+        "evaluate",
+        "from_config",
+        "is_empty_whitelist",
+        "open"
+      ]
+    },
+    {
+      "file": "src/api/session_store.rs",
+      "total_lines": 107,
+      "pub_symbols": 9,
+      "private_fns": 5,
+      "struct_pub_fields": 2,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "InMemorySessionContext",
+        "InMemorySessionStore",
+        "InMemorySuspension",
+        "PendingWorkSession",
+        "SessionStore",
+        "get_or_create_context",
+        "has_pending_async_work",
+        "new",
+        "suspension_snapshot"
+      ]
+    },
+    {
+      "file": "src/api/skill_registry.rs",
+      "total_lines": 144,
+      "pub_symbols": 7,
+      "private_fns": 11,
+      "struct_pub_fields": 13,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "InMemorySkillRegistry",
+        "SkillRegistry",
+        "SkillSummary",
+        "SkillView",
+        "new",
+        "upsert",
+        "upsert_summary"
+      ]
+    },
+    {
+      "file": "src/api/tool.rs",
+      "total_lines": 139,
+      "pub_symbols": 5,
+      "private_fns": 8,
+      "struct_pub_fields": 15,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "Tool",
+        "ToolContext",
+        "ToolResult",
+        "ToolSource",
+        "ToolSpec"
+      ]
+    },
+    {
+      "file": "src/api/tool_listing.rs",
+      "total_lines": 33,
+      "pub_symbols": 3,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "StaticToolListing",
+        "ToolListing",
+        "new"
+      ]
+    },
+    {
+      "file": "src/api/turn_event.rs",
+      "total_lines": 241,
+      "pub_symbols": 9,
+      "private_fns": 7,
+      "struct_pub_fields": 20,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "RunSummary",
+        "TURN_EVENT_SCHEMA",
+        "TURN_EVENT_VERSION",
+        "TokenUsage",
+        "TtsSummary",
+        "TurnEvent",
+        "VersionedEvent",
+        "new",
+        "versioned"
+      ]
+    },
+    {
+      "file": "src/api/turn_stream.rs",
+      "total_lines": 121,
+      "pub_symbols": 3,
+      "private_fns": 5,
+      "struct_pub_fields": 6,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "FoldCandidate",
+        "StreamDelivery",
+        "TurnStream"
+      ]
+    },
+    {
+      "file": "src/channels/message/chunking.rs",
+      "total_lines": 1154,
+      "pub_symbols": 2,
+      "private_fns": 38,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "split_message_chunk",
+        "split_message_chunk_chars"
+      ]
+    },
+    {
+      "file": "src/channels/message/mod.rs",
+      "total_lines": 73,
+      "pub_symbols": 0,
+      "private_fns": 4,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 3,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/channels/message/model.rs",
+      "total_lines": 119,
+      "pub_symbols": 5,
+      "private_fns": 4,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "DedupState",
+        "check_and_record",
+        "len",
+        "new",
+        "with_capacity"
+      ]
+    },
+    {
+      "file": "src/channels/mod.rs",
+      "total_lines": 28,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 6,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/channels/qqbot/channel/api.rs",
+      "total_lines": 1399,
+      "pub_symbols": 11,
+      "private_fns": 6,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MAX_INLINE_UPLOAD_BYTES",
+        "build_identify",
+        "build_security_policy",
+        "handle_dispatch",
+        "inject_group_history",
+        "new",
+        "next_msg_seq",
+        "record_group_history",
+        "resolve_group_history_limit",
+        "start_internal_typing",
+        "stop_internal_typing"
+      ]
+    },
+    {
+      "file": "src/channels/qqbot/channel/mod.rs",
+      "total_lines": 562,
+      "pub_symbols": 3,
+      "private_fns": 5,
+      "struct_pub_fields": 14,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "QQBotChannel",
+        "extract_quote_content",
+        "is_ssrf_blocked"
+      ]
+    },
+    {
+      "file": "src/channels/qqbot/channel/protocol.rs",
+      "total_lines": 56,
+      "pub_symbols": 14,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "API_BASE",
+        "GATEWAY_URL",
+        "INTENTS",
+        "OP_DISPATCH",
+        "OP_HEARTBEAT",
+        "OP_HEARTBEAT_ACK",
+        "OP_HELLO",
+        "OP_IDENTIFY",
+        "OP_INVALID_SESSION",
+        "OP_RECONNECT",
+        "OP_RESUME",
+        "TOKEN_URL",
+        "mime_ext_from_content_type",
+        "user_agent"
+      ]
+    },
+    {
+      "file": "src/channels/qqbot/channel/tests.rs",
+      "total_lines": 348,
+      "pub_symbols": 0,
+      "private_fns": 19,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/channels/qqbot/channel/text.rs",
+      "total_lines": 177,
+      "pub_symbols": 6,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "QQ_MAX_VISUAL_LINES_PER_BUBBLE",
+        "display_width",
+        "estimate_visual_lines",
+        "is_gfm_table_line",
+        "split_by_visual_lines",
+        "strip_internal_tags"
+      ]
+    },
+    {
+      "file": "src/channels/qqbot/channel/ws.rs",
+      "total_lines": 345,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/channels/qqbot/flow.rs",
+      "total_lines": 378,
+      "pub_symbols": 18,
+      "private_fns": 10,
+      "struct_pub_fields": 5,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "DeliverDebouncer",
+        "PendingDeliver",
+        "RAPID_RECONNECT_LIMIT",
+        "RAPID_RECONNECT_WINDOW_SECS",
+        "RECONNECT_DELAYS",
+        "RateLimiter",
+        "ReconnectManager",
+        "ReplyLimiter",
+        "check",
+        "check_and_record",
+        "enabled",
+        "enqueue",
+        "new",
+        "next_delay",
+        "take"
+      ]
+    },
+    {
+      "file": "src/channels/qqbot/keyboard.rs",
+      "total_lines": 94,
+      "pub_symbols": 8,
+      "private_fns": 0,
+      "struct_pub_fields": 13,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "Button",
+        "ButtonAction",
+        "ButtonPermission",
+        "ButtonRenderData",
+        "ButtonRow",
+        "Keyboard",
+        "KeyboardContent",
+        "from_pairs"
+      ]
+    },
+    {
+      "file": "src/channels/qqbot/markdown_sanitize.rs",
+      "total_lines": 730,
+      "pub_symbols": 3,
+      "private_fns": 28,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "pad_bold_markers_for_cjk",
+        "sanitize_qq_markdown",
+        "sanitize_qq_markdown_dollars"
+      ]
+    },
+    {
+      "file": "src/channels/qqbot/mod.rs",
+      "total_lines": 16,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 2,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/channels/qqbot/token.rs",
+      "total_lines": 220,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 8,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "TokenManager",
+        "TokenState",
+        "new"
+      ]
+    },
+    {
+      "file": "src/channels/qqbot/types.rs",
+      "total_lines": 36,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 7,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "GatewayPayload",
+        "SessionState",
+        "WsDisconnect"
+      ]
+    },
+    {
+      "file": "src/channels/security.rs",
+      "total_lines": 45,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "warn_if_locked_down"
+      ]
+    },
+    {
+      "file": "src/channels/shared/debounce.rs",
+      "total_lines": 146,
+      "pub_symbols": 4,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "InboundDebouncer",
+        "is_pending",
+        "new",
+        "window_ms"
+      ]
+    },
+    {
+      "file": "src/channels/shared/mod.rs",
+      "total_lines": 16,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 2,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/channels/shared/typing.rs",
+      "total_lines": 153,
+      "pub_symbols": 9,
+      "private_fns": 0,
+      "struct_pub_fields": 6,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "TypingBreakerHook",
+        "TypingExitHook",
+        "TypingExpiredHook",
+        "TypingKeepAlive",
+        "TypingParams",
+        "interval_only",
+        "new",
+        "start",
+        "stop"
+      ]
+    },
+    {
+      "file": "src/channels/telegram/channel/api.rs",
+      "total_lines": 1031,
+      "pub_symbols": 27,
+      "private_fns": 4,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "CONTINUATION_OVERHEAD",
+        "RICH_MESSAGE_LENGTH",
+        "api_url",
+        "cache_message",
+        "contains_bot_mention",
+        "escape_digit_heading_lookalikes",
+        "find_bot_mention_spans",
+        "format_forward_attribution",
+        "http_client",
+        "is_edit_not_modified",
+        "is_group_message",
+        "is_reply_to_bot",
+        "load_offset",
+        "new",
+        "normalize_allowed_users",
+        "normalize_identity",
+        "normalize_markdown_tables",
+        "parse_message_content",
+        "parse_reply_target",
+        "persist_offset",
+        "plain_send_message_body",
+        "set_bot_username",
+        "start_internal_typing",
+        "stop_internal_typing",
+        "strip_bot_mentions",
+        "try_authorize",
+        "with_base_dir"
+      ]
+    },
+    {
+      "file": "src/channels/telegram/channel/mod.rs",
+      "total_lines": 540,
+      "pub_symbols": 1,
+      "private_fns": 6,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "TelegramChannel"
+      ]
+    },
+    {
+      "file": "src/channels/telegram/channel/session.rs",
+      "total_lines": 643,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "chunk_for_telegram"
+      ]
+    },
+    {
+      "file": "src/channels/telegram/channel/tests.rs",
+      "total_lines": 466,
+      "pub_symbols": 1,
+      "private_fns": 26,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "make_config"
+      ]
+    },
+    {
+      "file": "src/channels/telegram/mod.rs",
+      "total_lines": 23,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/channels/telegram/turn_stream.rs",
+      "total_lines": 930,
+      "pub_symbols": 2,
+      "private_fns": 20,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "TelegramTurnStream",
+        "new_stream"
+      ]
+    },
+    {
+      "file": "src/channels/telegram/types.rs",
+      "total_lines": 162,
+      "pub_symbols": 13,
+      "private_fns": 0,
+      "struct_pub_fields": 52,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "Audio",
+        "CallbackQuery",
+        "Chat",
+        "Document",
+        "GetUpdatesResponse",
+        "Message",
+        "PhotoSize",
+        "SendChatActionRequest",
+        "Update",
+        "User",
+        "Video",
+        "VideoNote",
+        "Voice"
+      ]
+    },
+    {
+      "file": "src/channels/wechat/api_client.rs",
+      "total_lines": 606,
+      "pub_symbols": 8,
+      "private_fns": 0,
+      "struct_pub_fields": 10,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ApiClient",
+        "UploadedMediaInfo",
+        "aes_ecb_padded_size",
+        "check_ret",
+        "new",
+        "parse_cdn_aes_key",
+        "random_uin_header",
+        "url"
+      ]
+    },
+    {
+      "file": "src/channels/wechat/crypto.rs",
+      "total_lines": 62,
+      "pub_symbols": 4,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "decrypt_ecb",
+        "encrypt_ecb",
+        "pkcs7_pad",
+        "pkcs7_unpad"
+      ]
+    },
+    {
+      "file": "src/channels/wechat/error.rs",
+      "total_lines": 44,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ErrorClass",
+        "classify_backoff",
+        "error_class"
+      ]
+    },
+    {
+      "file": "src/channels/wechat/inbound.rs",
+      "total_lines": 125,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 7,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "InboundContent",
+        "InboundEvent",
+        "parse_inbound"
+      ]
+    },
+    {
+      "file": "src/channels/wechat/mod.rs",
+      "total_lines": 927,
+      "pub_symbols": 25,
+      "private_fns": 17,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 6,
+      "pub_symbol_names": [
+        "CDN_BASE_URL",
+        "CHANNEL_VERSION",
+        "ILINK_APP_ID",
+        "ITEM_TYPE_FILE",
+        "ITEM_TYPE_IMAGE",
+        "ITEM_TYPE_TEXT",
+        "ITEM_TYPE_TOOL_CALL_RESULT",
+        "ITEM_TYPE_TOOL_CALL_START",
+        "ITEM_TYPE_VIDEO",
+        "ITEM_TYPE_VOICE",
+        "MAX_CONSECUTIVE_ERRORS",
+        "MESSAGE_STATE_FINISH",
+        "MESSAGE_STATE_GENERATING",
+        "MESSAGE_TYPE_BOT",
+        "QR_MAX_ATTEMPTS",
+        "QR_POLL_INTERVAL_SECS",
+        "RATE_LIMIT_PAUSE_SECS",
+        "TYPING_STATUS_CANCEL",
+        "TYPING_STATUS_TYPING",
+        "TYPING_TICKET_TTL",
+        "UPLOAD_MEDIA_FILE",
+        "UPLOAD_MEDIA_IMAGE",
+        "UPLOAD_MEDIA_VIDEO",
+        "WechatChannel",
+        "new"
+      ]
+    },
+    {
+      "file": "src/channels/wechat/state.rs",
+      "total_lines": 68,
+      "pub_symbols": 7,
+      "private_fns": 0,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SharedState",
+        "context_token_path",
+        "get_updates_buf_path",
+        "load_context_tokens",
+        "load_get_updates_buf",
+        "persist_context_tokens",
+        "persist_get_updates_buf"
+      ]
+    },
+    {
+      "file": "src/channels/wechat/types.rs",
+      "total_lines": 341,
+      "pub_symbols": 32,
+      "private_fns": 0,
+      "struct_pub_fields": 87,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ApiError",
+        "BaseInfo",
+        "CDNMedia",
+        "GetBotQrCodeRequest",
+        "GetConfigRequest",
+        "GetConfigResponse",
+        "GetQrCodeStatusRequest",
+        "GetUpdatesRequest",
+        "GetUpdatesResponse",
+        "IlinkMessage",
+        "InboundFileItem",
+        "InboundImageItem",
+        "InboundVideoItem",
+        "MessageItem",
+        "QrCodeResponse",
+        "QrStatus",
+        "SendCDNMedia",
+        "SendFileItem",
+        "SendImageItem",
+        "SendMessageItem",
+        "SendMessageMsg",
+        "SendMessageRequest",
+        "SendTextItem",
+        "SendTypingRequest",
+        "SendVideoItem",
+        "TextItem",
+        "VoiceItem",
+        "build_base_info",
+        "build_client_version",
+        "chat_id",
+        "is_group",
+        "items"
+      ]
+    },
+    {
+      "file": "src/cli/cmd_chat.rs",
+      "total_lines": 181,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/cli/cmd_completion.rs",
+      "total_lines": 14,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "run"
+      ]
+    },
+    {
+      "file": "src/cli/cmd_config.rs",
+      "total_lines": 160,
+      "pub_symbols": 1,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ConfigAction"
+      ]
+    },
+    {
+      "file": "src/cli/cmd_doctor.rs",
+      "total_lines": 157,
+      "pub_symbols": 0,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/cli/cmd_exec.rs",
+      "total_lines": 139,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/cli/cmd_migrate.rs",
+      "total_lines": 75,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "run"
+      ]
+    },
+    {
+      "file": "src/cli/cmd_reload.rs",
+      "total_lines": 14,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/cli/cmd_restart.rs",
+      "total_lines": 11,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/cli/cmd_status.rs",
+      "total_lines": 228,
+      "pub_symbols": 0,
+      "private_fns": 5,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/cli/cmd_stop.rs",
+      "total_lines": 11,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/cli/cmd_tools.rs",
+      "total_lines": 152,
+      "pub_symbols": 1,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ToolsCommand"
+      ]
+    },
+    {
+      "file": "src/cli/cmd_tui.rs",
+      "total_lines": 19,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/cli/cmd_update.rs",
+      "total_lines": 440,
+      "pub_symbols": 1,
+      "private_fns": 8,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "run_update"
+      ]
+    },
+    {
+      "file": "src/cli/mod.rs",
+      "total_lines": 222,
+      "pub_symbols": 5,
+      "private_fns": 1,
+      "struct_pub_fields": 3,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "Cli",
+        "Commands",
+        "init_tracing",
+        "load_config",
+        "load_config_opt"
+      ]
+    },
+    {
+      "file": "src/cli/signal.rs",
+      "total_lines": 3,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/commands/config.rs",
+      "total_lines": 167,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "cmd_config"
+      ]
+    },
+    {
+      "file": "src/commands/friends.rs",
+      "total_lines": 286,
+      "pub_symbols": 4,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "cmd_friend_block",
+        "cmd_friend_remove",
+        "cmd_friend_unblock",
+        "cmd_friends"
+      ]
+    },
+    {
+      "file": "src/commands/info.rs",
+      "total_lines": 603,
+      "pub_symbols": 7,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "cmd_groups",
+        "cmd_help",
+        "cmd_ping",
+        "cmd_skill",
+        "cmd_tools",
+        "cmd_users",
+        "cmd_whoami"
+      ]
+    },
+    {
+      "file": "src/commands/link.rs",
+      "total_lines": 261,
+      "pub_symbols": 0,
+      "private_fns": 9,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/commands/mod.rs",
+      "total_lines": 313,
+      "pub_symbols": 4,
+      "private_fns": 0,
+      "struct_pub_fields": 11,
+      "pub_use_reexports": 8,
+      "pub_symbol_names": [
+        "CommandContext",
+        "command_catalog",
+        "is_known_command",
+        "parse_command"
+      ]
+    },
+    {
+      "file": "src/commands/model.rs",
+      "total_lines": 153,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "cmd_models"
+      ]
+    },
+    {
+      "file": "src/commands/register.rs",
+      "total_lines": 151,
+      "pub_symbols": 3,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "cmd_email",
+        "cmd_register",
+        "cmd_username"
+      ]
+    },
+    {
+      "file": "src/commands/reload.rs",
+      "total_lines": 52,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/commands/session.rs",
+      "total_lines": 333,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "cmd_rename",
+        "cmd_sessions"
+      ]
+    },
+    {
+      "file": "src/config/agent.rs",
+      "total_lines": 159,
+      "pub_symbols": 5,
+      "private_fns": 10,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "AgentConfig",
+        "ContextConfig",
+        "PermissionMode",
+        "PromptConfig",
+        "ToolExecutorConfig"
+      ]
+    },
+    {
+      "file": "src/config/channel.rs",
+      "total_lines": 443,
+      "pub_symbols": 11,
+      "private_fns": 16,
+      "struct_pub_fields": 50,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ChannelConfigs",
+        "ClientConfig",
+        "GroupConfig",
+        "QQBotAccountConfig",
+        "QQBotChannelConfig",
+        "StreamingMode",
+        "TelegramAccountConfig",
+        "TelegramChannelConfig",
+        "WechatAccountConfig",
+        "WechatChannelConfig",
+        "enabled_channels"
+      ]
+    },
+    {
+      "file": "src/config/filters.rs",
+      "total_lines": 106,
+      "pub_symbols": 9,
+      "private_fns": 4,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AllKeyword",
+        "DenyList",
+        "McpFilter",
+        "NameFilter",
+        "SkillFilter",
+        "ToolFilter",
+        "all",
+        "allows",
+        "is_all"
+      ]
+    },
+    {
+      "file": "src/config/mcp.rs",
+      "total_lines": 83,
+      "pub_symbols": 2,
+      "private_fns": 2,
+      "struct_pub_fields": 8,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "McpServerConfig",
+        "McpTransport"
+      ]
+    },
+    {
+      "file": "src/config/memory.rs",
+      "total_lines": 38,
+      "pub_symbols": 1,
+      "private_fns": 4,
+      "struct_pub_fields": 3,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MemoryConfig"
+      ]
+    },
+    {
+      "file": "src/config/mod.rs",
+      "total_lines": 1195,
+      "pub_symbols": 44,
+      "private_fns": 35,
+      "struct_pub_fields": 36,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AppConfig",
+        "ConfigLoader",
+        "DelegationConfig",
+        "LoggingConfig",
+        "MessagingConfig",
+        "SafetyConfig",
+        "ShellConfig",
+        "SkillsConfig",
+        "SmtpConfig",
+        "SystemConfig",
+        "agents_root",
+        "agents_skills_dir",
+        "agents_skills_dir_opt",
+        "backups_root",
+        "completion_queue_dir",
+        "default_base_dir",
+        "from_file",
+        "from_toml",
+        "inbound_spool_dir",
+        "init_safety_config",
+        "is_path_protected",
+        "is_protected",
+        "jobs_root",
+        "known_users_path",
+        "last_channel_path",
+        "last_recipient_path",
+        "memory_audit_dir",
+        "memory_distill_state_dir",
+        "memory_root",
+        "sessions_root",
+        "skills_root",
+        "state_root",
+        "telegram_offset_path",
+        "user_resolver_path",
+        "users_root",
+        "worktrees_root"
+      ]
+    },
+    {
+      "file": "src/config/provider.rs",
+      "total_lines": 304,
+      "pub_symbols": 9,
+      "private_fns": 5,
+      "struct_pub_fields": 31,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "AuthStyle",
+        "CapabilitySection",
+        "ChatSection",
+        "EmbeddingSection",
+        "Protocol",
+        "ProviderConfig",
+        "effective_api_key",
+        "effective_api_keys",
+        "effective_auth_style"
+      ]
+    },
+    {
+      "file": "src/config/routing.rs",
+      "total_lines": 123,
+      "pub_symbols": 8,
+      "private_fns": 1,
+      "struct_pub_fields": 3,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "RouteEntry",
+        "RoutingConfig",
+        "RoutingStrategy",
+        "get",
+        "insert",
+        "is_empty",
+        "iter",
+        "len"
+      ]
+    },
+    {
+      "file": "src/config/scheduler.rs",
+      "total_lines": 99,
+      "pub_symbols": 5,
+      "private_fns": 5,
+      "struct_pub_fields": 11,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ContextPolicy",
+        "CronConfig",
+        "CronJob",
+        "SchedulerConfig",
+        "WebhookConfig"
+      ]
+    },
+    {
+      "file": "src/config/sub_agent.rs",
+      "total_lines": 220,
+      "pub_symbols": 6,
+      "private_fns": 6,
+      "struct_pub_fields": 10,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentIsolation",
+        "SubAgentConfig",
+        "allows_mcp",
+        "allows_skill",
+        "allows_tool",
+        "description"
+      ]
+    },
+    {
+      "file": "src/daemon/builder.rs",
+      "total_lines": 700,
+      "pub_symbols": 9,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "build_channel_accounts",
+        "build_prompt_config",
+        "build_registry",
+        "build_session_backend",
+        "build_skill_manager",
+        "build_sub_agents",
+        "find_legacy_session_dirs",
+        "missing_agent_tool_references",
+        "warn_missing_agent_tool_references"
+      ]
+    },
+    {
+      "file": "src/daemon/lifecycle.rs",
+      "total_lines": 41,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "reset_telegram_offset"
+      ]
+    },
+    {
+      "file": "src/daemon/mod.rs",
+      "total_lines": 1299,
+      "pub_symbols": 5,
+      "private_fns": 8,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 2,
+      "pub_symbol_names": [
+        "CLIENT_SOCKET_FD",
+        "LISTEN_SOCKET_FD",
+        "init_tracing",
+        "load_config",
+        "load_config_from"
+      ]
+    },
+    {
+      "file": "src/hot_switch.rs",
+      "total_lines": 363,
+      "pub_symbols": 14,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ENV_CLIENT_SOCKET_FD",
+        "ENV_HOT_SWITCH",
+        "ENV_OLD_PID",
+        "ENV_SOCKET_FD",
+        "RECOVERY_WAIT_OLD_TIMEOUT",
+        "do_hot_switch",
+        "inherited_client_socket_fd",
+        "inherited_socket_fd",
+        "is_hot_switch",
+        "is_new_process_ready",
+        "mark_new_process_ready",
+        "old_pid",
+        "pid_alive"
+      ]
+    },
+    {
+      "file": "src/identity/known_users/mod.rs",
+      "total_lines": 36,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 3,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/identity/known_users/registry.rs",
+      "total_lines": 873,
+      "pub_symbols": 33,
+      "private_fns": 5,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "KnownUsersRegistry",
+        "accept_friend",
+        "all_users",
+        "block_friend",
+        "check_and_record",
+        "count",
+        "decline_friend",
+        "delivery_verdict",
+        "drain_user_mail",
+        "flush",
+        "in_memory",
+        "last_seen_ms_of",
+        "list_contacts",
+        "migrate_identity",
+        "migrate_legacy",
+        "new",
+        "nick_of",
+        "pending_requests",
+        "push_user_mail",
+        "record",
+        "rekey_legacy_to",
+        "remove_friend",
+        "render_pending_requests_reminder",
+        "render_presence",
+        "render_user_mail_reminder",
+        "request_friend",
+        "resolve_uid",
+        "resolver",
+        "rk_keys",
+        "total_messages",
+        "unblock_friend",
+        "users_for",
+        "with_resolver"
+      ]
+    },
+    {
+      "file": "src/identity/known_users/routing.rs",
+      "total_lines": 26,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "rk_for",
+        "routing_key"
+      ]
+    },
+    {
+      "file": "src/identity/known_users/tests.rs",
+      "total_lines": 476,
+      "pub_symbols": 0,
+      "private_fns": 24,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/identity/known_users/types.rs",
+      "total_lines": 130,
+      "pub_symbols": 10,
+      "private_fns": 0,
+      "struct_pub_fields": 25,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ContactDirection",
+        "ContactEntry",
+        "ContactStatus",
+        "DeliveryVerdict",
+        "KnownUser",
+        "LegacyUserEntry",
+        "PersistedFile",
+        "RequestOutcome",
+        "UserMail",
+        "now_ms"
+      ]
+    },
+    {
+      "file": "src/identity/mod.rs",
+      "total_lines": 14,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 3,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/identity/user_profile.rs",
+      "total_lines": 368,
+      "pub_symbols": 13,
+      "private_fns": 10,
+      "struct_pub_fields": 4,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "UserProfile",
+        "UserResolver",
+        "all_routing_keys",
+        "is_empty",
+        "load",
+        "new",
+        "path",
+        "persistent",
+        "resolve",
+        "routing_keys_for",
+        "save",
+        "set",
+        "to_prompt_section"
+      ]
+    },
+    {
+      "file": "src/identity/user_registry.rs",
+      "total_lines": 932,
+      "pub_symbols": 36,
+      "private_fns": 19,
+      "struct_pub_fields": 5,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "DEFAULT_NAMESPACE",
+        "LEGACY_USERS_FILE",
+        "RESERVED_USERNAMES",
+        "ROOT_USERNAME",
+        "RegisterError",
+        "USERNAME_MAX",
+        "USERNAME_MIN",
+        "USER_META_FILE",
+        "User",
+        "UserRegistry",
+        "all_users",
+        "count",
+        "display",
+        "ensure_root",
+        "find_by_email",
+        "find_by_uid",
+        "find_by_username",
+        "in_memory",
+        "is_user_id",
+        "migrate_legacy_to_root",
+        "namespace",
+        "normalize_email",
+        "parse_target",
+        "persistent",
+        "register",
+        "set_email",
+        "set_username",
+        "uid_of",
+        "user_id",
+        "user_id_of",
+        "username_of",
+        "username_taken",
+        "validate_email",
+        "validate_username",
+        "with_namespace"
+      ]
+    },
+    {
+      "file": "src/ids/mod.rs",
+      "total_lines": 209,
+      "pub_symbols": 19,
+      "private_fns": 8,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "DEFAULT_NAMESPACE",
+        "Fqid",
+        "KNOWN_TYPES",
+        "TYPE_JOB",
+        "TYPE_MEMORY",
+        "TYPE_MSG",
+        "TYPE_SESSION",
+        "TYPE_TASK",
+        "TYPE_USER",
+        "as_str",
+        "bare_dir_name",
+        "dir_name",
+        "id_from_dir",
+        "is_known_type",
+        "new",
+        "parse",
+        "type_seg",
+        "uuid",
+        "uuid_str"
+      ]
+    },
+    {
+      "file": "src/lib.rs",
+      "total_lines": 62,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 7,
+      "pub_symbol_names": [
+        "SHUTDOWN_FLAG",
+        "TERMINATING_FLAG",
+        "is_shutting_down"
+      ]
+    },
+    {
+      "file": "src/main.rs",
+      "total_lines": 150,
+      "pub_symbols": 0,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/mcp/client.rs",
+      "total_lines": 479,
+      "pub_symbols": 6,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "McpRegistry",
+        "McpServer",
+        "is_empty",
+        "server_count",
+        "tool_count",
+        "tool_names"
+      ]
+    },
+    {
+      "file": "src/mcp/config_types.rs",
+      "total_lines": 43,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 8,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "McpServerConfig",
+        "McpTransport"
+      ]
+    },
+    {
+      "file": "src/mcp/deferred.rs",
+      "total_lines": 561,
+      "pub_symbols": 20,
+      "private_fns": 23,
+      "struct_pub_fields": 4,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ActivatedToolSet",
+        "DeferredMcpToolSet",
+        "DeferredMcpToolStub",
+        "activate",
+        "build_deferred_tools_section",
+        "get",
+        "get_by_name",
+        "get_resolved",
+        "is_activated",
+        "is_empty",
+        "len",
+        "new",
+        "search",
+        "stub_names",
+        "tool_names",
+        "tool_spec",
+        "tool_specs"
+      ]
+    },
+    {
+      "file": "src/mcp/mod.rs",
+      "total_lines": 18,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 7,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/mcp/protocol.rs",
+      "total_lines": 230,
+      "pub_symbols": 14,
+      "private_fns": 15,
+      "struct_pub_fields": 15,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "INTERNAL_ERROR",
+        "INVALID_PARAMS",
+        "INVALID_REQUEST",
+        "JSONRPC_VERSION",
+        "JsonRpcError",
+        "JsonRpcRequest",
+        "JsonRpcResponse",
+        "MCP_PROTOCOL_VERSION",
+        "METHOD_NOT_FOUND",
+        "McpToolDef",
+        "McpToolsListResult",
+        "PARSE_ERROR",
+        "new",
+        "notification"
+      ]
+    },
+    {
+      "file": "src/mcp/tool.rs",
+      "total_lines": 262,
+      "pub_symbols": 2,
+      "private_fns": 5,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "McpToolWrapper",
+        "new"
+      ]
+    },
+    {
+      "file": "src/mcp/tool_trait.rs",
+      "total_lines": 7,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/mcp/transport/http.rs",
+      "total_lines": 135,
+      "pub_symbols": 4,
+      "private_fns": 0,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "HttpTransport",
+        "apply_session_header",
+        "new",
+        "update_session_id_from_headers"
+      ]
+    },
+    {
+      "file": "src/mcp/transport/mod.rs",
+      "total_lines": 546,
+      "pub_symbols": 10,
+      "private_fns": 38,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 3,
+      "pub_symbol_names": [
+        "MAX_LINE_BYTES",
+        "MCP_JSON_CONTENT_TYPE",
+        "MCP_SESSION_ID_HEADER",
+        "MCP_STREAMABLE_ACCEPT",
+        "McpTransportConn",
+        "RECV_TIMEOUT_SECS",
+        "create_transport",
+        "extract_json_from_sse_text",
+        "looks_like_sse_text",
+        "parse_jsonrpc_response_text"
+      ]
+    },
+    {
+      "file": "src/mcp/transport/sse.rs",
+      "total_lines": 532,
+      "pub_symbols": 4,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SseTransport",
+        "derive_message_url",
+        "new",
+        "parse_endpoint_from_data"
+      ]
+    },
+    {
+      "file": "src/mcp/transport/stdio.rs",
+      "total_lines": 115,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "StdioTransport",
+        "new"
+      ]
+    },
+    {
+      "file": "src/memory/mod.rs",
+      "total_lines": 775,
+      "pub_symbols": 14,
+      "private_fns": 21,
+      "struct_pub_fields": 20,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "IndexEntry",
+        "LinkRef",
+        "MAX_INDEX_BYTES",
+        "MAX_INDEX_LINES",
+        "MEMORY_DIR_NAME",
+        "MemoryFile",
+        "build_backlinks",
+        "ensure_memory_dir",
+        "extract_links_from_content",
+        "format_full_memory_index",
+        "format_wiki_index",
+        "scan_memory_files",
+        "should_inject",
+        "truncate_index"
+      ]
+    },
+    {
+      "file": "src/migration/jobs.rs",
+      "total_lines": 129,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "job_id_by_name",
+        "migrate_jobs",
+        "restore_job_map_from_bak"
+      ]
+    },
+    {
+      "file": "src/migration/mod.rs",
+      "total_lines": 58,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 2,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/migration/plan.rs",
+      "total_lines": 65,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "build_plan",
+        "default_base_dir",
+        "run_auto"
+      ]
+    },
+    {
+      "file": "src/migration/sessions.rs",
+      "total_lines": 312,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "migrate_session_meta_task_ids",
+        "migrate_sessions",
+        "migrate_tasks"
+      ]
+    },
+    {
+      "file": "src/migration/tests.rs",
+      "total_lines": 660,
+      "pub_symbols": 0,
+      "private_fns": 25,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/migration/types.rs",
+      "total_lines": 173,
+      "pub_symbols": 7,
+      "private_fns": 0,
+      "struct_pub_fields": 8,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "Backup",
+        "MigrationPlan",
+        "MigrationReport",
+        "Step",
+        "apply",
+        "is_empty",
+        "label"
+      ]
+    },
+    {
+      "file": "src/migration/users.rs",
+      "total_lines": 271,
+      "pub_symbols": 8,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "archive_legacy_user_dirs",
+        "is_8hex",
+        "is_double_prefixed",
+        "is_fqid_any_ns",
+        "migrate_resolver",
+        "migrate_users",
+        "normalize_user_id",
+        "rewrite_fqid_ns"
+      ]
+    },
+    {
+      "file": "src/providers/capability.rs",
+      "total_lines": 7,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/providers/capability_chat.rs",
+      "total_lines": 480,
+      "pub_symbols": 23,
+      "private_fns": 3,
+      "struct_pub_fields": 44,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "BoxStream",
+        "ChatMessage",
+        "ChatMessageUsage",
+        "ChatProvider",
+        "ChatRequest",
+        "ChatResponse",
+        "ChatUsage",
+        "ContentPart",
+        "StopReason",
+        "StreamEvent",
+        "ThinkingConfig",
+        "ToolCall",
+        "ToolSpec",
+        "assistant_text",
+        "classify",
+        "is_context_overflow_reason",
+        "is_retryable_error",
+        "sha256_hex",
+        "system_text",
+        "text",
+        "text_content",
+        "to_openai",
+        "user_text"
+      ]
+    },
+    {
+      "file": "src/providers/capability_media.rs",
+      "total_lines": 213,
+      "pub_symbols": 33,
+      "private_fns": 5,
+      "struct_pub_fields": 57,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AspectRatio",
+        "AudioData",
+        "AudioResponse",
+        "EmbedInput",
+        "EmbedRequest",
+        "EmbedResponse",
+        "EmbeddingProvider",
+        "EmbeddingUsage",
+        "ImageFormat",
+        "ImageGenerationProvider",
+        "ImageGenerationUsage",
+        "ImageOutput",
+        "ImageQuality",
+        "ImageRequest",
+        "ImageResponse",
+        "ImageSize",
+        "SttAudioInput",
+        "SttProvider",
+        "SttRequest",
+        "SttSegment",
+        "SttUsage",
+        "TranscriptionResponse",
+        "TtsFormat",
+        "TtsProvider",
+        "TtsRequest",
+        "TtsUsage",
+        "TtsVoice",
+        "VideoGenerationProvider",
+        "VideoOutput",
+        "VideoRequest",
+        "VideoResolution",
+        "VideoResponse",
+        "VideoUsage"
+      ]
+    },
+    {
+      "file": "src/providers/capability_tool.rs",
+      "total_lines": 6,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/providers/credential_pool.rs",
+      "total_lines": 343,
+      "pub_symbols": 21,
+      "private_fns": 9,
+      "struct_pub_fields": 5,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "CredentialEntry",
+        "CredentialPool",
+        "CredentialStatus",
+        "SharedApiKey",
+        "SharedCredentialPool",
+        "get",
+        "is_empty",
+        "len",
+        "mark_exhausted",
+        "new",
+        "next_credential",
+        "refresh",
+        "set",
+        "snapshot"
+      ]
+    },
+    {
+      "file": "src/providers/edge_tts.rs",
+      "total_lines": 100,
+      "pub_symbols": 3,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "EdgeTtsProvider",
+        "new",
+        "with_binary"
+      ]
+    },
+    {
+      "file": "src/providers/error_class.rs",
+      "total_lines": 1074,
+      "pub_symbols": 19,
+      "private_fns": 54,
+      "struct_pub_fields": 17,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ClassifiedError",
+        "ErrorCategory",
+        "FailoverReason",
+        "LONG_COOLDOWN_THRESHOLD",
+        "ProviderHttpError",
+        "RecoveryHints",
+        "TOOL_CALL_PARSE_LOSS_TAG",
+        "classify",
+        "cooldown_duration",
+        "format_cooldown_zh",
+        "from_http",
+        "from_message",
+        "is_auth",
+        "is_long_cooldown",
+        "new",
+        "recovery_hints",
+        "should_report",
+        "should_same_model_retry",
+        "with_provider"
+      ]
+    },
+    {
+      "file": "src/providers/fallback.rs",
+      "total_lines": 689,
+      "pub_symbols": 5,
+      "private_fns": 10,
+      "struct_pub_fields": 5,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "CHAIN_ALL_COOLING_TAG",
+        "CHAIN_EXHAUSTED_TAG",
+        "FallbackChatProvider",
+        "FallbackEntry",
+        "new"
+      ]
+    },
+    {
+      "file": "src/providers/glm.rs",
+      "total_lines": 265,
+      "pub_symbols": 5,
+      "private_fns": 5,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "GlmProvider",
+        "glm_body_override",
+        "new",
+        "with_base_url",
+        "with_user_agent"
+      ]
+    },
+    {
+      "file": "src/providers/glm_mcp.rs",
+      "total_lines": 323,
+      "pub_symbols": 3,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "GlmMcpSearchProvider",
+        "new",
+        "with_user_agent"
+      ]
+    },
+    {
+      "file": "src/providers/google.rs",
+      "total_lines": 284,
+      "pub_symbols": 3,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "GoogleProvider",
+        "new",
+        "with_base_url"
+      ]
+    },
+    {
+      "file": "src/providers/infra.rs",
+      "total_lines": 223,
+      "pub_symbols": 8,
+      "private_fns": 5,
+      "struct_pub_fields": 2,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "ERROR_BODY_TIMEOUT",
+        "InvalidUtf8",
+        "REQUEST_SEND_TIMEOUT",
+        "Utf8StreamDecoder",
+        "build_auth",
+        "build_reqwest_client",
+        "new",
+        "push"
+      ]
+    },
+    {
+      "file": "src/providers/media.rs",
+      "total_lines": 960,
+      "pub_symbols": 34,
+      "private_fns": 27,
+      "struct_pub_fields": 7,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "FileModality",
+        "MediaCaps",
+        "MediaInlineDecision",
+        "MediaInputPolicy",
+        "MediaLoweringProvider",
+        "MediaMarkerReason",
+        "MediaPolicy",
+        "MediaTransport",
+        "age_media_in_message",
+        "audio_marker",
+        "audio_marker_path",
+        "decision_for",
+        "file_marker_path",
+        "for_protocol_model",
+        "for_provider_model",
+        "for_provider_protocol_model",
+        "from_model_support",
+        "image_marker",
+        "image_marker_path",
+        "infer_audio_mime",
+        "infer_image_mime",
+        "infer_mime_from_name",
+        "infer_video_mime",
+        "init_data_dir",
+        "inline_base64",
+        "is_session_media_path",
+        "lower_media_for",
+        "marker",
+        "marker_for_file",
+        "modality_from_mime",
+        "new",
+        "resolve_path",
+        "resolve_path_with_dir",
+        "video_marker_path"
+      ]
+    },
+    {
+      "file": "src/providers/minimax.rs",
+      "total_lines": 152,
+      "pub_symbols": 4,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MiniMaxProvider",
+        "new",
+        "with_base_url",
+        "with_user_agent"
+      ]
+    },
+    {
+      "file": "src/providers/mod.rs",
+      "total_lines": 83,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 25,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/providers/openai.rs",
+      "total_lines": 277,
+      "pub_symbols": 4,
+      "private_fns": 9,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "OpenAiProvider",
+        "new",
+        "with_base_url",
+        "with_user_agent"
+      ]
+    },
+    {
+      "file": "src/providers/protocols/anthropic/message_rendering.rs",
+      "total_lines": 302,
+      "pub_symbols": 3,
+      "private_fns": 0,
+      "struct_pub_fields": 2,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "RenderedAnthropicMessages",
+        "build_anthropic_body",
+        "render_anthropic_messages"
+      ]
+    },
+    {
+      "file": "src/providers/protocols/anthropic/messages.rs",
+      "total_lines": 401,
+      "pub_symbols": 4,
+      "private_fns": 4,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AnthropicMessagesClient",
+        "chat_with_body",
+        "new",
+        "with_user_agent"
+      ]
+    },
+    {
+      "file": "src/providers/protocols/anthropic/mod.rs",
+      "total_lines": 2,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/providers/protocols/google/generate_content.rs",
+      "total_lines": 424,
+      "pub_symbols": 3,
+      "private_fns": 10,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "GoogleGenerateContentClient",
+        "new",
+        "with_user_agent"
+      ]
+    },
+    {
+      "file": "src/providers/protocols/google/message_rendering.rs",
+      "total_lines": 453,
+      "pub_symbols": 1,
+      "private_fns": 7,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "build_google_body"
+      ]
+    },
+    {
+      "file": "src/providers/protocols/google/mod.rs",
+      "total_lines": 2,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/providers/protocols/mod.rs",
+      "total_lines": 9,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/providers/protocols/openai/chat_completions.rs",
+      "total_lines": 787,
+      "pub_symbols": 5,
+      "private_fns": 24,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "BodyOverrideFn",
+        "OpenAiChatCompletionsClient",
+        "new",
+        "with_body_override",
+        "with_user_agent"
+      ]
+    },
+    {
+      "file": "src/providers/protocols/openai/chat_message_rendering.rs",
+      "total_lines": 376,
+      "pub_symbols": 1,
+      "private_fns": 5,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "render_openai_chat_body"
+      ]
+    },
+    {
+      "file": "src/providers/protocols/openai/mod.rs",
+      "total_lines": 4,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/providers/protocols/openai/responses.rs",
+      "total_lines": 537,
+      "pub_symbols": 6,
+      "private_fns": 6,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "BodyOverrideFn",
+        "OpenAiResponsesClient",
+        "new",
+        "with_body_override",
+        "with_hosted_tools",
+        "with_user_agent"
+      ]
+    },
+    {
+      "file": "src/providers/protocols/openai/responses_rendering.rs",
+      "total_lines": 243,
+      "pub_symbols": 1,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "render_responses_body"
+      ]
+    },
+    {
+      "file": "src/providers/provider_factory.rs",
+      "total_lines": 383,
+      "pub_symbols": 16,
+      "private_fns": 2,
+      "struct_pub_fields": 44,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "BuildChatProviderRequest",
+        "BuildEmbeddingProviderRequest",
+        "BuildImageProviderRequest",
+        "BuildSearchProviderRequest",
+        "BuildSttProviderRequest",
+        "BuildTtsProviderRequest",
+        "BuildVideoProviderRequest",
+        "ProviderFactory",
+        "build_chat_provider",
+        "build_embedding_provider",
+        "build_image_provider",
+        "build_search_provider",
+        "build_stt_provider",
+        "build_tts_provider",
+        "build_video_provider",
+        "new"
+      ]
+    },
+    {
+      "file": "src/providers/provider_id.rs",
+      "total_lines": 114,
+      "pub_symbols": 15,
+      "private_fns": 5,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ANTHROPIC",
+        "DEEPSEEK",
+        "EDGE_TTS",
+        "GENERIC",
+        "GLM",
+        "GOOGLE",
+        "KIMI",
+        "MINIMAX",
+        "OPENAI",
+        "ProviderId",
+        "QWEN",
+        "XIAOMI",
+        "as_str",
+        "detect_from_url",
+        "new"
+      ]
+    },
+    {
+      "file": "src/providers/provider_registry.rs",
+      "total_lines": 119,
+      "pub_symbols": 3,
+      "private_fns": 18,
+      "struct_pub_fields": 8,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ProviderRegistry",
+        "ProviderSummary",
+        "SearchFallbackEntry"
+      ]
+    },
+    {
+      "file": "src/providers/registry/mod.rs",
+      "total_lines": 707,
+      "pub_symbols": 20,
+      "private_fns": 21,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ModelConfig",
+        "ProviderConfig",
+        "Registry",
+        "attach_credential_pool",
+        "from_config",
+        "from_other",
+        "get_chat_routing",
+        "get_provider",
+        "maybe_wrap_chat_fallback",
+        "new",
+        "provider_names",
+        "register_chat",
+        "register_embedding",
+        "register_image",
+        "register_search",
+        "register_stt",
+        "register_tts",
+        "register_video",
+        "resolve_model",
+        "supports"
+      ]
+    },
+    {
+      "file": "src/providers/registry/routing.rs",
+      "total_lines": 57,
+      "pub_symbols": 4,
+      "private_fns": 0,
+      "struct_pub_fields": 10,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "RouteEntry",
+        "RoutingConfig",
+        "RoutingStrategy",
+        "get"
+      ]
+    },
+    {
+      "file": "src/providers/search.rs",
+      "total_lines": 30,
+      "pub_symbols": 4,
+      "private_fns": 1,
+      "struct_pub_fields": 10,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SearchProvider",
+        "SearchRequest",
+        "SearchResult",
+        "SearchResults"
+      ]
+    },
+    {
+      "file": "src/providers/tokens.rs",
+      "total_lines": 352,
+      "pub_symbols": 18,
+      "private_fns": 7,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "TokenTracker",
+        "adjust_for_compaction",
+        "estimate_file_part_tokens",
+        "estimate_history_tokens",
+        "estimate_history_tokens_with_media",
+        "estimate_message_tokens",
+        "estimate_message_tokens_with_media",
+        "estimate_tokens",
+        "is_fresh",
+        "is_write_tool",
+        "last_cached",
+        "last_input",
+        "last_output",
+        "new",
+        "record_pending",
+        "seed_from_history",
+        "total_tokens",
+        "update_from_usage"
+      ]
+    },
+    {
+      "file": "src/providers/vendor_overrides.rs",
+      "total_lines": 197,
+      "pub_symbols": 10,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AnthropicProvider",
+        "KimiProvider",
+        "deepseek_body_override",
+        "new",
+        "qwen_body_override",
+        "with_base_url",
+        "with_user_agent"
+      ]
+    },
+    {
+      "file": "src/providers/xiaomi.rs",
+      "total_lines": 189,
+      "pub_symbols": 5,
+      "private_fns": 4,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "XiaomiProvider",
+        "new",
+        "with_base_url",
+        "with_openai",
+        "with_user_agent"
+      ]
+    },
+    {
+      "file": "src/scheduling_runtime/cron_loader.rs",
+      "total_lines": 170,
+      "pub_symbols": 2,
+      "private_fns": 6,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "load_cron_jobs",
+        "parse_cron_file"
+      ]
+    },
+    {
+      "file": "src/scheduling_runtime/cronjob_tool_tests.rs",
+      "total_lines": 371,
+      "pub_symbols": 0,
+      "private_fns": 22,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/scheduling_runtime/mod.rs",
+      "total_lines": 9,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/scheduling_runtime/scheduler/core.rs",
+      "total_lines": 1005,
+      "pub_symbols": 21,
+      "private_fns": 11,
+      "struct_pub_fields": 5,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "DistillConfig",
+        "JobsFile",
+        "OrchestratorHook",
+        "Scheduler",
+        "SharedScheduler",
+        "add_job",
+        "append_run_log_inner",
+        "drain_auto_delete",
+        "job_count",
+        "jobs",
+        "mark_run_result",
+        "maybe_reload",
+        "migrate_from_markdown",
+        "new",
+        "read_run_log",
+        "record_webhook_run",
+        "remove_job",
+        "set_enabled",
+        "should_run",
+        "update_job",
+        "webhook_jobs"
+      ]
+    },
+    {
+      "file": "src/scheduling_runtime/scheduler/jobs_file.rs",
+      "total_lines": 188,
+      "pub_symbols": 5,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "delete_job_dir",
+        "fold_schedule_kind",
+        "fold_target_delivery",
+        "load_jobs_from_dirs",
+        "normalize_schedule_specs"
+      ]
+    },
+    {
+      "file": "src/scheduling_runtime/scheduler/mod.rs",
+      "total_lines": 66,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 3,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/scheduling_runtime/scheduler/tests.rs",
+      "total_lines": 696,
+      "pub_symbols": 2,
+      "private_fns": 32,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "test_entry",
+        "test_scheduler"
+      ]
+    },
+    {
+      "file": "src/scheduling_runtime/scheduler/timing.rs",
+      "total_lines": 82,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "compute_next_run",
+        "parse_interval"
+      ]
+    },
+    {
+      "file": "src/scheduling_runtime/webhook/dispatch.rs",
+      "total_lines": 243,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/scheduling_runtime/webhook/mod.rs",
+      "total_lines": 70,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 3,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/scheduling_runtime/webhook/server.rs",
+      "total_lines": 475,
+      "pub_symbols": 3,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ok_response",
+        "pretty_payload",
+        "verify_hmac_signature"
+      ]
+    },
+    {
+      "file": "src/scheduling_runtime/webhook/tests.rs",
+      "total_lines": 532,
+      "pub_symbols": 0,
+      "private_fns": 32,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/scheduling_runtime/webhook/types.rs",
+      "total_lines": 270,
+      "pub_symbols": 15,
+      "private_fns": 2,
+      "struct_pub_fields": 12,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "InflightGuard",
+        "WEBHOOK_BODY_LIMIT",
+        "WEBHOOK_BODY_TIMEOUT_SECS",
+        "WEBHOOK_V2_MAX_SKEW_SECS",
+        "WebhookAuth",
+        "WebhookContext",
+        "WebhookGuard",
+        "WebhookJobDef",
+        "acquire",
+        "auth_kind",
+        "check_delivery",
+        "check_rate",
+        "extract_event_type",
+        "filter_matches",
+        "render_template"
+      ]
+    },
+    {
+      "file": "src/scheduling_runtime/work_unit.rs",
+      "total_lines": 268,
+      "pub_symbols": 4,
+      "private_fns": 5,
+      "struct_pub_fields": 3,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "WorkUnit",
+        "extract_work_units",
+        "find_compaction_boundary",
+        "find_compaction_boundary_for_budget"
+      ]
+    },
+    {
+      "file": "src/scheduling_types/cron_types.rs",
+      "total_lines": 291,
+      "pub_symbols": 20,
+      "private_fns": 6,
+      "struct_pub_fields": 20,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "DeliveryConfig",
+        "DeliveryMode",
+        "FailureAlertConfig",
+        "RetryConfig",
+        "RetryableError",
+        "RunRecord",
+        "RunStatus",
+        "ScheduleKind",
+        "ScheduleSpec",
+        "as_str",
+        "at_time",
+        "cron",
+        "describe",
+        "is_at",
+        "kind",
+        "now",
+        "with_duration",
+        "with_error",
+        "with_output_preview",
+        "with_trigger"
+      ]
+    },
+    {
+      "file": "src/scheduling_types/event.rs",
+      "total_lines": 39,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 10,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "CronTrigger",
+        "SchedulerEvent"
+      ]
+    },
+    {
+      "file": "src/scheduling_types/job_types.rs",
+      "total_lines": 551,
+      "pub_symbols": 20,
+      "private_fns": 13,
+      "struct_pub_fields": 59,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "JobEntry",
+        "JobRemovalAudit",
+        "JobUpdate",
+        "SchedulerApi",
+        "WebhookDef",
+        "WebhookFilter",
+        "capture",
+        "cron_delivery_fields",
+        "is_active_hours",
+        "is_route_slug",
+        "log",
+        "normalize_weekday_unix",
+        "parse_hhmm",
+        "parse_target_string",
+        "resolve_tz",
+        "scan_prompt_injection",
+        "validate_active_hours",
+        "validate_at_timestamp",
+        "validate_schedule",
+        "validate_tz"
+      ]
+    },
+    {
+      "file": "src/scheduling_types/mod.rs",
+      "total_lines": 11,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 2,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/signal.rs",
+      "total_lines": 73,
+      "pub_symbols": 6,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "find_daemon_pid",
+        "pid_file_path",
+        "send_sighup",
+        "send_signal",
+        "send_sigterm",
+        "send_sigusr1"
+      ]
+    },
+    {
+      "file": "src/storage/json_file/backend.rs",
+      "total_lines": 524,
+      "pub_symbols": 23,
+      "private_fns": 5,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "JsonFileBackend",
+        "archive_dir",
+        "collect_blob_hashes",
+        "delegation_checkpoint_path",
+        "extend_archived_live_sets",
+        "externalize",
+        "generate_session_id",
+        "history_path",
+        "meta_to_info",
+        "migrate_global_message_ids",
+        "open",
+        "open_with_namespace",
+        "read_active",
+        "read_history_with_ids",
+        "read_meta",
+        "read_meta_at",
+        "rotate_history_impl",
+        "session_dir",
+        "suspension_path",
+        "sweep_blobs",
+        "write_active",
+        "write_json_atomic",
+        "write_meta"
+      ]
+    },
+    {
+      "file": "src/storage/json_file/mod.rs",
+      "total_lines": 49,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/storage/json_file/records.rs",
+      "total_lines": 89,
+      "pub_symbols": 4,
+      "private_fns": 0,
+      "struct_pub_fields": 26,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ActiveMap",
+        "CompactionEntry",
+        "SegmentRecord",
+        "SessionMeta"
+      ]
+    },
+    {
+      "file": "src/storage/json_file/session_backend.rs",
+      "total_lines": 682,
+      "pub_symbols": 0,
+      "private_fns": 42,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/storage/json_file/tests.rs",
+      "total_lines": 176,
+      "pub_symbols": 0,
+      "private_fns": 6,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/storage/memory.rs",
+      "total_lines": 212,
+      "pub_symbols": 5,
+      "private_fns": 6,
+      "struct_pub_fields": 18,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ExportFilter",
+        "Memory",
+        "MemoryCategory",
+        "MemoryEntry",
+        "ProceduralMessage"
+      ]
+    },
+    {
+      "file": "src/storage/mod.rs",
+      "total_lines": 26,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 6,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/storage/private.rs",
+      "total_lines": 141,
+      "pub_symbols": 3,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "PrivateMemory",
+        "new",
+        "session_id"
+      ]
+    },
+    {
+      "file": "src/storage/session.rs",
+      "total_lines": 501,
+      "pub_symbols": 7,
+      "private_fns": 46,
+      "struct_pub_fields": 24,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": [
+        "DelegationCheckpoint",
+        "SavedSessionFile",
+        "SessionBackend",
+        "SessionInfo",
+        "SummaryRecord",
+        "session_file_name",
+        "write_session_file"
+      ]
+    },
+    {
+      "file": "src/storage/shared.rs",
+      "total_lines": 106,
+      "pub_symbols": 3,
+      "private_fns": 2,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SharedMemory",
+        "name",
+        "new"
+      ]
+    },
+    {
+      "file": "src/storage/types.rs",
+      "total_lines": 110,
+      "pub_symbols": 5,
+      "private_fns": 3,
+      "struct_pub_fields": 10,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MemoryConfig",
+        "MemoryPolicyConfig",
+        "Provider",
+        "SearchMode",
+        "build_proxy_client"
+      ]
+    },
+    {
+      "file": "src/str_utils.rs",
+      "total_lines": 489,
+      "pub_symbols": 14,
+      "private_fns": 19,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "UNKNOWN_ID_LISTING_CAP",
+        "UNKNOWN_ID_PREVIEW_CHARS",
+        "char_offset",
+        "extract_yaml_block",
+        "extract_yaml_bool",
+        "extract_yaml_list",
+        "extract_yaml_string",
+        "format_ts",
+        "has_spoofing_chars",
+        "neutralize_spoofing",
+        "parse_front_matter",
+        "strip_yaml_block",
+        "truncate_chars",
+        "truncate_line"
+      ]
+    },
+    {
+      "file": "src/sys_info.rs",
+      "total_lines": 47,
+      "pub_symbols": 3,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "os_version",
+        "runtime_info",
+        "shell"
+      ]
+    },
+    {
+      "file": "src/tools/agent_kill.rs",
+      "total_lines": 165,
+      "pub_symbols": 2,
+      "private_fns": 9,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentKillTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/agent_list.rs",
+      "total_lines": 74,
+      "pub_symbols": 2,
+      "private_fns": 4,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentListTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/agent_resume.rs",
+      "total_lines": 173,
+      "pub_symbols": 2,
+      "private_fns": 9,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentResumeTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/ask_user.rs",
+      "total_lines": 176,
+      "pub_symbols": 2,
+      "private_fns": 5,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AskUserTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/calculator.rs",
+      "total_lines": 372,
+      "pub_symbols": 2,
+      "private_fns": 20,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "CalculatorTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/cronjob_tool.rs",
+      "total_lines": 1228,
+      "pub_symbols": 13,
+      "private_fns": 12,
+      "struct_pub_fields": 1,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "CronJobTool",
+        "format_unknown_job_listing",
+        "handle_create",
+        "handle_list",
+        "handle_log",
+        "handle_remove",
+        "handle_run",
+        "handle_set_enabled",
+        "handle_update",
+        "new",
+        "parse_webhook_channel",
+        "resolve_delivery_for_create",
+        "resolve_delivery_for_update"
+      ]
+    },
+    {
+      "file": "src/tools/delegate.rs",
+      "total_lines": 293,
+      "pub_symbols": 2,
+      "private_fns": 10,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "AgentDelegateTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/file_ops.rs",
+      "total_lines": 939,
+      "pub_symbols": 6,
+      "private_fns": 25,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "FileEditTool",
+        "FileReadTool",
+        "FileWriteTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/friends.rs",
+      "total_lines": 550,
+      "pub_symbols": 12,
+      "private_fns": 19,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "FriendAcceptTool",
+        "FriendDeclineTool",
+        "FriendListTool",
+        "FriendRequestTool",
+        "FriendToolsCtx",
+        "new",
+        "set_channels",
+        "with_namespace"
+      ]
+    },
+    {
+      "file": "src/tools/hear_audio.rs",
+      "total_lines": 411,
+      "pub_symbols": 2,
+      "private_fns": 22,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "HearAudioTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/http.rs",
+      "total_lines": 285,
+      "pub_symbols": 2,
+      "private_fns": 13,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "HttpRequestTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/list_dir.rs",
+      "total_lines": 291,
+      "pub_symbols": 2,
+      "private_fns": 7,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ListDirTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/media_download.rs",
+      "total_lines": 172,
+      "pub_symbols": 1,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "is_url"
+      ]
+    },
+    {
+      "file": "src/tools/memory_tool/audit.rs",
+      "total_lines": 196,
+      "pub_symbols": 6,
+      "private_fns": 3,
+      "struct_pub_fields": 7,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MemoryAudit",
+        "append_memory_audit",
+        "archive_memory_version",
+        "scan_agent_pii_opt",
+        "scan_memory_content_opt",
+        "short_sha256"
+      ]
+    },
+    {
+      "file": "src/tools/memory_tool/format.rs",
+      "total_lines": 196,
+      "pub_symbols": 7,
+      "private_fns": 1,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "atomic_write",
+        "build_frontmatter",
+        "link_values",
+        "lint_memory_content",
+        "scan_merged",
+        "validate_body_only",
+        "validate_name"
+      ]
+    },
+    {
+      "file": "src/tools/memory_tool/mod.rs",
+      "total_lines": 16,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 2,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/tools/memory_tool/reader.rs",
+      "total_lines": 259,
+      "pub_symbols": 8,
+      "private_fns": 6,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MemoryListTool",
+        "MemoryViewTool",
+        "new",
+        "resolve_scope",
+        "scan_scope",
+        "scope_memory_dir",
+        "user_id_for"
+      ]
+    },
+    {
+      "file": "src/tools/memory_tool/search.rs",
+      "total_lines": 162,
+      "pub_symbols": 4,
+      "private_fns": 4,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "best_snippet",
+        "memory_search_score",
+        "normalize_optional_filter",
+        "query_tokens"
+      ]
+    },
+    {
+      "file": "src/tools/memory_tool/writer.rs",
+      "total_lines": 623,
+      "pub_symbols": 4,
+      "private_fns": 13,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "MemoryManageTool",
+        "MemorySearchTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/memory_tool_tests.rs",
+      "total_lines": 591,
+      "pub_symbols": 0,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/tools/mod.rs",
+      "total_lines": 134,
+      "pub_symbols": 1,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 30,
+      "pub_symbol_names": [
+        "builtin_tools"
+      ]
+    },
+    {
+      "file": "src/tools/search.rs",
+      "total_lines": 675,
+      "pub_symbols": 4,
+      "private_fns": 20,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ContentSearchTool",
+        "GlobSearchTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/search_cooldown.rs",
+      "total_lines": 404,
+      "pub_symbols": 9,
+      "private_fns": 24,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SearchProviderCooldown",
+        "classify_and_record",
+        "is_cooled_down",
+        "new",
+        "parse_http_error",
+        "parse_search_cooldown",
+        "record",
+        "record_failure",
+        "record_failure_with_cooldown"
+      ]
+    },
+    {
+      "file": "src/tools/send_message.rs",
+      "total_lines": 991,
+      "pub_symbols": 6,
+      "private_fns": 16,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SendMessageTool",
+        "new",
+        "set_known_users",
+        "set_messenger",
+        "set_user_registry",
+        "with_namespace"
+      ]
+    },
+    {
+      "file": "src/tools/session_query.rs",
+      "total_lines": 269,
+      "pub_symbols": 2,
+      "private_fns": 8,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SessionQueryTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/sessions_yield.rs",
+      "total_lines": 132,
+      "pub_symbols": 2,
+      "private_fns": 7,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SessionsYieldTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/shell/kill_tool.rs",
+      "total_lines": 110,
+      "pub_symbols": 2,
+      "private_fns": 3,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ShellKillTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/shell/mod.rs",
+      "total_lines": 889,
+      "pub_symbols": 1,
+      "private_fns": 12,
+      "struct_pub_fields": 4,
+      "pub_use_reexports": 7,
+      "pub_symbol_names": [
+        "ShellCompletion"
+      ]
+    },
+    {
+      "file": "src/tools/shell/poll_tool.rs",
+      "total_lines": 161,
+      "pub_symbols": 3,
+      "private_fns": 4,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ShellPollTool",
+        "new",
+        "test_proc_entry"
+      ]
+    },
+    {
+      "file": "src/tools/shell/proc_entry.rs",
+      "total_lines": 557,
+      "pub_symbols": 20,
+      "private_fns": 0,
+      "struct_pub_fields": 14,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ProcEntry",
+        "ProcSummary",
+        "ShellRegistry",
+        "build_completion_content",
+        "entry_dir",
+        "entry_json_path",
+        "entry_output_path",
+        "is_running",
+        "is_shell_process_id",
+        "latest_entry_summary",
+        "pid_start_ticks",
+        "pid_still_this_process",
+        "remove_entry_disk",
+        "session_id",
+        "spawn_adopted_reaper",
+        "spawn_owned_reaper",
+        "summary",
+        "terminal_result",
+        "write_entry_disk"
+      ]
+    },
+    {
+      "file": "src/tools/shell/shell_tool.rs",
+      "total_lines": 369,
+      "pub_symbols": 8,
+      "private_fns": 7,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ShellTool",
+        "UNKNOWN_PROCESS_LISTING_CAP",
+        "format_unknown_process_listing",
+        "new",
+        "new_with_notice_sender",
+        "registry",
+        "sessions_dir",
+        "set_session_manager"
+      ]
+    },
+    {
+      "file": "src/tools/shell_env.rs",
+      "total_lines": 373,
+      "pub_symbols": 2,
+      "private_fns": 16,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "apply",
+        "init"
+      ]
+    },
+    {
+      "file": "src/tools/skill_manage_tool.rs",
+      "total_lines": 556,
+      "pub_symbols": 2,
+      "private_fns": 19,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SkillManageTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/skill_tool.rs",
+      "total_lines": 402,
+      "pub_symbols": 2,
+      "private_fns": 11,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SkillTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/skills_list_tool.rs",
+      "total_lines": 225,
+      "pub_symbols": 2,
+      "private_fns": 7,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SkillsListTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/symbol_check.rs",
+      "total_lines": 277,
+      "pub_symbols": 2,
+      "private_fns": 11,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SymbolCheckTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/task.rs",
+      "total_lines": 1010,
+      "pub_symbols": 16,
+      "private_fns": 25,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SharedTaskState",
+        "Task",
+        "TaskBoards",
+        "TaskCreateTool",
+        "TaskDeleteTool",
+        "TaskListTool",
+        "TaskState",
+        "TaskUpdateTool",
+        "board",
+        "board_path",
+        "format_for_injection",
+        "load",
+        "new",
+        "new_tools",
+        "save"
+      ]
+    },
+    {
+      "file": "src/tools/tool_search.rs",
+      "total_lines": 261,
+      "pub_symbols": 2,
+      "private_fns": 8,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ToolSearchTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/truncation.rs",
+      "total_lines": 140,
+      "pub_symbols": 3,
+      "private_fns": 9,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "approx_tokens",
+        "truncate_output",
+        "truncate_tool_result"
+      ]
+    },
+    {
+      "file": "src/tools/view_image.rs",
+      "total_lines": 414,
+      "pub_symbols": 2,
+      "private_fns": 22,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ViewImageTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/view_video.rs",
+      "total_lines": 421,
+      "pub_symbols": 2,
+      "private_fns": 23,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ViewVideoTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tools/web_search.rs",
+      "total_lines": 322,
+      "pub_symbols": 2,
+      "private_fns": 10,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "WebSearchTool",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tui/app.rs",
+      "total_lines": 554,
+      "pub_symbols": 2,
+      "private_fns": 11,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "App",
+        "new"
+      ]
+    },
+    {
+      "file": "src/tui/mod.rs",
+      "total_lines": 5,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/update_state.rs",
+      "total_lines": 187,
+      "pub_symbols": 10,
+      "private_fns": 2,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "UpdateState",
+        "UpdateStatus",
+        "as_str",
+        "file_sha256_hex",
+        "load",
+        "mark_completed",
+        "mark_failed",
+        "now_rfc3339",
+        "save",
+        "update_state_path"
+      ]
+    },
+    {
+      "file": "src/webui/client/api/memory.rs",
+      "total_lines": 343,
+      "pub_symbols": 7,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "delete",
+        "list",
+        "memory_file_in_scope",
+        "memory_scope_dir",
+        "memory_user_id",
+        "read",
+        "write"
+      ]
+    },
+    {
+      "file": "src/webui/client/api/mod.rs",
+      "total_lines": 120,
+      "pub_symbols": 2,
+      "private_fns": 0,
+      "struct_pub_fields": 9,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ApiContext",
+        "handle_api_request"
+      ]
+    },
+    {
+      "file": "src/webui/client/api/sessions.rs",
+      "total_lines": 413,
+      "pub_symbols": 8,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "create",
+        "delete",
+        "delete_message",
+        "history",
+        "list",
+        "reconstruct_history",
+        "rename",
+        "switch"
+      ]
+    },
+    {
+      "file": "src/webui/client/api/skills.rs",
+      "total_lines": 173,
+      "pub_symbols": 7,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "delete",
+        "is_safe_skill_name",
+        "list",
+        "read",
+        "reload_skills_from_workspace",
+        "resolve_skill_dir",
+        "write"
+      ]
+    },
+    {
+      "file": "src/webui/client/api/system.rs",
+      "total_lines": 203,
+      "pub_symbols": 8,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "commands_list",
+        "config_get",
+        "config_get_raw",
+        "config_save",
+        "daemon_restart",
+        "file_read",
+        "models_list",
+        "models_set"
+      ]
+    },
+    {
+      "file": "src/webui/client/bus.rs",
+      "total_lines": 199,
+      "pub_symbols": 10,
+      "private_fns": 0,
+      "struct_pub_fields": 3,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "SessionOutputBus",
+        "Subscriber",
+        "bus_key_candidates",
+        "detach",
+        "drain_events",
+        "drain_messages",
+        "new",
+        "push_event",
+        "push_message",
+        "subscribe"
+      ]
+    },
+    {
+      "file": "src/webui/client/channel.rs",
+      "total_lines": 874,
+      "pub_symbols": 11,
+      "private_fns": 0,
+      "struct_pub_fields": 4,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ClientChannel",
+        "new",
+        "set_config_path",
+        "set_memory_root",
+        "set_pre_bound",
+        "set_provider_registry",
+        "set_session_manager",
+        "set_skill_manager",
+        "set_tool_specs",
+        "set_user_resolver",
+        "set_workspace_dir"
+      ]
+    },
+    {
+      "file": "src/webui/client/mod.rs",
+      "total_lines": 47,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/webui/client/tests.rs",
+      "total_lines": 459,
+      "pub_symbols": 0,
+      "private_fns": 16,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": []
+    },
+    {
+      "file": "src/webui/client/turn.rs",
+      "total_lines": 230,
+      "pub_symbols": 1,
+      "private_fns": 7,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 0,
+      "pub_symbol_names": [
+        "ClientTurnStream"
+      ]
+    },
+    {
+      "file": "src/webui/mod.rs",
+      "total_lines": 7,
+      "pub_symbols": 0,
+      "private_fns": 0,
+      "struct_pub_fields": 0,
+      "pub_use_reexports": 1,
+      "pub_symbol_names": []
+    }
+  ]
+}

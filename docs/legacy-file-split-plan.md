@@ -1,6 +1,6 @@
 # 遗留巨文件拆分方案（§5.3 收尾计划）
 
-> 状态：草案（待用户批准后按 P0→P4 分批实施）
+> 状态：**已完成**（P0–P4 全部合入并部署，2026-08-28；实施记录见文末）
 > 日期：2026-08-28
 > 背景：#151 架构重构 Phase 0–11 已收官，§5.3 指标遗留两项未达：巨文件 13 个（≥1400 行）未降到 <10；churn 待 2026-11 底复测。本方案解决第一项。
 > 先例：orchestrator.rs、session_context.rs、daemon.rs（8f）、channels/message.rs（8i）均已目录化成功；agent.rs 拆分（RFC #145 / PR #146）因让位 #151 而 CLOSED，方案可复活。
@@ -90,12 +90,12 @@ churn=1（全库最冷）× 规模第一（2852），零冲突、立收益。
 
 ## 4. 验收（对齐 §5.3）
 
-- [ ] ≥1400 行文件数 <10（P0+P1 达成即勾）
-- [ ] 终态（P0–P4 全完成）：全库最大 .rs 文件 = daemon/mod.rs 1299（或新产生的 <1400 文件）
-- [ ] 每文件：CI 三绿（build/layering/migrate-script-tests）× 每批
-- [ ] 每文件：测试计数守恒、外部 diff 空、深模块比不劣化
-- [ ] module_score 基线/终态 JSON 进 PR 描述
-- [ ] 2026-11 底 churn 复测时，本计划搬移噪声计入说明
+- [x] ≥1400 行文件数 <10（P0+P1 达成即勾）——P0 后 13→8，P2 后 8→4，P3 后 4→2
+- [x] 终态（P0–P4 全完成）：全库最大 .rs 文件 = qqbot/channel/api.rs **1399**（≥1400 清零；daemon/mod.rs 1299 居第三）
+- [x] 每文件：CI 三绿（build/layering/migrate-script-tests）× 每批——五批 PR #188–#192 全绿合入
+- [x] 每文件：测试计数守恒、外部 diff 空、深模块比不劣化——累计 12+78+84+49+44 = 267 测试零丢失；外部消费者零改动
+- [x] module_score 基线/终态 JSON 进 PR 描述——终态 `scripts/module-score-final.json`（328 文件）；基线见 PR #188 描述（无落地文件）
+- [ ] 2026-11 底 churn 复测时，本计划搬移噪声计入说明（远期，唯一未勾项）
 
 ## 5. 风险与对策
 
@@ -120,3 +120,18 @@ churn=1（全库最冷）× 规模第一（2852），零冲突、立收益。
 
 - 分支清理：`docs/agent-module-split-rfc`（已 MERGED 可删远端）、`refactor/daemon-module-split`（Phase 8f 已完成可删）——实施 P0 前顺手清。
 - issue #147/#148/#149 均与本计划执行效率相关，落地顺序不阻塞。
+
+## 8. 实施记录（2026-08-28 收官）
+
+| 批次 | PR | 内容 | 测试 | CI 修复 |
+|---|---|---|---|---|
+| P0 | #188 | webui/client.rs 2852 → 10 文件 | 12 | — |
+| P1 | #189 | 冷文件四件（migration/delegation/json_file/known_users） | 78 | pub(crate) 转发无消费者（P1-2 教训） |
+| P2 | #190 | 调度引擎四件（scheduler/webhook/memory_tool/compaction_engine） | 84 | E0624→E0449→unused 转发，三轮 |
+| P3 | #191 | agent.rs 复活 PR #146 终态（9 组路径适配+补丢 #[test] 缺陷+剔除其夹带的 shell.rs 行为回退）；delegation_coordinator 2609→7 文件 | 49 | E0053 测试桩签名 / E0412 |
+| P4 | #192 | telegram 2647→4 文件；qqbot 2833→6 文件 | 44 | module_inception / E0432 / unused info |
+
+- 终态：≥1400 行文件 **13 → 0**；267 测试零丢失；合并 commit 链 `#188…#192`，部署 `0d21325 → 7de9021`（2026-08-28 热切换验证通过）
+- 新沉淀门禁教训（clippy -D warnings 序）：`pub(crate)` 转发不豁免 unused 检查；trait impl 方法禁可见性修饰符；`channel/channel.rs` 同名嵌套触 module_inception；拆分后子文件 `use super::` 层级逐条重核
+- qqbot/text.rs 与 telegram 侧文本函数的**行为级合并上提**（channels/shared）单列未做——纯移动红线外事项
+
