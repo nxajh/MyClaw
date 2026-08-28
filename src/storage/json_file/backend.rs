@@ -44,7 +44,7 @@ impl JsonFileBackend {
         self.root.join(bare_dir_name(session_id))
     }
 
-    fn meta_path(&self, session_id: &str) -> PathBuf {
+    pub(super) fn meta_path(&self, session_id: &str) -> PathBuf {
         self.session_dir(session_id).join("meta.json")
     }
 
@@ -73,14 +73,17 @@ impl JsonFileBackend {
 
     // ── Atomic write helpers ──────────────────────────────────────────────────
 
-    /// Write compact JSON atomically via a temp file + rename.
+    /// Write compact JSON atomically via a uniquely-named temp file + rename.
+    ///
+    /// The temp file is created in the same directory as `path` (required for
+    /// the final rename to be atomic) with a process- and call-unique name, so
+    /// concurrent writers to the same `path` never share (and truncate) a
+    /// single fixed `.tmp` file.
     pub(super) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-        let tmp = path.with_extension("tmp");
-        {
-            let f = fs::File::create(&tmp)?;
-            serde_json::to_writer(f, value).map_err(std::io::Error::other)?;
-        }
-        fs::rename(&tmp, path)?;
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+        serde_json::to_writer(&mut tmp, value).map_err(std::io::Error::other)?;
+        tmp.persist(path).map_err(|e| e.error)?;
         Ok(())
     }
 
