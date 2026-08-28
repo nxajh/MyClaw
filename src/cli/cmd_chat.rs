@@ -39,6 +39,7 @@ pub async fn run(
     ))));
     tools.register(Arc::new(myclaw::tools::SkillManageTool::new(
         Arc::clone(&skills_arc),
+        cfg.base_dir().join("users"),
         cfg.skills_root(),
         cfg.agents_skills_dir_opt(),
     )));

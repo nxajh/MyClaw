@@ -552,6 +552,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         agents_skills_dir.clone(),
         config.agents_root(),
         &config.memory_root(),
+        config.base_dir().join("users"),
         sub_agent_registry.as_ref().clone(),
         skills_arc.clone(),
     )?;

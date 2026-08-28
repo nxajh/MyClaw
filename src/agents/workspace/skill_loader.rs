@@ -327,6 +327,29 @@ pub fn list_draft_skill_names(skills_dir: &Path) -> Vec<String> {
     names
 }
 
+/// Load all users' skills: scans `users/*/skills` and returns a map of `user_id` -> `Vec<SkillDefinition>`.
+pub fn load_all_users_skills(users_root: &Path) -> std::collections::HashMap<String, Vec<SkillDefinition>> {
+    let mut users_map = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir(users_root) else {
+        return users_map;
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let user_id = entry.file_name().to_string_lossy().to_string();
+        let skills_dir = entry.path().join("skills");
+        if skills_dir.exists() {
+            let mut defs = load_skills_from_dir(&skills_dir);
+            for def in &mut defs {
+                def.source_layer = "user".to_string();
+            }
+            users_map.insert(user_id, defs);
+        }
+    }
+    users_map
+}
+
 /// Load skills across two layers: the local skills root and — when
 /// present — the cross-agent shared library `~/.agents/skills` (issue
 /// #83). Local skills always win a same-`name` conflict (front-matter

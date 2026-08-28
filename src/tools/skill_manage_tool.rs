@@ -17,23 +17,21 @@ const ALLOWED_SUBDIRS: &[&str] = &["references", "scripts", "templates", "assets
 
 pub struct SkillManageTool {
     skills: Arc<dyn SkillRegistry>,
-    /// P1: skills root (`{base_dir}/skills`) — passed directly by the daemon.
+    users_root: PathBuf,
     skills_root: PathBuf,
-    /// Cross-agent shared skills dir (`~/.agents/skills`, issue #83),
-    /// read-only here — `skill_manage` never writes to it. Carried so
-    /// `refresh_skills` re-layers it in after a local create/edit/delete
-    /// instead of silently dropping it from the live SkillManager.
     agents_skills_dir: Option<PathBuf>,
 }
 
 impl SkillManageTool {
     pub fn new<R: SkillRegistry + 'static>(
         skills: Arc<R>,
+        users_root: PathBuf,
         skills_root: PathBuf,
         agents_skills_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             skills,
+            users_root,
             skills_root,
             agents_skills_dir,
         }
@@ -99,7 +97,7 @@ impl Tool for SkillManageTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: &crate::api::tool::ToolContext,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let action = args["action"]
             .as_str()
@@ -109,12 +107,12 @@ impl Tool for SkillManageTool {
             .ok_or_else(|| anyhow::anyhow!("'name' is required"))?;
 
         let result = match action {
-            "create" => self.action_create(name, &args),
-            "edit" => self.action_edit(name, &args),
-            "patch" => self.action_patch(name, &args),
-            "delete" => self.action_delete(name),
-            "write_file" => self.action_write_file(name, &args),
-            "remove_file" => self.action_remove_file(name, &args),
+            "create" => self.action_create(name, &args, ctx),
+            "edit" => self.action_edit(name, &args, ctx),
+            "patch" => self.action_patch(name, &args, ctx),
+            "delete" => self.action_delete(name, ctx),
+            "write_file" => self.action_write_file(name, &args, ctx),
+            "remove_file" => self.action_remove_file(name, &args, ctx),
             _ => Err(format!(
                 "Unknown action '{}'. Valid: create, edit, patch, delete, write_file, remove_file",
                 action
@@ -141,6 +139,7 @@ impl SkillManageTool {
         &self,
         name: &str,
         args: &serde_json::Value,
+        ctx: &crate::api::tool::ToolContext,
     ) -> Result<serde_json::Value, String> {
         let content = args["content"]
             .as_str()
@@ -152,14 +151,15 @@ impl SkillManageTool {
         if name == "self" {
             return Err("Cannot create skill with reserved name 'self'".to_string());
         }
-        if self.skills.find(name).is_some() {
+        if self.skills.find(name, Some(&ctx.owner)).is_some() {
             return Err(format!(
                 "Skill '{}' already exists. Use 'edit' or 'patch' to modify it.",
                 name
             ));
         }
 
-        let skill_dir = self.skills_root.join(name);
+        let user_skills_dir = self.users_root.join(&ctx.owner).join("skills");
+        let skill_dir = user_skills_dir.join(name);
         std::fs::create_dir_all(&skill_dir)
             .map_err(|e| format!("Failed to create skill directory: {}", e))?;
 
@@ -184,6 +184,7 @@ impl SkillManageTool {
         &self,
         name: &str,
         args: &serde_json::Value,
+        ctx: &crate::api::tool::ToolContext,
     ) -> Result<serde_json::Value, String> {
         let content = args["content"]
             .as_str()
@@ -191,7 +192,7 @@ impl SkillManageTool {
         validate_frontmatter(content, name)?;
         validate_content_size(content)?;
 
-        let skill_dir = self.get_skill_dir(name)?;
+        let skill_dir = self.get_skill_dir(name, ctx)?;
         atomic_write(&skill_dir.join("SKILL.md"), content)
             .map_err(|e| format!("Failed to write SKILL.md: {}", e))?;
 
@@ -207,6 +208,7 @@ impl SkillManageTool {
         &self,
         name: &str,
         args: &serde_json::Value,
+        ctx: &crate::api::tool::ToolContext,
     ) -> Result<serde_json::Value, String> {
         let old_string = args["old_string"]
             .as_str()
@@ -216,7 +218,7 @@ impl SkillManageTool {
             .ok_or("'new_string' is required for patch")?;
         let file_path = args["file_path"].as_str();
 
-        let skill_dir = self.get_skill_dir(name)?;
+        let skill_dir = self.get_skill_dir(name, ctx)?;
 
         let target = match file_path {
             None => skill_dir.join("SKILL.md"),
@@ -263,11 +265,11 @@ impl SkillManageTool {
         }))
     }
 
-    fn action_delete(&self, name: &str) -> Result<serde_json::Value, String> {
+    fn action_delete(&self, name: &str, ctx: &crate::api::tool::ToolContext) -> Result<serde_json::Value, String> {
         if name == "self" {
             return Err("Cannot delete reserved skill 'self'".to_string());
         }
-        let skill_dir = self.get_skill_dir(name)?;
+        let skill_dir = self.get_skill_dir(name, ctx)?;
         std::fs::remove_dir_all(&skill_dir)
             .map_err(|e| format!("Failed to delete skill directory: {}", e))?;
 
@@ -284,6 +286,7 @@ impl SkillManageTool {
         &self,
         name: &str,
         args: &serde_json::Value,
+        ctx: &crate::api::tool::ToolContext,
     ) -> Result<serde_json::Value, String> {
         let file_path = args["file_path"]
             .as_str()
@@ -301,7 +304,7 @@ impl SkillManageTool {
             ));
         }
 
-        let skill_dir = self.get_skill_dir(name)?;
+        let skill_dir = self.get_skill_dir(name, ctx)?;
         let target = skill_dir.join(file_path);
         if !target.starts_with(&skill_dir) {
             return Err("Path traversal not allowed.".to_string());
@@ -326,13 +329,14 @@ impl SkillManageTool {
         &self,
         name: &str,
         args: &serde_json::Value,
+        ctx: &crate::api::tool::ToolContext,
     ) -> Result<serde_json::Value, String> {
         let file_path = args["file_path"]
             .as_str()
             .ok_or("'file_path' is required for remove_file")?;
         validate_supporting_file_path(file_path)?;
 
-        let skill_dir = self.get_skill_dir(name)?;
+        let skill_dir = self.get_skill_dir(name, ctx)?;
         let target = skill_dir.join(file_path);
         if !target.starts_with(&skill_dir) {
             return Err("Path traversal not allowed.".to_string());
@@ -374,8 +378,8 @@ impl SkillManageTool {
     /// found'" undersold it: nothing ever produced "not found" for a
     /// shared-only skill, the writes/deletes silently succeeded against the
     /// shared library).
-    fn get_skill_dir(&self, name: &str) -> Result<PathBuf, String> {
-        let dir = self.skills.skill_dir(name)
+    fn get_skill_dir(&self, name: &str, ctx: &crate::api::tool::ToolContext) -> Result<PathBuf, String> {
+        let dir = self.skills.skill_dir(name, Some(&ctx.owner))
             .ok_or_else(|| format!("Skill '{}' not found.", name))?;
 
         if let Some(shared) = &self.agents_skills_dir {

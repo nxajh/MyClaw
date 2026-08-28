@@ -82,7 +82,9 @@ impl Skill {
 
 /// SkillManager manages skill definitions for system prompt injection.
 pub struct SkillManager {
-    skills: HashMap<String, Skill>,
+    user_skills: HashMap<String, HashMap<String, Skill>>,
+    agent_skills: HashMap<String, Skill>,
+    shared_skills: HashMap<String, Skill>,
 }
 
 impl Default for SkillManager {
@@ -94,57 +96,105 @@ impl Default for SkillManager {
 impl SkillManager {
     pub fn new() -> Self {
         Self {
-            skills: HashMap::new(),
+            user_skills: HashMap::new(),
+            agent_skills: HashMap::new(),
+            shared_skills: HashMap::new(),
         }
     }
 
-    /// Register a skill.
+    /// Register a skill (defaults to agent skills for backward compat)
     pub fn register(&mut self, skill: Skill) {
-        self.skills.insert(skill.name.clone(), skill);
+        self.agent_skills.insert(skill.name.clone(), skill);
     }
 
-    /// Number of registered skills.
+    /// Number of registered agent + shared skills (excluding users).
     pub fn skill_count(&self) -> usize {
-        self.skills.len()
+        self.agent_skills.len() + self.shared_skills.len()
     }
 
-    /// Iterate over all skills (name, &Skill).
-    pub fn skills_iter(&self) -> impl Iterator<Item = (&str, &Skill)> {
-        self.skills.iter().map(|(k, v)| (k.as_str(), v))
+    /// Number of skills for a given owner.
+    pub fn total_skill_count(&self, owner: Option<&str>) -> usize {
+        let mut count = self.agent_skills.len() + self.shared_skills.len();
+        if let Some(o) = owner {
+            if let Some(u) = self.user_skills.get(o) {
+                count += u.len();
+            }
+        }
+        count
     }
 
-    /// Iterate only agent-invocable skills (for attachment injection).
-    pub fn agent_skills_iter(&self) -> impl Iterator<Item = (&str, &Skill)> {
-        self.skills
-            .iter()
-            .filter(|(_, s)| s.agent_invocable)
-            .map(|(k, v)| (k.as_str(), v))
+    /// Iterate over all skills for an owner (user > agent > shared).
+    pub fn skills_iter<'a>(&'a self, owner: Option<&'a str>) -> impl Iterator<Item = (&'a str, &'a Skill)> {
+        let mut all = HashMap::new();
+        for (k, v) in &self.shared_skills {
+            all.insert(k.as_str(), v);
+        }
+        for (k, v) in &self.agent_skills {
+            all.insert(k.as_str(), v);
+        }
+        if let Some(o) = owner {
+            if let Some(u) = self.user_skills.get(o) {
+                for (k, v) in u {
+                    all.insert(k.as_str(), v);
+                }
+            }
+        }
+        all.into_iter()
+    }
+
+    /// Iterate only agent-invocable skills for an owner (user > agent > shared).
+    pub fn agent_skills_iter<'a>(&'a self, owner: Option<&'a str>) -> impl Iterator<Item = (&'a str, &'a Skill)> {
+        self.skills_iter(owner).filter(|(_, s)| s.agent_invocable)
     }
 
     /// Get skill directory path by name.
-    pub fn skill_dir(&self, name: &str) -> Option<&Path> {
-        self.skills.get(name).and_then(|s| s.skill_dir.as_deref())
+    pub fn skill_dir(&self, name: &str, owner: Option<&str>) -> Option<&Path> {
+        self.get(name, owner).and_then(|s| s.skill_dir.as_deref())
     }
 
     /// Get a skill by name.
-    pub fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.get(name)
-    }
-
-    /// Hot-reload: replace all skill definitions.
-    pub fn reload(&mut self, new_skills: Vec<Skill>) {
-        self.skills.clear();
-        for skill in new_skills {
-            self.skills.insert(skill.name.clone(), skill);
+    pub fn get(&self, name: &str, owner: Option<&str>) -> Option<&Skill> {
+        if let Some(o) = owner {
+            if let Some(u) = self.user_skills.get(o) {
+                if let Some(s) = u.get(name) {
+                    return Some(s);
+                }
+            }
         }
+        if let Some(s) = self.agent_skills.get(name) {
+            return Some(s);
+        }
+        if let Some(s) = self.shared_skills.get(name) {
+            return Some(s);
+        }
+        None
     }
 
-    /// Hot-reload from raw parsed definitions — the def→runtime conversion
-    /// stays inside the agents layer so callers (e.g. skill_manage_tool)
-    /// never construct `Skill` directly.
-    pub fn reload_from_definitions(&mut self, defs: Vec<SkillDefinition>) {
-        let skills = defs.iter().map(Skill::from_definition).collect();
-        self.reload(skills);
+    /// Hot-reload: replace all skill definitions from definitions.
+    pub fn reload_from_definitions(
+        &mut self,
+        user_skills_map: HashMap<String, Vec<SkillDefinition>>,
+        agent_defs: Vec<SkillDefinition>,
+        shared_defs: Vec<SkillDefinition>,
+    ) {
+        self.user_skills.clear();
+        for (user_id, defs) in user_skills_map {
+            let mut map = HashMap::new();
+            for def in defs {
+                map.insert(def.name.clone(), Skill::from_definition(&def));
+            }
+            self.user_skills.insert(user_id, map);
+        }
+
+        self.agent_skills.clear();
+        for def in agent_defs {
+            self.agent_skills.insert(def.name.clone(), Skill::from_definition(&def));
+        }
+
+        self.shared_skills.clear();
+        for def in shared_defs {
+            self.shared_skills.insert(def.name.clone(), Skill::from_definition(&def));
+        }
     }
 
     /// Register a single parsed definition (conversion encapsulated here).
@@ -153,11 +203,10 @@ impl SkillManager {
     }
 
     /// Get all skill prompts (name, prompt_body) for system prompt injection.
-    pub fn skill_prompts(&self) -> Vec<(&str, &str)> {
-        self.skills
-            .values()
-            .filter(|s| !s.prompt_body.is_empty())
-            .map(|s| (s.name.as_str(), s.prompt_body.as_str()))
+    pub fn skill_prompts<'a>(&'a self, owner: Option<&'a str>) -> Vec<(&'a str, &'a str)> {
+        self.skills_iter(owner)
+            .filter(|(_, s)| !s.prompt_body.is_empty())
+            .map(|(n, s)| (n, s.prompt_body.as_str()))
             .collect()
     }
 }
@@ -228,9 +277,9 @@ mod tests {
 // Arc<RwLock<SkillManager>>——与系统提示词注入用的是同一个活实例。
 
 impl crate::api::skill_registry::SkillRegistry for parking_lot::RwLock<SkillManager> {
-    fn find(&self, name: &str, _owner: Option<&str>) -> Option<crate::api::skill_registry::SkillView> {
+    fn find(&self, name: &str, owner: Option<&str>) -> Option<crate::api::skill_registry::SkillView> {
         use crate::api::skill_registry::SkillView;
-        self.read().get(name).map(|s| SkillView {
+        self.read().get(name, owner).map(|s| SkillView {
             name: s.name.clone(),
             description: s.description.clone(),
             prompt_body: s.prompt_body.clone(),
@@ -239,18 +288,18 @@ impl crate::api::skill_registry::SkillRegistry for parking_lot::RwLock<SkillMana
         })
     }
 
-    fn skill_names(&self, _owner: Option<&str>) -> Vec<String> {
-        self.read().skills_iter().map(|(n, _)| n.to_string()).collect()
+    fn skill_names(&self, owner: Option<&str>) -> Vec<String> {
+        self.read().skills_iter(owner).map(|(n, _)| n.to_string()).collect()
     }
 
-    fn skill_dir(&self, name: &str, _owner: Option<&str>) -> Option<std::path::PathBuf> {
-        self.read().skill_dir(name).map(|p| p.to_path_buf())
+    fn skill_dir(&self, name: &str, owner: Option<&str>) -> Option<std::path::PathBuf> {
+        self.read().skill_dir(name, owner).map(|p| p.to_path_buf())
     }
 
-    fn list(&self, _owner: Option<&str>) -> Vec<crate::api::skill_registry::SkillSummary> {
+    fn list(&self, owner: Option<&str>) -> Vec<crate::api::skill_registry::SkillSummary> {
         use crate::api::skill_registry::SkillSummary;
         self.read()
-            .skills_iter()
+            .skills_iter(owner)
             .map(|(n, s)| SkillSummary {
                 name: n.to_string(),
                 description: s.description.clone(),
@@ -266,7 +315,17 @@ impl crate::api::skill_registry::SkillRegistry for parking_lot::RwLock<SkillMana
     }
 
     fn reload_layered(&self, user_skills_dir: Option<&Path>, skills_dir: &Path, agents_skills_dir: Option<&Path>) {
-        let defs = super::skill_loader::load_skills_layered(user_skills_dir, skills_dir, agents_skills_dir);
-        self.write().reload_from_definitions(defs);
+        let user_skills_map = if let Some(base) = user_skills_dir.and_then(|p| p.parent()) {
+            super::skill_loader::load_all_users_skills(base)
+        } else {
+            std::collections::HashMap::new()
+        };
+        let agent_defs = super::skill_loader::load_skills_from_dir(skills_dir);
+        let shared_defs = if let Some(d) = agents_skills_dir {
+            super::skill_loader::load_skills_from_dir(d)
+        } else {
+            Vec::new()
+        };
+        self.write().reload_from_definitions(user_skills_map, agent_defs, shared_defs);
     }
 }

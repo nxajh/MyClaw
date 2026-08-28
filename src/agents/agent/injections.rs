@@ -72,7 +72,7 @@ impl super::Agent {
             let reminder = {
                 let skills_snap = runtime.skills.read();
                 let history_clone = session.history.clone();
-                session.attachments.diff_skills(&skills_snap, &history_clone);
+                session.attachments.diff_skills(&skills_snap, &history_clone, Some(&session.owner));
                 let agent_list: Vec<(String, String)> = runtime
                     .agents
                     .values_cloned()

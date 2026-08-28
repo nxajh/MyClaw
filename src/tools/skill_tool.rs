@@ -55,7 +55,7 @@ impl Tool for SkillTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: &crate::api::tool::ToolContext,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let name = args["name"]
             .as_str()

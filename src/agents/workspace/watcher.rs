@@ -48,6 +48,7 @@ impl WorkspaceWatcher {
         agents_skills_dir: Option<PathBuf>,
         agents_dir: PathBuf,
         memory_dir: &Path,
+        users_dir: PathBuf,
     ) -> Result<Self> {
         let (tx, rx) = watch::channel(ChangeSet::default());
 
@@ -57,6 +58,7 @@ impl WorkspaceWatcher {
         let agents_skills_dir_c = agents_skills_dir.clone();
         let agents_dir_c = agents_dir.clone();
         let memory_dir_c = memory_dir.clone();
+        let users_dir_c = users_dir.clone();
 
         let mut watcher = notify::recommended_watcher(
             move |res: std::result::Result<notify::Event, notify::Error>| {
@@ -77,6 +79,9 @@ impl WorkspaceWatcher {
                 let mut changes = ChangeSet::default();
                 for path in &event.paths {
                     if path.starts_with(&skills_dir_c) {
+                        changes.skills_changed = true;
+                    }
+                    if path.starts_with(&users_dir_c) && path.components().any(|c| c.as_os_str() == "skills") {
                         changes.skills_changed = true;
                     }
                     if let Some(ref dir) = agents_skills_dir_c {
@@ -134,6 +139,7 @@ impl WorkspaceWatcher {
         agents_skills_dir: Option<PathBuf>,
         agents_dir: PathBuf,
         memory_root: &Path,
+        users_dir: PathBuf,
         agent_registry: crate::agents::AgentRegistry,
         skill_manager: Arc<RwLock<super::skills::SkillManager>>,
     ) -> Result<ManagedWatcherGuard> {
@@ -142,6 +148,7 @@ impl WorkspaceWatcher {
             agents_skills_dir.clone(),
             agents_dir.clone(),
             memory_root,
+            users_dir.clone(),
         )?;
         let mut rx = watcher.rx.clone();
 
@@ -168,15 +175,17 @@ impl WorkspaceWatcher {
                             // `reload()` clears and replaces everything, so
                             // calling it once per dir would wipe out the
                             // other layer's skills (issue #83).
-                            let defs = super::skill_loader::load_skills_layered(
-                                &skills_dir,
-                                agents_skills_dir.as_deref(),
-                            );
-                            let skills: Vec<crate::agents::Skill> =
-                                defs.iter().map(crate::agents::Skill::from_definition).collect();
-                            let count = skills.len();
-                            skill_manager.write().reload(skills);
-                            tracing::info!(skill_count = count, "skills hot-reloaded by watcher");
+                            let user_skills_map = super::skill_loader::load_all_users_skills(&users_dir);
+                            let agent_defs = super::skill_loader::load_skills_from_dir(&skills_dir);
+                            let shared_defs = if let Some(d) = &agents_skills_dir {
+                                super::skill_loader::load_skills_from_dir(d)
+                            } else {
+                                Vec::new()
+                            };
+                            
+                            let mut write_guard = skill_manager.write();
+                            write_guard.reload_from_definitions(user_skills_map, agent_defs, shared_defs);
+                            tracing::info!(skill_count = write_guard.skill_count(), "skills hot-reloaded by watcher");
                         }
                         // memory_changed is left to AttachmentManager.diff_memory
                         // because the attachment payload is computed per-turn.

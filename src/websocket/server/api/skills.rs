@@ -25,7 +25,7 @@ pub(super) fn is_safe_skill_name(name: &str) -> bool {
 /// `workspace/skills/{name}` only when the manager has no entry.
 pub(super) fn resolve_skill_dir(ctx: &ApiContext<'_>, name: &str) -> Option<std::path::PathBuf> {
     if let Some(mgr_arc) = ctx.skill_manager.get() {
-        if let Some(dir) = mgr_arc.read().skill_dir(name) {
+        if let Some(dir) = mgr_arc.read().skill_dir(name, Some(&ctx.session.owner())) {
             return Some(dir.to_path_buf());
         }
     }

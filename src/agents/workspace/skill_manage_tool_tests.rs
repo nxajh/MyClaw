@@ -37,7 +37,7 @@ fn setup(workspace: &Path, skill_name: &str) -> Arc<RwLock<SkillManager>> {
 async fn test_create_and_refresh() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(RwLock::new(SkillManager::new()));
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), None);
     let result = tool.execute(json!({
         "action": "create", "name": "mys",
         "content": "---\nname: mys\ndescription: \"My skill\"\n---\n# My Skill\n\nDo stuff."
@@ -69,7 +69,7 @@ async fn test_create_reserved_name() {
 async fn test_create_duplicate() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "existing");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), None);
     let result = tool.execute(json!({
         "action": "create", "name": "existing",
         "content": "---\nname: existing\ndescription: \"Exists\"\n---\n# Exists\n\nAlready here."
@@ -102,7 +102,7 @@ async fn test_name_mismatch() {
 async fn test_patch_success() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "myskill");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), None);
     let result = tool
         .execute(
             json!({
@@ -121,7 +121,7 @@ async fn test_patch_success() {
 async fn test_patch_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "myskill");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), None);
     let result = tool
         .execute(
             json!({
@@ -139,7 +139,7 @@ async fn test_patch_not_found() {
 async fn test_delete() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "myskill");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), None);
     let result = tool
         .execute(
             json!({"action": "delete", "name": "myskill"}),
@@ -267,7 +267,7 @@ async fn test_delete_self_rejected() {
 async fn test_write_and_remove_file() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "myskill");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), None);
     let wr = tool
         .execute(
             json!({
@@ -296,7 +296,7 @@ async fn test_write_and_remove_file() {
 async fn test_path_traversal_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "myskill");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), None);
     let result = tool
         .execute(
             json!({

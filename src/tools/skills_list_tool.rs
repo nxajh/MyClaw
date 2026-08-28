@@ -41,11 +41,11 @@ impl Tool for SkillsListTool {
     async fn execute(
         &self,
         _args: serde_json::Value,
-        _ctx: &crate::api::tool::ToolContext,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let mut entries: Vec<serde_json::Value> = self
             .skills
-            .list(Some(&_ctx.owner))
+            .list(Some(&ctx.owner))
             .into_iter()
             .map(|skill| {
                 let mut entry = json!({
