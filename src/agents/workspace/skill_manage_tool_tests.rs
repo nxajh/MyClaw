@@ -43,7 +43,9 @@ async fn test_create_and_refresh() {
         "content": "---\nname: mys\ndescription: \"My skill\"\n---\n# My Skill\n\nDo stuff."
     }), &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), agent_name: "main".to_string(), ..Default::default() }).await.unwrap();
     assert!(result.success, "{}", result.output);
-    assert!(mgr.read().get("mys", None).is_some());
+    // create writes into the owner's user layer (users/{owner}/skills) —
+    // assert against that owner's view, not the ownerless agent+shared view.
+    assert!(mgr.read().get("mys", Some("test")).is_some());
 }
 #[tokio::test]
 async fn test_create_reserved_name() {
