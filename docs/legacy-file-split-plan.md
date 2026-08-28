@@ -17,7 +17,7 @@
 
 | # | 文件 | 行数 | 结构特征 | churn/90d | 层 | 拆后目标 |
 |---|------|------|----------|-----------|-----|----------|
-| 1 | webui/client.rs | 2852 | bus(43–175) + channel(175–1284) + **api handler 900 行**(1370–2233) + reconstruct_history + tests(2391–) | **1** | L5* | 5 文件 |
+| 1 | websocket/client.rs | 2852 | bus(43–175) + channel(175–1284) + **api handler 900 行**(1370–2233) + reconstruct_history + tests(2391–) | **1** | L5* | 5 文件 |
 | 2 | channels/qqbot/channel.rs | 2833 | 协议常量 + 文本工具群(display_width/split_by_visual_lines/gfm) + Channel impl；旁边已有 flow/keyboard/sanitize/token/types | **66** | L5 | 3 文件 |
 | 3 | channels/telegram/channel.rs | 2647 | 3 个 impl 块(135/1099/1730) + tests 462 行 | **67** | L5 | 4 文件 |
 | 4 | agents/delegation_coordinator/mod.rs | 2609 | **1300 行 impl**(202–1528) + 3 个 trait impl + tests 中置（2581 的 AgentLifecycle impl 在 tests mod 之后——组织异味） | 待测 | L4 | 5 文件 |
@@ -31,21 +31,21 @@
 | 12 | storage/json_file.rs | 1492 | 记录类型 + **双 impl**(136–640, 644–1314) + tests | 待测 | L2 | 4 文件 |
 | 13 | tools/memory_tool.rs | 1406 | 搜索评分纯函数群(token/score/snippet) + 审计/版本化 + 主 tool | 待测 | L3 | 3 文件 |
 
-\* webui/client.rs 的 Channel 实现属 L5 职责；layering 脚本按目录前缀递归匹配（已核实），层内目录化不影响判定。
+\* websocket/client.rs 的 Channel 实现属 L5 职责；layering 脚本按目录前缀递归匹配（已核实），层内目录化不影响判定。
 
 **边界观察名单**（<1400 不拆，避免为指标而指标）：agents/orchestrator/turn_recovery.rs 1397、daemon/mod.rs 1299、tools/cronjob_tool.rs 1228、agents/orchestrator/inbound.rs 1213。终态若全库最大文件是 daemon/mod.rs 1299，即历史最优。
 
 ## 2. 逐文件拆分设计
 
-### P0 — webui/client.rs → webui/client/（探路批）
+### P0 — websocket/client.rs → websocket/client/（探路批）
 
 churn=1（全库最冷）× 规模第一（2852），零冲突、立收益。
 
 | 新文件 | 内容（源行段） | 预估行数 |
 |--------|----------------|----------|
-| mod.rs | 声明 + re-export（ClientChannel 等） | ~80 |
+| mod.rs | 声明 + re-export（WebSocketChannel 等） | ~80 |
 | bus.rs | Subscriber / SessionOutputBus(43–175) + bus_key_candidates(1036–1075) | ~220 |
-| channel.rs | ClientConnection / ClientChannel / impl Channel(175–1235) + ClientTurnStream | ~1100 |
+| channel.rs | ClientConnection / WebSocketChannel / impl Channel(175–1235) + ClientTurnStream | ~1100 |
 | api/mod.rs + api/skills.rs, api/memory.rs, api/history.rs | ApiContext + handle_api_request(1317–2233) 按路由域内分 + reconstruct_history(2233–2391) | ~1000（每块 ≤400） |
 | tests.rs | 2391–2852 | ~460 |
 
@@ -125,7 +125,7 @@ churn=1（全库最冷）× 规模第一（2852），零冲突、立收益。
 
 | 批次 | PR | 内容 | 测试 | CI 修复 |
 |---|---|---|---|---|
-| P0 | #188 | webui/client.rs 2852 → 10 文件 | 12 | — |
+| P0 | #188 | websocket/client.rs 2852 → 10 文件 | 12 | — |
 | P1 | #189 | 冷文件四件（migration/delegation/json_file/known_users） | 78 | pub(crate) 转发无消费者（P1-2 教训） |
 | P2 | #190 | 调度引擎四件（scheduler/webhook/memory_tool/compaction_engine） | 84 | E0624→E0449→unused 转发，三轮 |
 | P3 | #191 | agent.rs 复活 PR #146 终态（9 组路径适配+补丢 #[test] 缺陷+剔除其夹带的 shell.rs 行为回退）；delegation_coordinator 2609→7 文件 | 49 | E0053 测试桩签名 / E0412 |

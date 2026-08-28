@@ -35,7 +35,7 @@
 - L1886 `wait_for_signal`；L2004 `reset_telegram_offset`
 - L1909-2024 tests + hot-switch 尾注
 
-**run() 直接插手的主题（行号）**：全局安全配置/media data dir/shell PATH init（L882-894）；cwd 切换（L896）；AGENT.md 校验（L906）；热切换 socket 接管 + Telegram offset 重置（L923-968）；PID 文件（L970）；memory 目录（L979）；存储布局 fail-fast ×2（L989-1064）；`migration::run_auto`（L1065）；registry/MCP/skills（L1069-1082）；时区解析+调度器双建（markdown 迁移用 dummy Scheduler L1088-1129）；memory distill 配置（L1131）；UserResolver/AskRouter/KnownUsers/UserRegistry + 两次 legacy 迁移（L1141-1170）；session backend/manager（L1172-1196）；build_tools + send_message 接线（L1198-1216）；子代理注册表 + WebSearch/媒体三工具注册（L1218-1252）；WorkspaceWatcher（L1263）；DelegationCoordinator + 单/多代理分叉（L1278-1360）；启动扫描 all_sessions + 恢复/checkpoint 关联（L1363-1422）；ClientChannel + fd 继承（L1426-1481）；prompt/MCP instructions/AgentRuntime 大块装配（L1484-1600）；OrchestratorParts 组装 + Orchestrator::new（L1602-1625）；webhook server spawn（L1650 附近）；scheduler loop spawn（L1672）；SIGUSR1/INT/TERM/USR2 处理 + sd_notify + 热切换收尾 drain/exit（L1684-1860）。
+**run() 直接插手的主题（行号）**：全局安全配置/media data dir/shell PATH init（L882-894）；cwd 切换（L896）；AGENT.md 校验（L906）；热切换 socket 接管 + Telegram offset 重置（L923-968）；PID 文件（L970）；memory 目录（L979）；存储布局 fail-fast ×2（L989-1064）；`migration::run_auto`（L1065）；registry/MCP/skills（L1069-1082）；时区解析+调度器双建（markdown 迁移用 dummy Scheduler L1088-1129）；memory distill 配置（L1131）；UserResolver/AskRouter/KnownUsers/UserRegistry + 两次 legacy 迁移（L1141-1170）；session backend/manager（L1172-1196）；build_tools + send_message 接线（L1198-1216）；子代理注册表 + WebSearch/媒体三工具注册（L1218-1252）；WorkspaceWatcher（L1263）；DelegationCoordinator + 单/多代理分叉（L1278-1360）；启动扫描 all_sessions + 恢复/checkpoint 关联（L1363-1422）；WebSocketChannel + fd 继承（L1426-1481）；prompt/MCP instructions/AgentRuntime 大块装配（L1484-1600）；OrchestratorParts 组装 + Orchestrator::new（L1602-1625）；webhook server spawn（L1650 附近）；scheduler loop spawn（L1672）；SIGUSR1/INT/TERM/USR2 处理 + sd_notify + 热切换收尾 drain/exit（L1684-1860）。
 
 **结论：是上帝文件，但属于"合法的组合根上帝"** —— 问题不在它知道一切（这是组合根本职），而在 (a) run() 1005 行不可测；(b) build_tools 14 参数、build_registry 306 行，应拆 builder；(c) 热切换信号/sd_notify/Telegram offset 等生命周期细节混在装配逻辑里（可下沉 hot_switch/lifecycle 模块）。文件头自评 "Composition Root"，职责声明与实际一致。
 
@@ -121,7 +121,7 @@ agents/{known_users 1496, user_registry 845, user_profile 368, user_messages 354
    15. WorkspaceWatcher::spawn_managed；SessionManager::new；shell_tool 接线（L1263-1290）
    16. 单/多代理分叉：DelegationCoordinator + agent_delegate/agent_kill 等父工具 or tool_search（L1292-1360）
    17. 启动扫描 all_sessions → scan_unfinished_subagents → delegation checkpoints 关联（L1363-1422）
-   18. build_channel_accounts + ClientChannel（fd 继承/SO_REUSEPORT）（L1426-1481 + L798）
+   18. build_channel_accounts + WebSocketChannel（fd 继承/SO_REUSEPORT）（L1426-1481 + L798）
    19. build_prompt_config；AgentRuntime 装配（ResourceProvider→ContextEngine→ToolExecutor→LoopBreaker→AgentRuntime::new + with_* ×8）（L1484-1600）
    20. OrchestratorParts 组装 → Orchestrator::new → friend_ctx/SessionManager 回填 channel registry（L1602-1630）
    21. webhook server spawn（run_webhook_server）；scheduler.run() spawn（L1650-1680）

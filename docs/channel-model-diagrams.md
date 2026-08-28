@@ -45,7 +45,7 @@
 ## 2. 各 Channel 实现持有的数据
 
 ```
-ClientChannel (WebSocket，supports_streaming=true)
+WebSocketChannel (WebSocket，supports_streaming=true)
 ├─ config: ClientConfig
 ├─ message_tx/rx: mpsc<ChannelMessage>           入站消息通道
 ├─ pre_bound: Option<TcpListener>                热切换继承的 socket
@@ -58,7 +58,7 @@ ClientChannel (WebSocket，supports_streaming=true)
 ├─ session_owners: RwLock<HashMap<sid, owner>>   session → routing_key 反查
 ├─ session_manager: Arc<RwLock<Option<           会话管理 API 调用
 │      Arc<SessionManager>>>>
-└─ tool_specs / workspace_dir / skill_manager    WebUI 管理面板需要
+└─ tool_specs / workspace_dir / skill_manager    WebSocket 管理面板需要
 
 TelegramChannel (HTTP polling，supports_edit=true)
 ├─ bot_token / api_base / http: reqwest::Client  Telegram API 客户端
@@ -97,14 +97,14 @@ WechatChannel (HTTP webhook)
 - 全部持有一个 HTTP client 或自维护的连接
 
 **差异**：
-- 只有 ClientChannel 持有 `stream_contexts`（流式）和 `session_owners`（管理 API）
+- 只有 WebSocketChannel 持有 `stream_contexts`（流式）和 `session_owners`（管理 API）
 - Telegram 有最多的群组语义状态（mention_only/typing/stall）
 - WeChat 最简（只有 dedup + API client）
 
 ## 3. 数据流转 — 入站
 
 ```
-                            外部平台 (WebUI / Telegram / QQ / 企微)
+                            外部平台 (WebSocket / Telegram / QQ / 企微)
                                          │
                                          ▼
                           ┌──────────────────────────────┐
@@ -150,10 +150,10 @@ WechatChannel (HTTP webhook)
                           │     │   · Chunk / Thinking / ToolCall        │
                           │     │   · ToolResult / Done                  │
                           │     ▼                                        │
-                          │  ClientChannel.stream_contexts[rt].event_tx  │
+                          │  WebSocketChannel.stream_contexts[rt].event_tx  │
                           │     │                                        │
                           │     ▼                                        │
-                          │  WebSocket frame → WebUI                     │
+                          │  WebSocket frame → WebSocket                     │
                           └──────────────────────────────────────────────┘
 
                           ┌──────────────────────────────────────────────┐
@@ -170,7 +170,7 @@ WechatChannel (HTTP webhook)
                           │           │                                  │
                           │           ▼                                  │
                           │  各 channel 实现转平台 API：                 │
-                          │     · ClientChannel: WebSocket JSON          │
+                          │     · WebSocketChannel: WebSocket JSON          │
                           │     · TelegramChannel: sendMessage HTTP      │
                           │     · QQBotChannel: HTTP + Keyboard          │
                           │     · WechatChannel: ApiClient 推送          │
@@ -307,7 +307,7 @@ AskRouter 不直接接触 Channel — 是 Orchestrator 帮它桥接 inbound ChMs
 │  let _ = session.channel.as_ref()                                      │
 │      .map(|ch| ch.push_event(reply_target, ev))?  ← &str 索引          │
 │                                                                        │
-│  ClientChannel.stream_contexts: HashMap<String, StreamContext>         │
+│  WebSocketChannel.stream_contexts: HashMap<String, StreamContext>         │
 │      ├─ insert on first chunk (隐式)                                   │
 │      └─ remove on Done    (隐式，cancel 路径易漏)                      │
 │                                                                        │

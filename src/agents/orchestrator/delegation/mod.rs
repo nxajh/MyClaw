@@ -23,7 +23,7 @@ mod notice;
 pub(super) use dispatch::{drain_delegation_notices, process_non_active};
 pub(super) use notice::{route_notice, route_shell_completion, wake};
 
-// Test-import forwarding（P0 webui/client 批 3 模式，同 migration/mod.rs）：tests.rs 的
+// Test-import forwarding（P0 websocket/client 批 3 模式，同 migration/mod.rs）：tests.rs 的
 // `use super::*` 从本模块命名空间取绑定；cfg(test) 门控避免非测试构建下的
 // unused import（clippy -D warnings）。
 // notice_fallback_sender/notice_receiver 无 orchestrator 侧消费者（notice.rs 经自身

@@ -1,7 +1,7 @@
 //! `file.read` / `models.*` / `config.*` / `commands.list` /
 //! `daemon.restart` management-API route handlers, extracted verbatim
 //! from `client.rs::handle_api_request` (RFC
-//! docs/webui-client-split-rfc.md, batch 2: pure move — each function
+//! docs/websocket-client-split-rfc.md, batch 2: pure move — each function
 //! body is the original match-arm body, unchanged; only the wrapper
 //! signature was added.)
 

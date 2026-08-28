@@ -1,7 +1,7 @@
-//! ClientChannel — WebSocket-based channel for TUI and Web UI clients.
+//! WebSocketChannel — WebSocket-based channel for TUI and Web UI clients.
 //!
 //! Unlike other channels (Telegram, QQBot) where MyClaw is a *client* connecting
-//! to an external platform, ClientChannel runs a WebSocket *server* that TUI and
+//! to an external platform, WebSocketChannel runs a WebSocket *server* that TUI and
 //! Web UI clients connect to.
 //!
 //! ## Shared state & lock ordering
@@ -20,7 +20,7 @@ mod bus;
 mod channel;
 mod turn;
 
-pub use channel::ClientChannel;
+pub use channel::WebSocketChannel;
 
 // Test-import forwarding: `mod tests` at the bottom consumes these via
 // `use super::*`. cfg(test)-gated because after batch 3 mod.rs itself holds
@@ -39,7 +39,7 @@ use std::sync::OnceLock;
 #[cfg(test)]
 use crate::channels::message::{Channel, ChannelOutboundMessage};
 #[cfg(test)]
-use crate::config::channel::ClientConfig;
+use crate::config::channel::WebSocketConfig;
 #[cfg(test)]
 use api::{ApiContext, handle_api_request};
 #[cfg(test)]

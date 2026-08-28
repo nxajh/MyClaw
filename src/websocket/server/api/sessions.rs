@@ -1,5 +1,5 @@
 //! `sessions.*` management-API route handlers, extracted verbatim from
-//! `client.rs::handle_api_request` (RFC docs/webui-client-split-rfc.md,
+//! `client.rs::handle_api_request` (RFC docs/websocket-client-split-rfc.md,
 //! batch 2: pure move — each function body is the original match-arm
 //! body, unchanged; only the wrapper signature was added.)
 //!
@@ -149,7 +149,7 @@ pub(super) fn delete(
                 actual_owner = existing_owner.as_deref().unwrap_or("<missing>"),
                 error_kind = ?e.kind(),
                 err = %e,
-                "failed to delete WebUI session"
+                "failed to delete WebSocket session"
             );
             serde_json::json!({
                 "type": "api_error",
@@ -253,7 +253,7 @@ pub(super) fn history(id: &str, sm: &Arc<crate::agents::SessionManager>, user_id
     }).to_string()
 }
 
-/// Reconstruct a session's stored history into WebUI chat-message shape.
+/// Reconstruct a session's stored history into WebSocket chat-message shape.
 pub(super) fn reconstruct_history(
     history: &[crate::providers::capability_chat::ChatMessage],
 ) -> Vec<serde_json::Value> {

@@ -8,7 +8,7 @@
 
 **名实判断：大体相符，两处偏差。**
 - ✅ telegram/qqbot/wechat 纯适配器，与模块名相符。
-- ⚠️ `client.rs`（2852 行）名为 ClientChannel，实为 **WebUI 本地 HTTP+WebSocket JSON-RPC 服务器**：管理 sessions/memory/skills/config/daemon 等约 30 个 API 方法，反向深度依赖 `crate::agents`（SessionManager/SkillManager/UserResolver）——它不是"又一个聊天渠道"，是嵌在渠道层的 API 后端，是 channels→agents 依赖的主要源头。
+- ⚠️ `client.rs`（2852 行）名为 WebSocketChannel，实为 **WebSocket 本地 HTTP+WebSocket JSON-RPC 服务器**：管理 sessions/memory/skills/config/daemon 等约 30 个 API 方法，反向深度依赖 `crate::agents`（SessionManager/SkillManager/UserResolver）——它不是"又一个聊天渠道"，是嵌在渠道层的 API 后端，是 channels→agents 依赖的主要源头。
 - ⚠️ `message.rs` 名为消息模型，实际一半以上（~700 行）是**通用 markdown 感知文本分块算法**（`split_message_chunk` + 围栏/表格/标记配对扫描），与"消息模型"职责已分叉。
 
 ## 2. 全文件清单表（15 文件）
@@ -16,7 +16,7 @@
 | 路径 | 行数 | 职责一句话 | pub 符号数 | Channel trait 关系 |
 |---|---|---|---|---|
 | channels/mod.rs | 32 | 模块根，re-export 门面 | 7 (pub use) | — |
-| channels/client.rs | 2852 | WebUI 本地 WS/HTTP JSON-RPC 渠道（feature=client） | 11 | `impl Channel for ClientChannel` :1075 |
+| channels/client.rs | 2852 | WebSocket 本地 WS/HTTP JSON-RPC 渠道（feature=client） | 11 | `impl Channel for WebSocketChannel` :1075 |
 | channels/message.rs | 1950 | Channel trait + 消息模型 + DedupState + 通用分块算法 | 48 | **trait `Channel` 定义处** :512 |
 | channels/security.rs | 334 | AllowList/GroupAuthMode/ChannelSecurityPolicy 安全策略 | 13 | 被 trait `security_policy()` 返回 |
 | channels/turn_stream.rs | 121 | TurnStream trait（流式输出三态投递） | 3 | trait 定义，被 Channel::create_stream 返回 |
@@ -73,15 +73,15 @@
 
 **内部结构（按行号）：**
 - `Subscriber`/`SessionOutputBus` :43–174 —— 多订阅者事件总线（按 bus_key 多路复用 session 输出到各 WS 连接）
-- `ClientConnection` :175、`ClientChannel` :189（字段含 OnceLock 注入：session_manager/tool_specs/skill_manager/provider_registry/user_resolver :203–221）
+- `ClientConnection` :175、`WebSocketChannel` :189（字段含 OnceLock 注入：session_manager/tool_specs/skill_manager/provider_registry/user_resolver :203–221）
 - `start()` :294–1015 —— **721 行巨型函数**：TCP listener（pre-bound 热切换继承）→ HTTP 路由 → WS 升级 → 连接生命周期 → 会话绑定
 - `impl Channel` :1075–1242（send_message 走 SessionOutputBus 直投，listen 返回 dummy rx）
 - `ClientTurnStream` :1242–1282 —— TurnStream 薄实现（事件转发到 bus）
 - `handle_api_request` :1370–2231 —— **861 行巨型 match**，方法清单（grep 实测）：sessions.list/create/switch/rename/history/delete/delete_message、memory.list/read/write/delete、skills.list/read/write/delete、tools.list、models.list/set、config.get/get_raw/save、file.read、daemon.restart、commands.list
-- `reconstruct_history` :2233–2393 —— 存储历史 → WebUI 消息形状
+- `reconstruct_history` :2233–2393 —— 存储历史 → WebSocket 消息形状
 - tests :2398–2852（454 行，memory scope 隔离/bus_key 解析等）
 
-**它管什么：** 不是渠道生命周期调度（那在 lib.rs/agents orchestrator）；它是"第四渠道"= 本地 WebUI 的全部后端：WS 网关 + JSON-RPC API + memory/skill/config 管理入口。
+**它管什么：** 不是渠道生命周期调度（那在 lib.rs/agents orchestrator）；它是"第四渠道"= 本地 WebSocket 的全部后端：WS 网关 + JSON-RPC API + memory/skill/config 管理入口。
 **与各 channel.rs 的调用关系：** 无直接调用——通过 `Arc<dyn …>` 注入 agents 侧服务，与 tg/qqbot/wechat 平行挂在同一 trait 下，仅共享 message.rs 模型。
 
 ## 5. message.rs（1950 行）剖面
@@ -118,7 +118,7 @@
 2. **三渠道复制粘贴**：typing keepalive（tg:1021 / qq:1478 / wx:1520，~170 行）；入站 debounce 三份三样（tg:1125 / qq:2356 DeliverDebouncer / wx:1449，~220 行）；security_policy 构造三份；退避/重连骨架三份（qqbot 的 ReconnectManager :2176 已 struct 化但仅自用）。
 3. **qqbot/channel.rs:889–1227** `ingest_voice/image/video_file_attachments` 三段结构雷同（~338 行），仅 file_type 与下载端点不同，可参数化合并。
 4. **telegram/channel.rs:468–815** 发送函数 6 变体并存（send_text/send_rich_message/send_plain_message/send_rich_message_simple/send_text_html/edit_message_rich/edit_message_text_html），参数正交但未组合。
-5. **名实不符**：`client.rs` 是 WebUI API 后端却顶渠道之名并驻留渠道层（反向依赖 agents 5 类符号）；`message.rs` 半数是文本分块算法引擎，建议独立 `chunking.rs`。
+5. **名实不符**：`client.rs` 是 WebSocket API 后端却顶渠道之名并驻留渠道层（反向依赖 agents 5 类符号）；`message.rs` 半数是文本分块算法引擎，建议独立 `chunking.rs`。
 6. **巨型文件本身**：telegram/channel.rs 3589（渠道+TurnStream 497 行+测试 628 行三职责一文件）；qqbot/channel.rs 3195（渠道+限流器+防抖器+重连器 4 个内嵌组件，对照 telegram 已拆 types/、qqbot 已拆 keyboard/token/markdown_sanitize，channel.rs 仍可再拆 session/ws 层）。
 7. `wechat.rs` 单文件含协议加密（AES-ECB/PKCS7 :78–138）、API client、渠道三职责，未目录化（对照 telegram/qqbot 均已目录化）。
 
@@ -126,5 +126,5 @@
 
 - message.rs → `model.rs`（trait+类型）+ `chunking.rs`（分块算法）；对外 re-export 不变。
 - 新建 `channels/shared/`：typing keepalive、inbound debounce（统一为 qqbot 的 struct 风格）、退避/重连骨架、发送管线模板。
-- client.rs → 独立 `webui/` 或 `api/` 顶层模块（它不是渠道），`handle_api_request` 按命名空间拆 sessions/memory/skills/config。
+- client.rs → 独立 `websocket/` 或 `api/` 顶层模块（它不是渠道），`handle_api_request` 按命名空间拆 sessions/memory/skills/config。
 - 三个 channel.rs 内的 TurnStream/限流器/防抖器拆出同目录子文件。

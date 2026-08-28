@@ -13,7 +13,7 @@ fi
 
 # L1 基础层：仅引 L0 + 基础内部
 for mod in ids config str_utils scheduling_types; do
-  out=$(grep -rn "crate::\(providers\|memory\|identity\|tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null || true)
+  out=$(grep -rn "crate::\(providers\|memory\|identity\|tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|websocket\)" src/$mod/ 2>/dev/null || true)
   if [ -n "$out" ]; then
     echo "❌ L1 $mod 违规引用："; echo "$out"; violations=$((violations + 1))
   fi
@@ -21,14 +21,14 @@ done
 
 # L2 服务层：仅引 L0 + L1
 for mod in providers memory identity; do
-  out=$(grep -rn "crate::\(tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null || true)
+  out=$(grep -rn "crate::\(tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|websocket\)" src/$mod/ 2>/dev/null || true)
   if [ -n "$out" ]; then
     echo "❌ L2 $mod 违规引用："; echo "$out"; violations=$((violations + 1))
   fi
 done
 
 # L2 mcp：不引 L4/L5/L6
-out=$(grep -rn "crate::\(agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/mcp/ 2>/dev/null || true)
+out=$(grep -rn "crate::\(agents\|scheduling\|commands\|channels\|daemon\|cli\|websocket\)" src/mcp/ 2>/dev/null || true)
 if [ -n "$out" ]; then
   echo "❌ L2 mcp 违规引用 L4+："; echo "$out"; violations=$((violations + 1))
 fi
@@ -41,14 +41,14 @@ fi
 
 # L4 运行时层：不引 L5/L6
 for mod in agents scheduling_runtime commands; do
-  out=$(grep -rn "crate::\(channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null || true)
+  out=$(grep -rn "crate::\(channels\|daemon\|cli\|websocket\)" src/$mod/ 2>/dev/null || true)
   if [ -n "$out" ]; then
     echo "❌ L4 $mod 违规引用 L5/L6："; echo "$out"; violations=$((violations + 1))
   fi
 done
 
 # L5 渠道层：不引 L6
-out=$(grep -rn "crate::\(daemon\|cli\|webui\)" src/channels/ 2>/dev/null || true)
+out=$(grep -rn "crate::\(daemon\|cli\|websocket\)" src/channels/ 2>/dev/null || true)
 if [ -n "$out" ]; then
   echo "❌ L5 channels 违规引用 L6："; echo "$out"; violations=$((violations + 1))
 fi

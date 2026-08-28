@@ -1,6 +1,6 @@
-//! `Channel` trait impl for `ClientChannel` plus the per-turn
-//! `ClientTurnStream` handle (`impl TurnStream` / `impl Drop`), extracted
-//! verbatim from `client.rs` (RFC docs/webui-client-split-rfc.md, batch 3:
+//! `Channel` trait impl for `WebSocketChannel` plus the per-turn
+//! `WebSocketTurnStream` handle (`impl TurnStream` / `impl Drop`), extracted
+//! verbatim from `client.rs` (RFC docs/websocket-client-split-rfc.md, batch 3:
 //! pure move). Also hosts the `CLIENT_CAPS` static used by `capabilities()`.
 
 use std::sync::Arc;
@@ -16,13 +16,13 @@ use crate::channels::message::{
 };
 
 use super::bus::{SessionOutputBus, bus_key_candidates};
-use super::channel::ClientChannel;
+use super::channel::WebSocketChannel;
 
 static CLIENT_CAPS: crate::channels::message::ChannelCapabilities =
     crate::channels::message::ChannelCapabilities::client();
 
 #[async_trait]
-impl Channel for ClientChannel {
+impl Channel for WebSocketChannel {
     fn name(&self) -> &str {
         "client"
     }
@@ -141,7 +141,7 @@ impl Channel for ClientChannel {
         self.start().await?;
         let rx =
             self.message_rx.lock().await.take().ok_or_else(|| {
-                anyhow::anyhow!("listen() called more than once on ClientChannel")
+                anyhow::anyhow!("listen() called more than once on WebSocketChannel")
             })?;
         Ok(rx)
     }
@@ -168,7 +168,7 @@ impl Channel for ClientChannel {
         // Fresh cancel token per turn
         bus_guard.cancel = CancellationToken::new();
         bus_guard.turn_active = true;
-        Some(Box::new(ClientTurnStream {
+        Some(Box::new(WebSocketTurnStream {
             bus: Arc::clone(&bus),
             status: crate::channels::StreamDelivery::Pending,
             finished: false,
@@ -176,20 +176,20 @@ impl Channel for ClientChannel {
     }
 }
 
-/// Per-turn streaming handle for ClientChannel (RFC §7.6).
+/// Per-turn streaming handle for WebSocketChannel (RFC §7.6).
 ///
 /// Holds a shared reference to the session's `SessionOutputBus`. `push`
 /// writes through the bus — it **never fails** because the bus buffers
 /// when no subscriber is attached. This is the core decoupling: Agent
 /// runs to completion regardless of WS connection state.
-pub(crate) struct ClientTurnStream {
+pub(crate) struct WebSocketTurnStream {
     bus: Arc<SyncMutex<SessionOutputBus>>,
     status: crate::channels::StreamDelivery,
     finished: bool,
 }
 
 #[async_trait]
-impl crate::channels::TurnStream for ClientTurnStream {
+impl crate::channels::TurnStream for WebSocketTurnStream {
     async fn push(&mut self, event: TurnEvent) -> anyhow::Result<crate::channels::StreamDelivery> {
         self.bus.lock().push_event(event);
         self.status = crate::channels::StreamDelivery::Visible;
@@ -221,7 +221,7 @@ impl crate::channels::TurnStream for ClientTurnStream {
 // Drop-based safety net: if a TurnStream is dropped without finish/abort
 // (panic, accidental field overwrite), cancel the turn so Agent::run stops.
 // The bus itself survives — only the cancel token fires.
-impl Drop for ClientTurnStream {
+impl Drop for WebSocketTurnStream {
     fn drop(&mut self) {
         if !self.finished {
             self.bus.lock().cancel.cancel();

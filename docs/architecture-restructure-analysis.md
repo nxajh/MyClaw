@@ -148,7 +148,7 @@ daemon.rs（2024 行）use 仅引 agents/channels，但 inline 引用覆盖 11 �
 ### 4.3 channels（15597 行 / 15 文件）
 
 **职责**：四渠道消息适配层。名实两处大偏差：
-- **client.rs 2852 不是渠道**：是 WebUI 本地 HTTP+WS JSON-RPC 服务器（30 个 API 方法：sessions/memory/skills/config/daemon 管理），OnceLock 注入 SessionManager/SkillManager/UserResolver 反向依赖 agents——**channels→agents 反向边主要源头**
+- **client.rs 2852 不是渠道**：是 WebSocket 本地 HTTP+WS JSON-RPC 服务器（30 个 API 方法：sessions/memory/skills/config/daemon 管理），OnceLock 注入 SessionManager/SkillManager/UserResolver 反向依赖 agents——**channels→agents 反向边主要源头**
 - message.rs 1950 一半（~860 行）是通用 markdown 感知分块算法（split_message_chunk），非消息模型
 
 **三渠道对照（量化）**：typing keepalive 三份（~170 行）、debounce 三份三样（~220 行）、security_policy 构造三份、退避重连骨架三份——**合计 700-900 行同职责代码可上提共享层**。真差异（必须留子类）：协议连接/平台 markdown 方言/CDN 媒体编解码/被动回复限额/reaction/Telegram 流式。
@@ -191,7 +191,7 @@ daemon.rs（2024 行）use 仅引 agents/channels，但 inline 引用覆盖 11 �
 | scheduler.rs | 3849 | 2701/1148 | 无巨怪（top 279）；三块边界清晰 | webhook 子系统独立 |
 | telegram/channel.rs | 3589 | 2961/628 | poll_loop 505 | 拆 TurnStream+限流 |
 | qqbot/channel.rs | 3195 | 2752/443 | send_message 328 | 拆限流/防抖/重连 |
-| channels/client.rs | 2852 | 2398/454 | handle_api_request **861**+start 721 | **迁出渠道层独立 webui/** |
+| channels/client.rs | 2852 | 2398/454 | handle_api_request **861**+start 721 | **迁出渠道层独立 websocket/** |
 | delegation_coordinator.rs | 2734 | 1821/913 | delegate_with_parent **589** | 拆 checkpoint 组/worktree 组 |
 | agent.rs | 2529 | — | run_inner 895 | #146 已拆 11 文件 |
 | wechat.rs | 2245 | 2107/138 | listen 242 | 目录化（加密/API/渠道） |
@@ -289,7 +289,7 @@ daemon.rs（2024 行）use 仅引 agents/channels，但 inline 引用覆盖 11 �
 1. **agents 名实不符 26%**：借居身份域 3063 行（零内聚）+ scheduling 4582 行 + commands 2433 行
 2. **registry 不成立为独立顶层**：实为 providers facade（768 行 26 处 providers 引用）
 3. **storage 部分成立**：completion_queue/inbound_spool 语义属 orchestrator，物理错位
-4. **client.rs 不是渠道**：是 WebUI API 后端（30 个 API 方法），应迁出渠道层
+4. **client.rs 不是渠道**：是 WebSocket API 后端（30 个 API 方法），应迁出渠道层
 5. **message.rs 半数是通用分块算法**（~860 行），非消息模型
 6. **daemon.rs 合法组合根但超载**：run() 1005 行、build_tools 14 参数、build_registry 306 行
 7. **CLI 重复组合根**：cmd_chat/cmd_exec 各 ~50 行手搓 registry+tools，漂移风险
@@ -321,7 +321,7 @@ daemon.rs（2024 行）use 仅引 agents/channels，但 inline 引用覆盖 11 �
 
 1. **第一杠杆：Tool trait 宿主错位**——收窄 Session 为 ToolContext 值对象，一次改动消 29 文件引用根
 2. **第二杠杆：agents 借居域迁出**——身份域 3063 行（零内聚）+ scheduling 4582 行（仅一根线相连）+ commands 2433 行 → 独立顶层模块
-3. **第三杠杆：client.rs 迁出渠道层**——WebUI API 后端独立 webui/ 模块
+3. **第三杠杆：client.rs 迁出渠道层**——WebSocket API 后端独立 websocket/ 模块
 4. **第四杠杆：session 家族聚拢**——trait(SessionBackend)从 storage 迁到 agents/session 或独立 session crate
 5. **第五杠杆：registry 并入 providers**——消假分层边
 6. **第六杠杆：storage 编排域错位**——completion_queue/inbound_spool 迁 orchestrator

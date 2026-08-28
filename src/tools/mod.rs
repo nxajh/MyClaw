@@ -111,7 +111,7 @@ pub fn builtin_tools(
     // issue #140: keep a concrete handle so the caller can wire in the
     // SessionManager once it exists (`ShellTool::set_session_manager`) —
     // built before SessionManager in daemon.rs's composition order, same
-    // reason `ClientChannel`/`DelegationCoordinator` use a setter instead of
+    // reason `WebSocketChannel`/`DelegationCoordinator` use a setter instead of
     // a constructor param.
     let shell = Arc::new(shell);
     let tools = vec![
