@@ -1,5 +1,6 @@
 use super::*;
 use crate::providers::{ChatMessage, ContentPart};
+use crate::storage::json_file::records::SessionMeta;
 
 fn backend_with_session() -> (tempfile::TempDir, JsonFileBackend, String) {
     let dir = tempfile::tempdir().unwrap();
@@ -125,6 +126,64 @@ fn delegation_checkpoint_multiple_and_corrupt_skips() {
 
     let loaded = backend.load_delegation_checkpoints();
     assert_eq!(loaded.len(), 3, "corrupt file should be skipped");
+}
+
+#[test]
+fn concurrent_meta_writes_never_corrupt_the_file() {
+    // Regression test for the data-corruption bug where `write_json_atomic`
+    // used a single hardcoded `.tmp` path: concurrent writers all created
+    // and wrote through the *same* temp file, so one writer's `File::create`
+    // could truncate another's in-flight write before either had renamed,
+    // producing a torn/invalid `meta.json`. With a uniquely-named temp file
+    // per write, every writer's rename is independently atomic, so a
+    // concurrent reader must always see either a prior or a new, but always
+    // *valid*, meta.json — never a partial write.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let (_dir, backend, sid) = backend_with_session();
+    let backend = Arc::new(backend);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let writers: Vec<_> = (0..8)
+        .map(|i| {
+            let backend = Arc::clone(&backend);
+            let sid = sid.clone();
+            std::thread::spawn(move || {
+                for n in 0..200 {
+                    let mut meta = backend.read_meta(&sid).unwrap();
+                    meta.owner = format!("writer-{i}-{n}");
+                    backend.write_meta(&meta).unwrap();
+                }
+            })
+        })
+        .collect();
+
+    let reader = {
+        let backend = Arc::clone(&backend);
+        let sid = sid.clone();
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let meta_path = backend.meta_path(&sid);
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(bytes) = fs::read(&meta_path) {
+                    if !bytes.is_empty() {
+                        serde_json::from_slice::<SessionMeta>(&bytes)
+                            .expect("meta.json must never be torn/invalid mid-write");
+                    }
+                }
+            }
+        })
+    };
+
+    for w in writers {
+        w.join().unwrap();
+    }
+    stop.store(true, Ordering::Relaxed);
+    reader.join().unwrap();
+
+    // Final state is still valid and readable.
+    assert!(backend.read_meta(&sid).is_some());
 }
 
 #[test]

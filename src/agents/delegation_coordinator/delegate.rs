@@ -541,10 +541,18 @@ impl DelegationCoordinator {
 
             // Cleanup worktree + branch on any exit path.
             // (Merge conflicts already returned early above, preserving the worktree.)
+            //
+            // issue #147: this used to swallow the command results entirely
+            // (`let _ = ...output()`) and unconditionally log "cleaned up",
+            // so a real removal failure (locked worktree, permission error,
+            // git version quirk) left stale state on disk with the log
+            // claiming success — indistinguishable from "nothing went
+            // wrong" until a later delegation collided with the leftover
+            // branch/worktree ref. Surface failures instead of hiding them.
             if cleanup_worktree.is_some() {
                 let repo =
                     worktree_repo.expect("worktree isolation guarantees workspace for cleanup");
-                let _ = std::process::Command::new("git")
+                let remove_out = std::process::Command::new("git")
                     .args([
                         "worktree",
                         "remove",
@@ -553,13 +561,34 @@ impl DelegationCoordinator {
                     ])
                     .current_dir(repo)
                     .output();
-                if let Some(ref bn) = branch_name {
-                    let _ = std::process::Command::new("git")
+                let remove_ok = remove_out.as_ref().is_ok_and(|o| o.status.success());
+                if !remove_ok {
+                    tracing::warn!(
+                        path = %worktree_path.display(),
+                        result = ?remove_out.map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string()),
+                        "failed to remove sub-agent worktree; leftover directory needs manual/GC cleanup"
+                    );
+                }
+                let branch_ok = if let Some(ref bn) = branch_name {
+                    let branch_out = std::process::Command::new("git")
                         .args(["branch", "-D", bn])
                         .current_dir(repo)
                         .output();
+                    let ok = branch_out.as_ref().is_ok_and(|o| o.status.success());
+                    if !ok {
+                        tracing::warn!(
+                            branch = %bn,
+                            result = ?branch_out.map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string()),
+                            "failed to delete sub-agent branch; leftover ref needs manual/GC cleanup"
+                        );
+                    }
+                    ok
+                } else {
+                    true
+                };
+                if remove_ok && branch_ok {
+                    tracing::debug!(path = %worktree_path.display(), "cleaned up worktree and branch");
                 }
-                tracing::debug!(path = %worktree_path.display(), "cleaned up worktree and branch");
             }
 
             // H50: no marker file to clean up. Sub-session completion clears
@@ -595,42 +624,21 @@ impl DelegationCoordinator {
                 .remove(&sub_session_id)
                 .map(|(_, v)| v.into_inner().unwrap_or_default())
                 .unwrap_or_default();
-            let result = match result {
-                Ok(text) => {
-                    let mut parts = vec![text];
-                    if !sent_messages.is_empty() {
-                        parts.push(format!(
-                            "[子代理消息]：\n{}",
-                            sent_messages.join("\n---\n")
-                        ));
-                    }
-                    if !undelivered.is_empty() {
-                        tracing::warn!(
-                            sub_session_id = %sub_session_id,
-                            count = undelivered.len(),
-                            "sub-agent finished with unread parent messages; attaching to result"
-                        );
-                        parts.push(format!(
-                            "[主 agent 有 {} 条消息在任务结束后到达，未处理]：\n{}",
-                            undelivered.len(),
-                            undelivered.join("\n---\n")
-                        ));
-                    }
-                    Ok(parts.join("\n\n"))
-                }
-                Err(e) => {
-                    if undelivered.is_empty() {
-                        Err(e)
-                    } else {
-                        Err(anyhow::anyhow!(
-                            "{} (另有 {} 条主 agent 消息在任务结束后到达，未处理：{})",
-                            e,
-                            undelivered.len(),
-                            undelivered.join(" | ")
-                        ))
-                    }
-                }
-            };
+            if !sent_messages.is_empty() && result.is_err() {
+                tracing::warn!(
+                    sub_session_id = %sub_session_id,
+                    count = sent_messages.len(),
+                    "sub-agent terminated with unattached sent messages; folding into error"
+                );
+            }
+            if !undelivered.is_empty() && result.is_ok() {
+                tracing::warn!(
+                    sub_session_id = %sub_session_id,
+                    count = undelivered.len(),
+                    "sub-agent finished with unread parent messages; attaching to result"
+                );
+            }
+            let result = compose_delegation_result(result, sent_messages, undelivered);
 
             // GC: delete the sub-session for sync delegations only (issue
             // #106). See `should_gc_sub_session` for the rationale — this
@@ -680,5 +688,119 @@ impl DelegationCoordinator {
 
             result
         }) // end Box::pin
+    }
+}
+
+/// Fold a sub-agent's terminal `result` together with any `sent_messages`
+/// (proactive reports via `send_to_parent`, sync path — see B, 2026-08-14)
+/// and `undelivered` (parent messages that arrived after the sub-agent
+/// stopped consuming its inbox) into the text/error the parent ultimately
+/// sees.
+///
+/// issue #148: prior to this, `sent_messages` was only attached when
+/// `result` was `Ok` — a sub-agent that reported progress and then hit a
+/// terminal `Err` (kill-timeout, panic, ...) had that report silently
+/// discarded, leaving the parent with nothing but the bare error text (e.g.
+/// "sub-agent 'coder' timed out after 1800s") and no trace of what was
+/// already done.
+fn compose_delegation_result(
+    result: anyhow::Result<String>,
+    sent_messages: Vec<String>,
+    undelivered: Vec<String>,
+) -> anyhow::Result<String> {
+    match result {
+        Ok(text) => {
+            let mut parts = vec![text];
+            if !sent_messages.is_empty() {
+                parts.push(format!("[子代理消息]：\n{}", sent_messages.join("\n---\n")));
+            }
+            if !undelivered.is_empty() {
+                parts.push(format!(
+                    "[主 agent 有 {} 条消息在任务结束后到达，未处理]：\n{}",
+                    undelivered.len(),
+                    undelivered.join("\n---\n")
+                ));
+            }
+            Ok(parts.join("\n\n"))
+        }
+        Err(e) => {
+            let mut detail = String::new();
+            if !sent_messages.is_empty() {
+                detail.push_str(&format!("\n[子代理消息]：\n{}", sent_messages.join("\n---\n")));
+            }
+            if !undelivered.is_empty() {
+                detail.push_str(&format!(
+                    "\n(另有 {} 条主 agent 消息在任务结束后到达，未处理：{})",
+                    undelivered.len(),
+                    undelivered.join(" | ")
+                ));
+            }
+            if detail.is_empty() {
+                Err(e)
+            } else {
+                Err(anyhow::anyhow!("{}{}", e, detail))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod compose_result_tests {
+    use super::compose_delegation_result;
+
+    #[test]
+    fn ok_with_no_extras_passes_through_unchanged() {
+        let r = compose_delegation_result(Ok("done".to_string()), vec![], vec![]);
+        assert_eq!(r.unwrap(), "done");
+    }
+
+    #[test]
+    fn ok_attaches_sent_messages_and_undelivered() {
+        let r = compose_delegation_result(
+            Ok("done".to_string()),
+            vec!["progress report".to_string()],
+            vec!["late parent msg".to_string()],
+        );
+        let text = r.unwrap();
+        assert!(text.contains("done"));
+        assert!(text.contains("progress report"));
+        assert!(text.contains("late parent msg"));
+    }
+
+    #[test]
+    fn err_with_no_sent_messages_passes_through_unchanged() {
+        let r = compose_delegation_result(Err(anyhow::anyhow!("boom")), vec![], vec![]);
+        assert_eq!(r.unwrap_err().to_string(), "boom");
+    }
+
+    /// issue #148 regression: a terminal Err must still surface any
+    /// progress the sub-agent reported via `send_to_parent` before it was
+    /// killed — previously this was silently dropped.
+    #[test]
+    fn err_folds_in_sent_messages_instead_of_dropping_them() {
+        let r = compose_delegation_result(
+            Err(anyhow::anyhow!("sub-agent 'coder' timed out after 1800s")),
+            vec!["pushed commit abc123, watching CI".to_string()],
+            vec![],
+        );
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("timed out after 1800s"));
+        assert!(
+            msg.contains("pushed commit abc123, watching CI"),
+            "sent_messages must survive a terminal Err, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn err_folds_in_undelivered_alongside_sent_messages() {
+        let r = compose_delegation_result(
+            Err(anyhow::anyhow!("boom")),
+            vec!["report".to_string()],
+            vec!["late msg".to_string()],
+        );
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("boom"));
+        assert!(msg.contains("report"));
+        assert!(msg.contains("late msg"));
     }
 }

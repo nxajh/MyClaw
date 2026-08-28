@@ -498,10 +498,10 @@ impl SessionBackend for JsonFileBackend {
         }
         let dir = self.session_dir(session_id);
         fs::create_dir_all(&dir)?;
-        // Atomic write (temp + rename), mirroring write_json_atomic.
-        let tmp = path.with_extension("tmp");
-        fs::write(&tmp, json.as_bytes())?;
-        fs::rename(&tmp, path)?;
+        // Atomic write (uniquely-named temp + rename), mirroring write_json_atomic.
+        let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+        tmp.write_all(json.as_bytes())?;
+        tmp.persist(&path).map_err(|e| e.error)?;
         Ok(())
     }
 
