@@ -387,13 +387,13 @@ pub fn load_skills_layered(
     let user_names: std::collections::HashSet<&str> =
         user_defs.iter().map(|d| d.name.as_str()).collect();
 
-    let mut agent_filtered: Vec<SkillDefinition> = agent_defs
+    let agent_filtered: Vec<SkillDefinition> = agent_defs
         .into_iter()
         .filter(|d| {
             if user_names.contains(d.name.as_str()) {
                 warn!(
                     name = %d.name,
-                    user_path = %user_dir.unwrap().display(),
+                    user_path = ?user_dir,
                     agent_path = %d.source_path.display(),
                     "skill name conflict: user layer overrides agent layer"
                 );
