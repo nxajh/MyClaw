@@ -341,7 +341,7 @@ impl JsonFileBackend {
     /// Mark-and-sweep legacy blob GC: delete any `blobs/*.bin` whose hash is not
     /// referenced by a `live` message. `live` should include both surviving
     /// active messages and any archived segments that are also externalized.
-    fn sweep_blobs(&self, session_id: &str, live: &HashSet<String>) {
+    pub(super) fn sweep_blobs(&self, session_id: &str, live: &HashSet<String>) {
         let dir = self.blobs_dir(session_id);
         let Ok(entries) = fs::read_dir(&dir) else {
             return;

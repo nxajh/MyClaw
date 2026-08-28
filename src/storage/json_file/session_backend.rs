@@ -5,6 +5,7 @@ use std::io::Write;
 use chrono::Utc;
 
 use super::backend::JsonFileBackend;
+use super::backend::collect_blob_hashes;
 use super::records::{SegmentRecord, SessionMeta};
 use crate::storage::{ChatMessage, SavedSessionFile, SessionBackend, SessionInfo, SummaryRecord};
 
