@@ -14,7 +14,7 @@ mod fold;
 mod summarizer;
 
 pub use engine::CompactionEngine;
-pub(crate) use engine::CompactionResult;
+// CompactionResult 保持 engine 内 pub(crate)（无外部具名消费者，裸转发触发 unused import——P1-2/P2 教训）
 
 #[cfg(test)]
 mod tests;
