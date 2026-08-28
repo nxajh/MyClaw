@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use crate::channels::message::ChannelInboundMessage;
 use crate::channels::{Channel, FoldCandidate, TurnStream};
 use crate::ProcessingStatus;
-use super::super::turn_stream::TelegramTurnStream;
+use super::turn_stream::TelegramTurnStream;
 
 mod api;
 mod session;
