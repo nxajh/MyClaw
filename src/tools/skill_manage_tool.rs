@@ -383,9 +383,53 @@ impl SkillManageTool {
     /// found'" undersold it: nothing ever produced "not found" for a
     /// shared-only skill, the writes/deletes silently succeeded against the
     /// shared library).
-    fn get_skill_dir(&self, name: &str, ctx: &crate::api::tool::ToolContext) -> Result<PathBuf, String> {
-        let dir = self.skills.skill_dir(name, Some(&ctx.owner))
+    ///
+    /// RFC #101 P1.1 additionally makes the agent layer (`skills_root`,
+    /// `~/.myclaw/skills`) read-only for `skill_manage`: it is a system-level
+    /// layer shared by all owners and managed through the workspace
+    /// filesystem/git, yet the registry's owner-aware resolution happily
+    /// handed an agent-layer dir to any owner's edit/patch/delete/
+    /// write_file/remove_file, letting one user mutate (or delete) system
+    /// skills for everyone. Writes now only ever land in the caller's user
+    /// layer (`users/{owner}/skills`); the same-name check order (user →
+    /// agent → shared) matches the registry's shadowing precedence, so a
+    /// user-layer copy still resolves first and stays writable. The leading
+    /// `validate_name` also closes a path-injection hole: edit/patch/delete
+    /// previously reached directory resolution with unvalidated names
+    /// (`../`, `/`, …).
+    fn get_skill_dir(
+        &self,
+        name: &str,
+        ctx: &crate::api::tool::ToolContext,
+    ) -> Result<PathBuf, String> {
+        validate_name(name)?;
+
+        let user_root = self.users_root.join(crate::ids::bare_dir_name(&ctx.owner));
+
+        let dir = self
+            .skills
+            .skill_dir(name, Some(&ctx.owner))
             .ok_or_else(|| format!("Skill '{}' not found.", name))?;
+
+        // User layer (users/{owner}/skills) — the only writable layer.
+        // Checked before `skills_root`: the roots are not guaranteed to be
+        // disjoint, and a user skill nested under skills_root must still
+        // resolve as user-owned.
+        if dir.starts_with(&user_root) {
+            return Ok(dir);
+        }
+
+        // Agent layer (skills_root) — read-only for skill_manage.
+        if dir.starts_with(&self.skills_root) {
+            return Err(format!(
+                "Skill '{name}' comes from the agent layer ({}) and is read-only \
+                 here — it is managed via the workspace filesystem/git, not via \
+                 skill_manage. To customize it, use action='create' to make a \
+                 same-named skill in your user layer, which shadows the \
+                 agent-layer one.",
+                self.skills_root.display()
+            ));
+        }
 
         if let Some(shared) = &self.agents_skills_dir {
             if dir.starts_with(shared) {
@@ -398,7 +442,14 @@ impl SkillManageTool {
             }
         }
 
-        Ok(dir)
+        // Registry returned a directory outside every known layer root.
+        // Nothing writes there by design — refuse rather than fall through.
+        Err(format!(
+            "Skill '{name}' resolves outside your user skills directory \
+             ({}) and is read-only here — skill_manage writes are limited \
+             to your own user-layer skills.",
+            user_root.display()
+        ))
     }
 
     fn refresh_skills(&self) {
