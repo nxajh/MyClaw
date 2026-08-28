@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::agents::delegation::{DelegationEvent, DelegationStatus};
 use crate::agents::session::SessionManager;
