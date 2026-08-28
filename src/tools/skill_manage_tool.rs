@@ -399,8 +399,11 @@ impl SkillManageTool {
     fn refresh_skills(&self) {
         // #174 收敛点：分层加载 + def→Skill 转换 + 整体替换都收在
         // SkillRegistry::reload_layered 的 agents 层实现里。
-        self.skills
-            .reload_layered(&self.skills_root, self.agents_skills_dir.as_deref());
+        self.skills.reload_layered(
+            Some(self.users_root.as_path()),
+            &self.skills_root,
+            self.agents_skills_dir.as_deref(),
+        );
     }
 }
 

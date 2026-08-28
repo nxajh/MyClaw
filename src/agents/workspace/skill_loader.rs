@@ -761,7 +761,7 @@ description: "Get current weather conditions. Trigger words: weather, forecast, 
         write_skill(&local, "skill-a", "skill-a", "# A (local)");
         write_skill(&agents, "skill-b", "skill-b", "# B (shared)");
 
-        let merged = load_skills_layered(&local, Some(&agents));
+        let merged = load_skills_layered(None, &local, Some(&agents));
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].name, "skill-a");
         assert_eq!(merged[1].name, "skill-b");
@@ -775,7 +775,7 @@ description: "Get current weather conditions. Trigger words: weather, forecast, 
         write_skill(&local, "skill-a", "skill-a", "# local version");
         write_skill(&agents, "skill-a", "skill-a", "# shared version");
 
-        let merged = load_skills_layered(&local, Some(&agents));
+        let merged = load_skills_layered(None, &local, Some(&agents));
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].prompt_body, "# local version");
     }
@@ -786,7 +786,7 @@ description: "Get current weather conditions. Trigger words: weather, forecast, 
         let local = dir.path().join("local");
         write_skill(&local, "skill-a", "skill-a", "# A");
 
-        let merged = load_skills_layered(&local, None);
+        let merged = load_skills_layered(None, &local, None);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].name, "skill-a");
     }
@@ -797,7 +797,7 @@ description: "Get current weather conditions. Trigger words: weather, forecast, 
         let local = dir.path().join("local");
         write_skill(&local, "skill-a", "skill-a", "# A");
 
-        let merged = load_skills_layered(&local, Some(Path::new("/nonexistent")));
+        let merged = load_skills_layered(None, &local, Some(Path::new("/nonexistent")));
         assert_eq!(merged.len(), 1);
     }
 

@@ -56,6 +56,9 @@ pub struct AttachmentManager {
     memory_index: Option<String>,
     /// 上次注入的日期 "YYYY-MM-DD"（用于区分首次 vs 日期变化）
     last_injected_date: Option<String>,
+    /// 上次 diff_skills 时的会话 owner（FQID）——build_message 渲染
+    /// added delta 的技能摘要时按同一 owner 视角取 Skill。
+    owner: Option<String>,
 }
 
 impl AttachmentManager {
@@ -180,6 +183,7 @@ impl AttachmentManager {
     /// 与当前 SkillManager 做 diff，生成 skill listing delta。
     /// 从 history 重建 announced 状态。
     pub fn diff_skills(&mut self, skills: &SkillManager, history: &[ChatMessage], owner: Option<&str>) {
+        self.owner = owner.map(|s| s.to_string());
         let announced = Self::rebuild_from_history(history);
         // Only agent_invocable skills appear in the model's index.
         let current: HashSet<String> = skills
@@ -537,7 +541,7 @@ impl AttachmentManager {
                     .to_string(),
             );
             for name in &delta.added {
-                let skill = skills.get(name);
+                let skill = skills.get(name, self.owner.as_deref());
                 let summary = skill.map(|s| s.injected_summary()).unwrap_or_default();
                 // issue #125: fold internal newlines to spaces so a
                 // multi-line `description` renders as one Markdown bullet
@@ -706,7 +710,7 @@ mod tests {
         });
 
         let mut am = AttachmentManager::new();
-        am.diff_skills(&mgr, &empty_history(, None));
+        am.diff_skills(&mgr, &empty_history(), None);
         let msg = am.build_message(&mgr).unwrap();
         let text = msg.text_content();
 
@@ -735,7 +739,7 @@ mod tests {
         });
 
         let mut am = AttachmentManager::new();
-        am.diff_skills(&mgr, &empty_history(, None));
+        am.diff_skills(&mgr, &empty_history(), None);
         let msg = am.build_message(&mgr).unwrap();
         let text = msg.text_content();
 
@@ -747,7 +751,7 @@ mod tests {
     fn empty_history_sends_all_skills() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a", "b"]);
-        am.diff_skills(&skills, &empty_history(, None));
+        am.diff_skills(&skills, &empty_history(), None);
 
         let msg = am.build_message(&skills).unwrap();
         let text = msg.text_content();
@@ -761,7 +765,7 @@ mod tests {
         let skills = make_skills(&["a"]);
 
         // First: produce a system-reminder and "persist" it into a fake history.
-        am.diff_skills(&skills, &empty_history(, None));
+        am.diff_skills(&skills, &empty_history(), None);
         let msg = am.build_message(&skills).unwrap();
         am.clear_pending();
 
@@ -776,7 +780,7 @@ mod tests {
     fn added_skill_appears_in_delta() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
-        am.diff_skills(&skills, &empty_history(, None));
+        am.diff_skills(&skills, &empty_history(), None);
         let msg = am.build_message(&skills).unwrap();
         am.clear_pending();
 
@@ -795,7 +799,7 @@ mod tests {
     fn removed_skill_appears_in_delta() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a", "b"]);
-        am.diff_skills(&skills, &empty_history(, None));
+        am.diff_skills(&skills, &empty_history(), None);
         let msg = am.build_message(&skills).unwrap();
         am.clear_pending();
 
@@ -814,7 +818,7 @@ mod tests {
         // After compaction, history is empty → next diff sends full listing.
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
-        am.diff_skills(&skills, &empty_history(, None));
+        am.diff_skills(&skills, &empty_history(), None);
         am.clear_pending();
 
         // Simulate compaction: history is gone.
@@ -856,7 +860,7 @@ mod tests {
     fn merged_sections_in_single_message() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
-        am.diff_skills(&skills, &empty_history(, None));
+        am.diff_skills(&skills, &empty_history(), None);
         am.diff_agents(&[("coder".into(), "programmer".into())], &empty_history());
 
         let msg = am.build_message(&skills).unwrap();

@@ -434,7 +434,8 @@ pub fn cmd_skill(ctx: CommandContext<'_>) -> String {
     }
 
     let mut lines = vec![format!("📚 **已加载 Skill ({}个)**  \n\n", count)];
-    let mut entries: Vec<_> = skills.skills_iter().collect();
+    // CLI 命令没有会话 owner 视角（RFC #101：无 owner 上下文 = agent + 共享库）。
+    let mut entries: Vec<_> = skills.skills_iter(None).collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     for (name, skill) in entries {
         let desc = if skill.description.is_empty() {

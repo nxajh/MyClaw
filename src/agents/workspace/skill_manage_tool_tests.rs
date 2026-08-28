@@ -43,7 +43,7 @@ async fn test_create_and_refresh() {
         "content": "---\nname: mys\ndescription: \"My skill\"\n---\n# My Skill\n\nDo stuff."
     }), &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), agent_name: "main".to_string(), ..Default::default() }).await.unwrap();
     assert!(result.success, "{}", result.output);
-    assert!(mgr.read().get("mys").is_some());
+    assert!(mgr.read().get("mys", None).is_some());
 }
 #[tokio::test]
 async fn test_create_reserved_name() {
@@ -148,7 +148,7 @@ async fn test_delete() {
         .await
         .unwrap();
     assert!(result.success, "{}", result.output);
-    assert!(mgr.read().get("myskill").is_none());
+    assert!(mgr.read().get("myskill", None).is_none());
 }
 /// Like `setup`, but the skill lives only in a separate shared-library
 /// dir (`~/.agents/skills` in production), not under `local_workspace`'s
@@ -188,7 +188,7 @@ async fn test_delete_rejects_shared_library_skill() {
         shared.path().join("skills/sharedskill/SKILL.md").exists(),
         "shared skill file must survive a rejected delete"
     );
-    assert!(mgr.read().get("sharedskill").is_some());
+    assert!(mgr.read().get("sharedskill", None).is_some());
 }
 #[tokio::test]
 async fn test_patch_rejects_shared_library_skill() {

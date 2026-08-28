@@ -177,6 +177,21 @@ impl SkillManager {
         agent_defs: Vec<SkillDefinition>,
         shared_defs: Vec<SkillDefinition>,
     ) {
+        self.reload_user_agent_layers(user_skills_map, agent_defs);
+        self.shared_skills.clear();
+        for def in shared_defs {
+            self.shared_skills.insert(def.name.clone(), Skill::from_definition(&def));
+        }
+    }
+
+    /// Refresh only the user + agent layers, leaving the shared library
+    /// untouched — used by the web-editor save path, whose lifecycle for
+    /// `~/.agents/skills` belongs to config and the workspace watcher.
+    pub fn reload_user_agent_layers(
+        &mut self,
+        user_skills_map: HashMap<String, Vec<SkillDefinition>>,
+        agent_defs: Vec<SkillDefinition>,
+    ) {
         self.user_skills.clear();
         for (user_id, defs) in user_skills_map {
             let mut map = HashMap::new();
@@ -189,11 +204,6 @@ impl SkillManager {
         self.agent_skills.clear();
         for def in agent_defs {
             self.agent_skills.insert(def.name.clone(), Skill::from_definition(&def));
-        }
-
-        self.shared_skills.clear();
-        for def in shared_defs {
-            self.shared_skills.insert(def.name.clone(), Skill::from_definition(&def));
         }
     }
 
@@ -314,11 +324,10 @@ impl crate::api::skill_registry::SkillRegistry for parking_lot::RwLock<SkillMana
             .collect()
     }
 
-    fn reload_layered(&self, user_skills_dir: Option<&Path>, skills_dir: &Path, agents_skills_dir: Option<&Path>) {
-        let user_skills_map = if let Some(base) = user_skills_dir.and_then(|p| p.parent()) {
-            super::skill_loader::load_all_users_skills(base)
-        } else {
-            std::collections::HashMap::new()
+    fn reload_layered(&self, users_root: Option<&Path>, skills_dir: &Path, agents_skills_dir: Option<&Path>) {
+        let user_skills_map = match users_root {
+            Some(root) => super::skill_loader::load_all_users_skills(root),
+            None => std::collections::HashMap::new(),
         };
         let agent_defs = super::skill_loader::load_skills_from_dir(skills_dir);
         let shared_defs = if let Some(d) = agents_skills_dir {
