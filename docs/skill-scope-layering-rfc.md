@@ -22,7 +22,7 @@
 | 分层模型 | 两层：user 层 + agent 层（对齐 memory 两层与 `load_skills_layered` 惯例） |
 | 存量迁移 | **全部 21 个（4 draft + 17 active）归 user 层**，agent 层从空开始，此后仅经「提升」进入 |
 | agent 层写权限 | **保持全体可写**（信任模型现状不变；#99 写保护仅针对 `~/.agents/skills` 共享库） |
-| extract 默认落点 | user 层（从谁的会话提取落谁的层），不允许直接产 agent 层 draft |
+| extract 默认落点 | user 层（从谁的会话提取落谁的层），除 headless/无主会话外，普通用户交互不允许直接产 agent 层 draft |
 
 ## 2. 设计
 
@@ -34,8 +34,7 @@
 ~/.agents/skills/                           # 跨 agent 共享库（不变，#83/#99）
 ```
 
-- frontmatter 增加 `scope: user` + `user_id`（冗余于目录位置，保持跨层扫描一致性；
-  缺省无 scope 字段时按目录位置判定——迁移后 agent 层不再需要 scope 字段）。
+- **目录权威，不增加顶层 Frontmatter**：遵循 Agent Skills 规范（#123，不自造顶层字段），技能层归属**完全由物理目录位置决定**，不需要在 frontmatter 中冗余 `scope` 和 `user_id`（有别于记忆系统的处理方式）。
 - user 层目录纳入 `users/{uuid}/` 实体布局（现仅 meta.json），与 sessions/jobs 同构。
 
 ### 2.2 加载与冲突
@@ -85,7 +84,7 @@ triage 词表（保留/合并/删除）增加「**提升**」：
   已知代价；如需保留个别技能全员可见，迁移后逐个 `promote` 即可。
 - 方式：停机迁移脚本（镜像 `migrate-layout.py` 模式）：
   1. 建 `users/{operator_uuid}/skills/`；
-  2. `git mv` 语义搬移 21 个目录 + frontmatter 补 `scope: user` / `user_id`；
+  2. `git mv` 语义搬移 21 个目录至新层，不改动 frontmatter（由目录定层）；
   3. 校验：`list_draft_skill_names` / `load_skills_from_dir` 对新位置计数一致；
   4. 回滚：脚本幂等，支持 `--rollback`。
 
