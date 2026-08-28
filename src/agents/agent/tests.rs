@@ -158,7 +158,7 @@ impl Tool for NamedTool {
     async fn execute(
         &self,
         _args: serde_json::Value,
-        _session: &Session,
+        _ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         Ok(ToolResult {
             success: true,
