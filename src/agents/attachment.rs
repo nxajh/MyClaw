@@ -419,7 +419,7 @@ impl AttachmentManager {
             sections.push(Self::render_autonomy(delta));
         }
         if let Some(delta) = self.pending.get(&AttachmentKind::SkillListing) {
-            sections.push(Self::render_skills(delta, skills));
+            sections.push(Self::render_skills(delta, skills, self.owner.as_deref()));
         }
         if let Some(delta) = self.pending.get(&AttachmentKind::AgentListing) {
             sections.push(Self::render_agents(delta));
@@ -523,7 +523,7 @@ impl AttachmentManager {
 
     // ── Private render ──────────────────────────────────────────────────
 
-    fn render_skills(delta: &Delta, skills: &SkillManager) -> String {
+    fn render_skills(delta: &Delta, skills: &SkillManager, owner: Option<&str>) -> String {
         let mut lines = vec!["## Skills".to_string()];
 
         if !delta.removed.is_empty() {
@@ -541,7 +541,7 @@ impl AttachmentManager {
                     .to_string(),
             );
             for name in &delta.added {
-                let skill = skills.get(name, self.owner.as_deref());
+                let skill = skills.get(name, owner);
                 let summary = skill.map(|s| s.injected_summary()).unwrap_or_default();
                 // issue #125: fold internal newlines to spaces so a
                 // multi-line `description` renders as one Markdown bullet
