@@ -40,6 +40,10 @@ pub use backend::JsonFileBackend;
 use std::fs;
 #[cfg(test)]
 use records::SegmentRecord;
+// 方法调用语法（backend.create_session(...) 等）需要 trait 在作用域——
+// 词频 grep 抓不到的依赖（P0 批 3 教训重演，CI Test 阶段 E0599 实测补）
+#[cfg(test)]
+use crate::storage::SessionBackend;
 
 #[cfg(test)]
 mod tests;
