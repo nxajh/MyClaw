@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use super::super::flow::{DeliverDebouncer, RateLimiter, ReplyLimiter};
 use super::super::keyboard::*;
