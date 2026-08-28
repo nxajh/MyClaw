@@ -255,7 +255,7 @@ pub struct ChannelConfigs {
     pub wechat: Option<WechatChannelConfig>,
     pub telegram: Option<TelegramChannelConfig>,
     pub qqbot: Option<QQBotChannelConfig>,
-    pub client: Option<ClientConfig>,
+    pub client: Option<WebSocketConfig>,
 }
 
 impl ChannelConfigs {
@@ -292,11 +292,11 @@ impl ChannelConfigs {
     }
 }
 
-// ── ClientConfig ─────────────────────────────────────────────────────────────
+// ── WebSocketConfig ─────────────────────────────────────────────────────────────
 
 /// WebSocket client channel configuration (TUI / Web UI).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClientConfig {
+pub struct WebSocketConfig {
     /// Whether this channel is enabled.
     #[serde(default)]
     pub enabled: bool,
@@ -322,7 +322,7 @@ fn default_max_connections() -> u32 {
     10
 }
 
-impl Default for ClientConfig {
+impl Default for WebSocketConfig {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -369,7 +369,7 @@ allowed_users = ["wxid_abc123"]
             "app_id = \"a\"\nclient_secret = \"s\"",
         );
         assert!(!qq.unwrap().tts, "qqbot tts must default to off");
-        let cl = toml::from_str::<ClientConfig>("enabled = true");
+        let cl = toml::from_str::<WebSocketConfig>("enabled = true");
         assert!(!cl.unwrap().tts, "client tts must default to off");
     }
 

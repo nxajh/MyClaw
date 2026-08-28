@@ -18,7 +18,7 @@ MyClaw 单 crate 内逻辑分层（无编译器边界，靠依赖方向断言维
 | **L3 工具层** | tools | L0 + L1 + L2（不引 L4/L5） | `grep -r "use crate::" src/tools/` 不匹配 agents/scheduling/commands/channels |
 | **L4 运行时层** | agents（runtime 核心）, scheduling_runtime, commands | L0-L3 | `grep -r "use crate::" src/{agents,scheduling_runtime,commands}/` 不匹配 channels/daemon |
 | **L5 渠道层** | channels | L0-L4（顶层驱动） | `grep -r "use crate::" src/channels/` 仅匹配 L0-L4 |
-| **L6 组合根** | daemon, cli, webui | 全引 | 唯一合法的"全知"点 |
+| **L6 组合根** | daemon, cli, websocket | 全引 | 唯一合法的"全知"点 |
 
 ### 1.2 断言脚本
 
@@ -41,18 +41,18 @@ fi
 
 # L1 基础层：仅引 L0 + 基础内部
 for mod in ids config str_utils scheduling_types; do
-  if grep -rq "use crate::\(providers\|memory\|identity\|tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null; then
+  if grep -rq "use crate::\(providers\|memory\|identity\|tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|websocket\)" src/$mod/ 2>/dev/null; then
     echo "❌ L1 $mod 违规引用："
-    grep -rn "use crate::\(providers\|memory\|identity\|tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/$mod/
+    grep -rn "use crate::\(providers\|memory\|identity\|tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|websocket\)" src/$mod/
     violations=$((violations + 1))
   fi
 done
 
 # L2 服务层：仅引 L0 + L1
 for mod in providers memory identity; do
-  if grep -rq "use crate::\(tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null; then
+  if grep -rq "use crate::\(tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|websocket\)" src/$mod/ 2>/dev/null; then
     echo "❌ L2 $mod 违规引用："
-    grep -rn "use crate::\(tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/$mod/
+    grep -rn "use crate::\(tools\|agents\|scheduling\|commands\|channels\|daemon\|cli\|websocket\)" src/$mod/
     violations=$((violations + 1))
   fi
 done
@@ -66,24 +66,24 @@ fi
 
 # L4 运行时层：不引 L5/L6
 for mod in agents scheduling_runtime commands; do
-  if grep -rq "use crate::\(channels\|daemon\|cli\|webui\)" src/$mod/ 2>/dev/null; then
+  if grep -rq "use crate::\(channels\|daemon\|cli\|websocket\)" src/$mod/ 2>/dev/null; then
     echo "❌ L4 $mod 违规引用 L5/L6："
-    grep -rn "use crate::\(channels\|daemon\|cli\|webui\)" src/$mod/
+    grep -rn "use crate::\(channels\|daemon\|cli\|websocket\)" src/$mod/
     violations=$((violations + 1))
   fi
 done
 
 # L5 渠道层：仅引 L0-L4
-if grep -rq "use crate::\(daemon\|cli\|webui\)" src/channels/ 2>/dev/null; then
+if grep -rq "use crate::\(daemon\|cli\|websocket\)" src/channels/ 2>/dev/null; then
   echo "❌ L5 channels 违规引用 L6："
-  grep -rn "use crate::\(daemon\|cli\|webui\)" src/channels/
+  grep -rn "use crate::\(daemon\|cli\|websocket\)" src/channels/
   violations=$((violations + 1))
 fi
 
 # L2 mcp：不引 L4/L5/L6
-if grep -rq "use crate::\(agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/mcp/ 2>/dev/null; then
+if grep -rq "use crate::\(agents\|scheduling\|commands\|channels\|daemon\|cli\|websocket\)" src/mcp/ 2>/dev/null; then
   echo "❌ L2 mcp 违规引用 L4+："
-  grep -rn "use crate::\(agents\|scheduling\|commands\|channels\|daemon\|cli\|webui\)" src/mcp/
+  grep -rn "use crate::\(agents\|scheduling\|commands\|channels\|daemon\|cli\|websocket\)" src/mcp/
   violations=$((violations + 1))
 fi
 
@@ -125,8 +125,8 @@ fi
 | agents | 38157 | 顶层 | **拆** | L4 | 借居域迁出（identity/scheduling/commands） |
 | scheduling_runtime | 0 | 不存在 | **新建** | L4 | 从 agents 迁出：scheduler.rs 等运行时（4291 行），需回调 agent turn |
 | commands | 0 | 不存在 | **新建** | L4 | 从 agents 迁出：commands/（2433 行） |
-| channels | 15597 | 顶层 | **留** | L5 | 渠道适配层；client.rs 迁 webui；Channel trait 迁 api |
-| webui | 0 | 不存在 | **新建** | L6 | 从 channels 迁出：client.rs（2852 行 WebUI API 后端） |
+| channels | 15597 | 顶层 | **留** | L5 | 渠道适配层；client.rs 迁 websocket；Channel trait 迁 api |
+| websocket | 0 | 不存在 | **新建** | L6 | 从 channels 迁出：client.rs（2852 行 WebSocket API 后端） |
 | registry | 768 | 顶层 | **并入 providers** | L2 | 实为 providers facade（26 处 providers 引用），消假分层边 |
 | mcp | 2923 | 顶层 | **留** | L2 | MCP server 生命周期；mcp→agents::session 违规在 Phase 1.5 修复 |
 | cli | 1826 | 顶层 | **留** | L6 | bin 侧；重复组合根逻辑与 daemon 对齐 |
@@ -136,7 +136,7 @@ fi
 | hot_switch/update_state/signal/sys_info | ~673 | 顶层 | **留** | L6 | 小工具，daemon+cli 双端共用 |
 
 **处置汇总**：
-- 新建 5 模块：api（L0）、identity（L2）、scheduling_types（L1）、scheduling_runtime/commands（L4）、webui（L6）
+- 新建 5 模块：api（L0）、identity（L2）、scheduling_types（L1）、scheduling_runtime/commands（L4）、websocket（L6）
 - 拆 1 模块：agents（借居域迁出）
 - 并入 1 模块：registry→providers
 - 留 15 模块（部分内部调整）
@@ -160,7 +160,7 @@ fi
 
 | 文件 | 行数 | 去向 | 理由 |
 |---|---:|---|---|
-| channels/client.rs | 2852 | webui/client.rs | WebUI API 后端，非渠道 |
+| channels/client.rs | 2852 | websocket/client.rs | WebSocket API 后端，非渠道 |
 
 ### 3.3 storage 编排域迁出
 
@@ -308,15 +308,15 @@ fi
 
 ### Phase 3：channels 错位迁出（1 PR）
 
-1. **新建 webui 模块**：`src/webui/mod.rs`
-2. **移动 client.rs**：`channels/client.rs` → `webui/client.rs`（2852 行）
+1. **新建 websocket 模块**：`src/websocket/mod.rs`
+2. **移动 client.rs**：`channels/client.rs` → `websocket/client.rs`（2852 行）
 3. **更新 daemon 引用路径**
 4. **验收**：`verify-layering.sh` L5 合规；channels→agents 归零（除 TurnEvent）
 
 **冲突窗口**：无。
 
 > **实施记录（3a = PR #163，3b = PR #164）**：原计划 1 PR，实际按风险拆为 3a/3b 两个纯搬家 PR，后续 3c/3d。
-> - **3a `#163`**：webui → L6（`channels/client.rs` → `src/webui/client.rs`，2852 行 100% rename；channels 15447 → 12591）。channels 侧**不做** re-export（channels→webui 是 L5→L6 反向依赖，实测脚本立即报违规），消费方仅 daemon 2 处直接改。
+> - **3a `#163`**：websocket → L6（`channels/client.rs` → `src/websocket/client.rs`，2852 行 100% rename；channels 15447 → 12591）。channels 侧**不做** re-export（channels→websocket 是 L5→L6 反向依赖，实测脚本立即报违规），消费方仅 daemon 2 处直接改。
 > - **3b `#164`**：Channel 契约六组下沉 api——TurnEvent/VersionedEvent（git mv 自 agents，241 行零改动）、RunMode（自 config/agent.rs 剪出，config 侧 re-export）、TurnStream/FoldCandidate、ChannelSecurityPolicy+AllowList+GroupAuthMode、ChannelInboundMessage、Channel trait+CallbackAction。31 文件 +492/−471，api 504 → 1222。channels 侧全符号 re-export；L4 侧 15 处 use + 67 处全限定改引 api，**L4→channels 归零**（评审核实本地复现）。遗留（PR 描述如实披露）：api 内 11 处 `crate::channels::` 全限定引用（trait 默认方法引用未下沉契约类型族：ProcessingStatus/ToolEvent/ChannelCapabilities+MINIMAL_CAPABILITIES+LenUnit/MessageScope/AuthDecision/GroupStat/security::evaluate），脚本只匹配 `use crate::` 前缀漏检——**处置归 3c**（下沉该批类型，或加严脚本 L0 检查至全路径匹配使债务显性化）。
 > - **SCC 解环归属澄清（本轮评审指出）**：#163 PR 描述"后续"曾把 agents↔scheduling_runtime SCC 解环一并列入 3b 范围，3b 实际未做（行为性改动不混入纯搬家 PR，见本节开头原则）。该 SCC（2c 遗留，见 §2c 实施记录）在此明确归属 **3d**：SchedulerEvent/CronTrigger 下沉 + scheduling_runtime 定义回调 trait 由 agents 实现（run_scheduled_turn/OrchestratorCtx/is_silent_ok 方向反转），独立 PR。Phase 11 layering 转 strict 前必须完成，否则门禁无出处可查。
 > - Phase 3 后续序列：**3c** = Capability trait 入 api（消 L1 config→providers 4 行：provider.rs:11-12、routing.rs:7、mod.rs:868）+ 3b 残留处置；**3d** = SCC 解环。
@@ -444,7 +444,7 @@ fi
 ### 5.3 全局变更放大 A/B
 
 - [ ] churn 对比（agents 1135 → <800）：**无法在重构窗口内自证**——90 天窗口含全部搬移噪声（当前实测 63,700 行变更），"重构后 90 天"窗口尚不存在，需重构完成后满 90 天（约 2026-11 底）复测
-- [ ] 巨文件数（19 → <10）：实测当前 **13 个** ≥1400 行，未达目标。其中 webui/client.rs 2852 为计划外模块（webui 不在处置表），规划范围内 12 个（qqbot 2833 / telegram 2647 / delegation_coordinator 2609 / agent.rs 2529 / compaction_engine 1993 / scheduler 1986 / orchestrator/delegation 1646 / migration 1619 / webhook 1533 / known_users 1516 / json_file 1492 / memory_tool 1406）——Phase 8 已拆九批（#171–#179），剩余为下一轮拆分的候选清单（agent.rs #145 已有 RFC）
+- [ ] 巨文件数（19 → <10）：实测当前 **13 个** ≥1400 行，未达目标。其中 websocket/client.rs 2852 为计划外模块（websocket 不在处置表），规划范围内 12 个（qqbot 2833 / telegram 2647 / delegation_coordinator 2609 / agent.rs 2529 / compaction_engine 1993 / scheduler 1986 / orchestrator/delegation 1646 / migration 1619 / webhook 1533 / known_users 1516 / json_file 1492 / memory_tool 1406）——Phase 8 已拆九批（#171–#179），剩余为下一轮拆分的候选清单（agent.rs #145 已有 RFC）
 
 ### 5.4 CI 全绿
 
@@ -520,7 +520,7 @@ fi
 | 2c | #160 | 58423b6 | scheduling runtime 迁出 → L4 |
 | 2d | #161 | 33141eb | commands 域迁出 → L4 |
 | 2 记录 | #162 | 425ba1b | Phase 2 实施记录 |
-| 3a | #163 | 22e1fb0 | webui ClientChannel 迁 L6 |
+| 3a | #163 | 22e1fb0 | websocket WebSocketChannel 迁 L6 |
 | 3b | #164 | e936d4d | 渠道契约下沉 api |
 | 3c | #165 | 5064cbc | Capability 契约入 api + L0 检查加严 |
 | 3d | #166 | 201faaa | agents↔scheduling_runtime SCC 解环（方向反转） |
@@ -536,4 +536,4 @@ fi
 
 部署：2026-08-27 `myclaw update` 热切换 03f459e → **0d21325**（落后 50+ 提交一次补齐）；doctor 17/17、13 provider + 3 渠道健康、热切换回合恢复实测通过。
 
-遗留（非阻塞）：§5.3 两项 A/B 指标未达成/未可测——巨文件 13 ≥ 目标 10（含计划外 webui/client.rs，见上）；churn 需重构后 90 天窗口复测。均留待后续计划。
+遗留（非阻塞）：§5.3 两项 A/B 指标未达成/未可测——巨文件 13 ≥ 目标 10（含计划外 websocket/client.rs，见上）；churn 需重构后 90 天窗口复测。均留待后续计划。

@@ -31,17 +31,17 @@
 
 ## 1. 问题陈述
 
-### 1.1 WebUI 回复显示两次
+### 1.1 WebSocket 回复显示两次
 
-Agent 回复通过两条互不感知的路径同时到达 WebUI：
+Agent 回复通过两条互不感知的路径同时到达 WebSocket：
 
-1. **Streaming 路径**：`Agent::run` → `collect_stream` → `push_event(TurnEvent::Chunk/Done)` → WebSocket → WebUI
+1. **Streaming 路径**：`Agent::run` → `collect_stream` → `push_event(TurnEvent::Chunk/Done)` → WebSocket → WebSocket
 2. **`channel.send` 路径**：`SessionContext::process_turn` 在 `agent.run` 返回后调用
    `channel.send()`（commit `49e408a` 后此调用在 process_turn 内部，不在 orchestrator）
-   → WebSocket → WebUI
+   → WebSocket → WebSocket
 
 Streaming 已交付完整文本后，`channel.send` 又发一次 `{"type":"message","content":"..."}`，
-WebUI 检测到 `done:true` 的 assistant 消息已存在，创建一条全新的重复消息。
+WebSocket 检测到 `done:true` 的 assistant 消息已存在，创建一条全新的重复消息。
 
 **根因**：`process_turn` 的 fallback send 不区分 streaming 和非 streaming channel，
 对所有 channel 都执行 `send()`。
@@ -106,13 +106,13 @@ pub struct SendMessage {
 
 ### 目标
 
-1. 修复 WebUI 回复双显示 bug（Phase 0）
+1. 修复 WebSocket 回复双显示 bug（Phase 0）
 2. 引入 `ChannelCapabilities` 结构体，集中声明各 channel 的能力（Phase 1）
 3. 按 platform 实际计量单位切分消息，修复 Telegram UTF-16 bug（Phase 1）
 4. 引入 `MessagePayload` 枚举统一现有的文本 / 按钮 / 媒体三类发送接口，替代
    `SendMessage` 字段膨胀（Phase 2）—— Voice/Poll/Card 等到对应功能 PR 出现时
    作为新 variant 加入，不在本次范围
-5. 新增 `edit_message` / `delete_message`，为非 WebUI channel 的流式推送和交互
+5. 新增 `edit_message` / `delete_message`，为非 WebSocket channel 的流式推送和交互
    闭环打基础（Phase 3）
 6. 预留群组安全策略抽象（Phase 4）
 7. 预留按钮回调通用化（Phase 5）
@@ -139,7 +139,7 @@ pub struct SendMessage {
 
 ```
 Channel (trait)
-├── ClientChannel    — WebSocket server (TUI/WebUI)，支持 streaming
+├── WebSocketChannel    — WebSocket server (TUI/WebSocket)，支持 streaming
 ├── TelegramChannel  — Telegram Bot API polling
 ├── QQBotChannel     — QQ Bot HTTP + WebSocket
 └── WeChatChannel    — 企业微信回调
@@ -152,7 +152,7 @@ QQBot 目前不支持 edit/delete API，send 内部自行调用 `split_message_c
 ### 3.2 当前消息流（用户消息 → agent 回复 → 显示）
 
 ```
-WebUI → WebSocket → ClientChannel.listen()
+WebSocket → WebSocket → WebSocketChannel.listen()
   → mpsc::Sender<ChannelMessage> → Orchestrator
     → session_ctx.process_turn()
       → Agent::run()
@@ -177,7 +177,7 @@ WebUI → WebSocket → ClientChannel.listen()
 | `orchestrator.rs` L726 | process_turn 返回 Err 的错误通知 | 始终发送 | 无（错误需保证送达） |
 | `orchestrator.rs` L884 | startup recovery 恢复响应 | 否（无 push_event） | 无 |
 | `orchestrator.rs` L1322 | startup recovery 发送 | 否 | 无 |
-| **`session_context.rs` L223** | **process_turn 内部 fallback send** | **是（ClientChannel）** | **需加条件** |
+| **`session_context.rs` L223** | **process_turn 内部 fallback send** | **是（WebSocketChannel）** | **需加条件** |
 
 **结论**：只有 `session_context.rs` 一处需要加 `!channel.supports_streaming()`
 条件判断。其余场景都是一次性控制消息或非 streaming 路径，不受影响。
@@ -273,7 +273,7 @@ class BasePlatformAdapter(ABC):
 **选择 MyClaw 路线**：`supports_streaming()` 条件判断。
 
 理由：
-- MyClaw 的 streaming 通道（ClientChannel）和非 streaming 通道（Telegram/QQBot）边界清晰
+- MyClaw 的 streaming 通道（WebSocketChannel）和非 streaming 通道（Telegram/QQBot）边界清晰
 - 不需要 OpenClaw 式的三种 reply kind（tool/block/final），MyClaw 的 `TurnEvent` 已经涵盖了 chunk/tool_call/tool_result/done
 - 不需要 Hermes 式的 `already_sent` 标志位追踪，因为 `process_turn` 的调用方（orchestrator）可以直接判断
 
@@ -304,7 +304,7 @@ Ok(turn_result) => {
 见 §7.5（Streaming 可靠性契约）。
 
 简单总结：
-- ClientChannel 已经有 `dedup_state` 做 WebSocket 断连重连后的事件 replay
+- WebSocketChannel 已经有 `dedup_state` 做 WebSocket 断连重连后的事件 replay
 - `push_event` 改为返回 `Result<()>`（默认 `Ok(())`）让 channel 实现可以 log
   / metric 失败事件，但 `Agent::run` 不基于该返回值做策略决策
 - 如果将来出现可观测的丢失率，再考虑扩展 trait（如 `send_event_ack`）；
@@ -375,7 +375,7 @@ impl ChannelCapabilities {
         }
     }
 
-    /// WebUI/WebSocket channel 能力
+    /// WebSocket/WebSocket channel 能力
     pub const fn client() -> Self {
         let mut c = Self::minimal();
         c.supports_streaming = true;
@@ -746,7 +746,7 @@ no-op 实现 + `Ok(())` 满足契约。`Agent::run` 的 §8.1 守卫保证它的
 的理由：
 1. 不同传输（WS / SSE / Telegram editMessageText）的重试语义差别大，统一在
    Agent.run 写会很丑
-2. ClientChannel 已经有 `dedup_state` 重连重放机制；这是 channel 私有实现细节
+2. WebSocketChannel 已经有 `dedup_state` 重连重放机制；这是 channel 私有实现细节
 3. Agent.run 一旦做 fallback，就回到了 Phase 0 之前的双发 bug
 
 **实现侧建议**：channel 实现 `push_event` 时返回 `Err` 主要用于 log /
@@ -760,7 +760,7 @@ metrics / 测试 assert，不期望调用方做策略决策。
 两个结构性弱点：
 
 1. **per-turn 状态的归属是 channel 私有的、按 `reply_target` 字符串索引的 map**
-   （`ClientChannel.stream_contexts: HashMap<String, StreamContext>`）。
+   （`WebSocketChannel.stream_contexts: HashMap<String, StreamContext>`）。
    - 新建 / 销毁的时机散落在 `push_event` 实现里靠"看见首个 chunk 才创建、看见
      Done 才清理"隐式管理；cancel 抢断、客户端断连等异常路径会留下孤立条目。
    - Agent 那侧每次 push 都做一次字符串 hash 查找，热路径上微小但持续的开销。
@@ -882,7 +882,7 @@ impl Drop for ClientTurnStream {
 | 时点 | 状态 |
 |---|---|
 | Phase 0（按 §8.1 原计划） | 仅加 `!supports_streaming()` 守卫，保持 `push_event` 接口 |
-| Phase 1.5（新增 phase） | 引入 `TurnStream` / `StreamDelivery` / `Channel::create_stream`；ClientChannel 提供 `ClientTurnStream` 实现；Session 加 `turn_stream` 字段；Agent::run 切到 `session.turn_stream` 路径 |
+| Phase 1.5（新增 phase） | 引入 `TurnStream` / `StreamDelivery` / `Channel::create_stream`；WebSocketChannel 提供 `ClientTurnStream` 实现；Session 加 `turn_stream` 字段；Agent::run 切到 `session.turn_stream` 路径 |
 | Phase 1.5 完成 | 删除 `Channel::push_event` 和 `Channel::cancel_signal`；删除各 channel 的 `stream_contexts` map |
 
 §7.5 的契约在 Phase 1.5 后由 §7.6.4 重述版替代，但**语义不变**——只是从 channel
@@ -890,7 +890,7 @@ impl Drop for ClientTurnStream {
 
 #### 7.6.7 待 RFC 落地时还需确认
 
-- `finish` 返回值能 await 到什么程度？ClientChannel 走 WS ack 可以确认 Visible→
+- `finish` 返回值能 await 到什么程度？WebSocketChannel 走 WS ack 可以确认 Visible→
   FinalDelivered；TelegramEditStream 走 HTTP 200 也可以；但实现 SHOULD 文档化
   "最长 await N 秒后降级为 Visible 返回"。
 - `create_stream` 返回 None 后 `session.turn_stream` 保持 None；Agent::run 的
@@ -939,7 +939,7 @@ match result {
 `orchestrator.rs:724` 仍然无条件 `channel.send(MSG_TURN_FAILED)`，因为流式不
 保证错误已推送。
 
-### 8.2 未来：非 WebUI channel 的 edit-based streaming
+### 8.2 未来：非 WebSocket channel 的 edit-based streaming
 
 当 Telegram/QQBot 实现 `edit_message` 后，可以扩展 `process_turn` 中的流式推送：
 
@@ -974,7 +974,7 @@ max_message_length = 2000  # codepoints
 
 ## 10. 各 Channel 实现影响
 
-### ClientChannel（WebUI/TUI）
+### WebSocketChannel（WebSocket/TUI）
 
 | 改动 | 内容 |
 |------|------|
@@ -982,7 +982,7 @@ max_message_length = 2000  # codepoints
 | 防重复 | orchestrator 不再 `channel.send()`，已通过 TurnEvent 交付 |
 | `send_payload` | 保持现有 `send()` 的 JSON 格式 `{type:"message", session, content}`，扩展 payload 类型映射 |
 
-**注意**：`ClientChannel::send()` 通过 `session_owners` 映射找到 WebSocket 连接，`push_event` 通过 `stream_contexts` 映射找到 event_tx。两者用不同的 key（session_key vs reply_target），但这恰好是同一个值。
+**注意**：`WebSocketChannel::send()` 通过 `session_owners` 映射找到 WebSocket 连接，`push_event` 通过 `stream_contexts` 映射找到 event_tx。两者用不同的 key（session_key vs reply_target），但这恰好是同一个值。
 
 ### TelegramChannel
 
@@ -1032,7 +1032,7 @@ QQBot 的 `send()` 内部自行调用 `split_message_chunk(&msg.content, QQ_MAX_
 
 ## 11. 实施阶段
 
-### Phase 0：修复 WebUI 双显示 bug（P0）
+### Phase 0：修复 WebSocket 双显示 bug（P0）
 
 **范围**：仅改 `src/agents/session_context.rs` 的 process_turn 内 fallback send 块
 
@@ -1048,7 +1048,7 @@ if let Some(ch) = channel_for_send {
 }
 ```
 
-**风险**：极低。`supports_streaming()` 已有，ClientChannel 返回 `true`，其他 channel 返回 `false`。
+**风险**：极低。`supports_streaming()` 已有，WebSocketChannel 返回 `true`，其他 channel 返回 `false`。
 
 ### Phase 1：引入 ChannelCapabilities + message_len_unit（P1）
 
@@ -1058,7 +1058,7 @@ if let Some(ch) = channel_for_send {
 - `pub static MINIMAL_CAPABILITIES: ChannelCapabilities` 编译期常量
 - Channel trait 新增 `capabilities()` / `message_len()` 默认方法（**不**包含
   `format_message`——见 §7.3）
-- ClientChannel / TelegramChannel / QQBotChannel 覆盖 `capabilities()` 返回各自常量
+- WebSocketChannel / TelegramChannel / QQBotChannel 覆盖 `capabilities()` 返回各自常量
 - 改造 `split_message_chunk()` 接受 `LenUnit` 参数（**同时修复 Telegram UTF-16
   计量 bug**）
 - TelegramChannel 的 `chunk_for_telegram` 改用 `self.message_len()` 替代
@@ -1081,7 +1081,7 @@ if let Some(ch) = channel_for_send {
   `TurnStream`）
 - Session struct 新增 transient 字段 `turn_stream: Option<Box<dyn TurnStream>>`，
   custom `Clone` 重置为 None；snapshot 序列化跳过
-- ClientChannel：实现 `ClientTurnStream`，把现有 `stream_contexts: HashMap<...>`
+- WebSocketChannel：实现 `ClientTurnStream`，把现有 `stream_contexts: HashMap<...>`
   里的逐 reply_target 状态收进 stream owned state；删除 channel 上的
   HashMap 字段
 - Agent::run：streaming push 路径从 `channel.push_event(rt, ev).await` 改为
@@ -1109,7 +1109,7 @@ if let Some(ch) = channel_for_send {
 本轮显式关闭），需走 send_payload 兜底；Some 意味着流式已交付完整文本，
 不重复发。两种写法**任选其一保留**即可（推荐后者，更直接）。
 
-**风险**：中。涉及 Session 字段、Agent::run 路径切换、ClientChannel 重构。
+**风险**：中。涉及 Session 字段、Agent::run 路径切换、WebSocketChannel 重构。
 但全部在 Phase 0 守卫保护下进行——任何阶段回归到双发 bug 都能被 §12 Phase 0
 测试用例捕获。
 
@@ -1124,7 +1124,7 @@ if let Some(ch) = channel_for_send {
 - **重构 attachments / image_urls**：所有走 `SendMessage.attachments` 或
   `image_urls` 的调用点改为 `send_payload(target, MessagePayload::Media{...})`
 - 各 channel 实现覆盖 `send_payload()`：Telegram 完整支持三个 variant；QQBot
-  完整支持 `Text` + `Interactive`，`Media` 降级；ClientChannel 全部支持
+  完整支持 `Text` + `Interactive`，`Media` 降级；WebSocketChannel 全部支持
 - Phase 2 结束时，所有 callsite 不再读 `SendMessage.inline_buttons` /
   `attachments` / `image_urls`，为附录 A 的 Phase 4 删除 `SendMessage` 做铺垫
 
@@ -1192,10 +1192,10 @@ if let Some(ch) = channel_for_send {
 
 ### Phase 0
 
-- [ ] WebUI 发消息后，agent 回复只出现一次（不出现重复）
+- [ ] WebSocket 发消息后，agent 回复只出现一次（不出现重复）
 - [ ] Telegram/QQBot 回复正常发送（不受 `supports_streaming()` 判断影响）
-- [ ] 错误消息（`MSG_TURN_FAILED`）仍然正常发送到 WebUI（走 orchestrator 的 Err 分支）
-- [ ] 流式中断场景：ClientChannel 断连后重连，仍能看到完整回复（验证现有
+- [ ] 错误消息（`MSG_TURN_FAILED`）仍然正常发送到 WebSocket（走 orchestrator 的 Err 分支）
+- [ ] 流式中断场景：WebSocketChannel 断连后重连，仍能看到完整回复（验证现有
   `dedup_state` 重放机制不被守卫破坏）
 
 ### Phase 1
@@ -1207,7 +1207,7 @@ if let Some(ch) = channel_for_send {
 
 ### Phase 1.5
 
-- [ ] ClientChannel `create_stream(rt)` 返回 `Some(_)`，QQBot/Wechat 返回 `None`
+- [ ] WebSocketChannel `create_stream(rt)` 返回 `Some(_)`，QQBot/Wechat 返回 `None`
 - [ ] `ClientTurnStream::push` 在 WS 正常时返回 `Ok(Visible)`，断连重连期间
   返回 `Ok(Pending)`，最终 `finish` 返回 `FinalDelivered`
 - [ ] Agent::run 不再调用 `channel.push_event` / `channel.cancel_signal`
@@ -1218,7 +1218,7 @@ if let Some(ch) = channel_for_send {
   走 `abort` 收尾（不 finish）
 - [ ] Drop 兜底：在 Agent::run panic 路径下，Session 析构触发
   `ClientTurnStream::drop`，cancel_token 被点亮（验证孤立 WS 资源被清理）
-- [ ] 双发回归：WebUI 单次提问，回复仍只显示一次（Phase 0 守卫等价改写后保持
+- [ ] 双发回归：WebSocket 单次提问，回复仍只显示一次（Phase 0 守卫等价改写后保持
   正确）
 
 ### Phase 2
@@ -1236,7 +1236,7 @@ if let Some(ch) = channel_for_send {
 - [ ] Telegram `edit_message` 更新已发消息内容
 - [ ] Telegram `delete_message` 删除指定消息
 - [ ] QQBot `edit_message` 正常工作（或返回 Err，由实际 API 决定）
-- [ ] WebUI 不受影响（不调用 edit/delete）
+- [ ] WebSocket 不受影响（不调用 edit/delete）
 
 ### Phase 4
 
@@ -2017,7 +2017,7 @@ limit, LenUnit::Codepoints)`，让 QQBot 改动可以分批做。
 
 - Phase 0 守卫让 streaming channel 完全负责自己的可靠性
 - `push_event` 返回 `Result<()>` 用于 log/metric，不参与策略决策
-- ClientChannel 已有 `dedup_state` 重连重放机制
+- WebSocketChannel 已有 `dedup_state` 重连重放机制
 - Phase 1.5 切到 `TurnStream` 后：`push` 返回 `Result<StreamDelivery>` 提供
   Pending/Visible/FinalDelivered 三态；Drop 触发 best-effort abort 兜底
 - 若出现实际可观测丢失率再扩展 trait（如 `acknowledge_event(rt, event_id)`），

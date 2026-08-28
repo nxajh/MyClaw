@@ -610,13 +610,13 @@ pub const fn qqbot() -> Self {
    - 同样消费 `ChannelFileBody`；
    - 不接收 path/bytes/base64 common type。
 
-### 7.5 ClientChannel / WebUI / TUI
+### 7.5 WebSocketChannel / WebSocket / TUI
 
-当前 `ChannelCapabilities::client()` 声明 `supports_file_send: false` / `supports_file_receive: true`，表示 WebUI/TUI 可以接收用户上传文件，但当前 outbound 文件发送尚未实现。
+当前 `ChannelCapabilities::client()` 声明 `supports_file_send: false` / `supports_file_receive: true`，表示 WebSocket/TUI 可以接收用户上传文件，但当前 outbound 文件发送尚未实现。
 
 最终要求：
 
-- 如果 WebUI/TUI 能接收 outbound 文件 stream/body，应实现 `send_message` 并将 `supports_file_send` 改为 true；
+- 如果 WebSocket/TUI 能接收 outbound 文件 stream/body，应实现 `send_message` 并将 `supports_file_send` 改为 true；
 - 如果不能，应保持 `supports_file_send` 为 false；
 - 不允许 capability 声明支持但 adapter fallback 成无效文本。
 
@@ -796,12 +796,12 @@ tools.register(Arc::new(crate::tools::SendMessageTool::new()));
 
 `SendMediaTool` 已停止注册并删除源码文件；历史中的 `send_media` 调用只通过 absent-tool fold 兼容。
 
-### Step 4：改造 Telegram / QQBot / WeChat / ClientChannel
+### Step 4：改造 Telegram / QQBot / WeChat / WebSocketChannel
 
 - Telegram 实现 stream/body 文件发送；
 - QQBot 实现 adapter 最后一公里 base64；
 - WeChat 明确 unsupported 或实现 native upload；
-- ClientChannel capability 与实现对齐。
+- WebSocketChannel capability 与实现对齐。
 
 ### Step 5：改造 inbound listen 返回类型
 
@@ -1064,7 +1064,7 @@ pub struct ChannelCapabilities {
 - Telegram 通常二者都为 true；
 - QQBot 若 outbound 文件已实现，应将 `supports_file_send` 设为 true；
 - WeChat 若当前只支持文本，则二者为 false；
-- ClientChannel / WebUI / TUI 必须按实际实现声明，不能声明支持但无有效实现。
+- WebSocketChannel / WebSocket / TUI 必须按实际实现声明，不能声明支持但无有效实现。
 
 ---
 
@@ -1142,7 +1142,7 @@ channel.send_message(&message).await?;
 ## 16. 已知限制
 
 - **`SendOptions.cancellation_token`**：已在类型中声明但尚未在任何 adapter 发送路径中使用，作为预留扩展点保留。
-- **ClientChannel / WeChat outbound 文件**：当前 `supports_file_send: false`，不支持 outbound 文件发送。
+- **WebSocketChannel / WeChat outbound 文件**：当前 `supports_file_send: false`，不支持 outbound 文件发送。
 
 ---
 

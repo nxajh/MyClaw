@@ -95,11 +95,11 @@ ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 
 [features]
-default = ["wechat", "qqbot", "telegram", "client", "tui"]
+default = ["wechat", "qqbot", "telegram", "websocket", "tui"]
 qqbot = ["tokio-tungstenite", "silk2wav"]
 wechat = ["aes", "ecb", "md-5", "urlencoding"]
 telegram = []
-client = ["tokio-tungstenite"]
+websocket = ["tokio-tungstenite"]
 tui = ["dep:ratatui", "dep:crossterm", "tokio-tungstenite"]
 
 [profile.release]

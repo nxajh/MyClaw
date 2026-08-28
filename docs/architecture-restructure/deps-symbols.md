@@ -423,7 +423,7 @@
 
 ## daemon → channels
 
-- `ClientChannel`: 2 处 — daemon.rs:1435, daemon.rs:1437
+- `WebSocketChannel`: 2 处 — daemon.rs:1435, daemon.rs:1437
 - `Channel`: 1 处 — daemon.rs
 - `telegram`: 1 处 — daemon.rs:811
 - `wechat`: 1 处 — daemon.rs:828

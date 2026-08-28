@@ -1,5 +1,5 @@
 //! Management-API router, extracted verbatim from `client.rs` (RFC
-//! docs/webui-client-split-rfc.md, batch 2: pure move).
+//! docs/websocket-client-split-rfc.md, batch 2: pure move).
 //!
 //! [`ApiContext`] and the [`handle_api_request`] string-exact match
 //! skeleton live here; each route arm's body moved unchanged into its

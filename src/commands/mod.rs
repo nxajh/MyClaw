@@ -98,7 +98,7 @@ pub fn parse_command(content: &str) -> Option<(&str, &str)> {
 }
 
 /// Return a catalog of all available slash commands as `(name, description)` pairs.
-/// Used by the WebUI to power slash-command autocomplete.
+/// Used by the WebSocket to power slash-command autocomplete.
 pub fn command_catalog() -> Vec<(&'static str, &'static str)> {
     vec![
         ("help", "Show available commands"),

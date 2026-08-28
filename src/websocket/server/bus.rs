@@ -1,5 +1,5 @@
 //! Session output bus, extracted verbatim from `client.rs` (RFC
-//! docs/webui-client-split-rfc.md, batch 1: pure move).
+//! docs/websocket-client-split-rfc.md, batch 1: pure move).
 //!
 //! [`Subscriber`], [`SessionOutputBus`] and [`bus_key_candidates`] keep their
 //! original bodies; only `pub(super)` was added where `client.rs` references
@@ -145,7 +145,7 @@ impl SessionOutputBus {
 }
 
 /// Candidate session-bus keys for a receiver address, priority-ordered and
-/// deduped. `ClientChannel` buses are keyed by the identity routing key
+/// deduped. `WebSocketChannel` buses are keyed by the identity routing key
 /// (`client:default:web-user:{user}`), but `receiver.id` arrives in three
 /// forms depending on the caller:
 ///

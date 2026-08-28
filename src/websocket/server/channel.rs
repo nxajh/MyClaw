@@ -1,7 +1,7 @@
-//! ClientChannel core: `ClientConnection`, `ClientChannel` and its inherent
+//! WebSocketChannel core: `WebSocketConnection`, `WebSocketChannel` and its inherent
 //! impl (construction, deferred-init setters, the WebSocket-server `start`
 //! loop), extracted verbatim from `client.rs` (RFC
-//! docs/webui-client-split-rfc.md, batch 3: pure move).
+//! docs/websocket-client-split-rfc.md, batch 3: pure move).
 //!
 //! Only `pub(super)` was added where sibling `turn.rs` references the item:
 //! fields `config` / `session_buses` / `message_rx` / `user_resolver` and
@@ -23,7 +23,7 @@ use crate::channels::message::{
     ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
     MessageReceiver, MessageSender,
 };
-use crate::config::channel::ClientConfig;
+use crate::config::channel::WebSocketConfig;
 
 use super::api::{ApiContext, handle_api_request};
 use super::bus::{SessionOutputBus, bus_key_candidates};
@@ -31,7 +31,7 @@ use super::bus::{SessionOutputBus, bus_key_candidates};
 // ── Client Connection ───────────────────────────────────────────────────────
 
 /// A single connected client.
-struct ClientConnection {
+struct WebSocketConnection {
     /// WebSocket sender — kept for the outgoing forwarder task but no longer
     /// read by send_message (which routes through session_buses instead).
     #[allow(dead_code)]
@@ -43,10 +43,10 @@ struct ClientConnection {
     sessions: std::collections::HashSet<String>,
 }
 
-// ── ClientChannel ───────────────────────────────────────────────────────────
+// ── WebSocketChannel ───────────────────────────────────────────────────────────
 
-pub struct ClientChannel {
-    pub(super) config: ClientConfig,
+pub struct WebSocketChannel {
+    pub(super) config: WebSocketConfig,
     /// Outgoing messages for Orchestrator (filled by WS handlers).
     message_tx: mpsc::Sender<ChannelInboundMessage>,
     /// One-time take for listen().
@@ -56,8 +56,8 @@ pub struct ClientChannel {
     pre_bound: SyncMutex<Option<std::net::TcpListener>>,
     /// Per-session output buses (survive WS disconnects).
     pub(super) session_buses: Arc<RwLock<HashMap<String, Arc<SyncMutex<SessionOutputBus>>>>>,
-    /// Active connections: connection_id → ClientConnection.
-    connections: Arc<RwLock<HashMap<String, ClientConnection>>>,
+    /// Active connections: connection_id → WebSocketConnection.
+    connections: Arc<RwLock<HashMap<String, WebSocketConnection>>>,
     /// Session manager for management API (set once after construction).
     session_manager: Arc<OnceLock<Arc<crate::agents::SessionManager>>>,
     /// Tool specs for management API (set after construction).
@@ -80,8 +80,8 @@ pub struct ClientChannel {
     pub(super) user_resolver: Arc<OnceLock<Arc<crate::agents::UserResolver>>>,
 }
 
-impl ClientChannel {
-    pub fn new(config: ClientConfig) -> Self {
+impl WebSocketChannel {
+    pub fn new(config: WebSocketConfig) -> Self {
         let (message_tx, message_rx) = mpsc::channel(100);
         Self {
             config,
@@ -253,7 +253,7 @@ impl ClientChannel {
                             let mut conns = connections.write();
                             conns.insert(
                                 conn_id.clone(),
-                                ClientConnection {
+                                WebSocketConnection {
                                     ws_sender: ws_sender.clone(),
                                     active_session: String::new(),
                                     sessions: std::collections::HashSet::new(),
@@ -307,7 +307,7 @@ impl ClientChannel {
                                 // before sending any other message type.
                                 // If auth_token is None, all connections are pre-authenticated.
                                 let mut is_authenticated = auth_token_clone.is_none();
-                                // Permission/session owner identity. For WebUI this is a stable
+                                // Permission/session owner identity. For WebSocket this is a stable
                                 // logical user; client_id remains only a per-browser device id.
                                 // Default matches the auth branch's fallback ("default") so
                                 // token-less deployments derive the same identity rk
@@ -525,7 +525,7 @@ impl ClientChannel {
                                                 .to_string();
 
                                             // Inline text-file attachments into the prompt
-                                            // ({name, content} pairs sent by the WebUI).
+                                            // ({name, content} pairs sent by the WebSocket).
                                             if let Some(arr) = parsed["attachments"].as_array() {
                                                 for a in arr {
                                                     let nm = a["name"].as_str().unwrap_or("file");
@@ -642,7 +642,7 @@ impl ClientChannel {
 
                                             // Ensure session bus exists + subscribe (in case
                                             // auth wasn't called, e.g. token-less TUI). For
-                                            // WebUI the bus was already subscribed during auth.
+                                            // WebSocket the bus was already subscribed during auth.
                                             // session_key_clone is already the identity rk;
                                             // derive it from client_user_id if still unset.
                                             if session_key_clone.is_empty() {
@@ -775,7 +775,7 @@ impl ClientChannel {
 
                                             // Align the management-API session scope
                                             // with the orchestrator's session key
-                                            // (channel:account:sender) so the WebUI
+                                            // (channel:account:sender) so the WebSocket
                                             // sees the same sessions chat actually uses.
                                             let api_user_id =
                                                 format!("client:default:{}", client_user_id);

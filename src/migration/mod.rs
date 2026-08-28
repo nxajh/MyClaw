@@ -37,7 +37,7 @@ mod users;
 pub use plan::{build_plan, default_base_dir, run_auto};
 pub use types::{Backup, MigrationReport, MigrationPlan, Step};
 
-// Test-import forwarding（P0 webui/client 批 3 模式）：tests.rs 的
+// Test-import forwarding（P0 websocket/client 批 3 模式）：tests.rs 的
 // `use super::*` 从本模块命名空间取绑定；cfg(test) 门控避免非测试构建
 // 下的 unused import（clippy -D warnings）。
 #[cfg(test)]

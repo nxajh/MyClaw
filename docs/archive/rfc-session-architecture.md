@@ -2,7 +2,7 @@
 
 > 状态：草案 v2
 > 日期：2026-05-21
-> 背景：WebUI sessions.switch bug 修复过程中发现的设计问题
+> 背景：WebSocket sessions.switch bug 修复过程中发现的设计问题
 
 ---
 
@@ -49,7 +49,7 @@ orchestrator → handle.tx.send(msg) → run_session_actor 从 rx 取出
 
 ### 6. user_id 名不副实
 
-`user_id` 实际是路由 key（`"telegram:bot1:12345"`），不是真正的用户标识。WebUI 开两个标签页就是两个"用户"，session 互不可见。用户信息（USER.md）是全局共享的，无法 per-user。
+`user_id` 实际是路由 key（`"telegram:bot1:12345"`），不是真正的用户标识。WebSocket 开两个标签页就是两个"用户"，session 互不可见。用户信息（USER.md）是全局共享的，无法 per-user。
 
 ### 7. RequestBuilder 职责混杂
 
@@ -548,7 +548,7 @@ pub struct SessionNotOwned {
 ```rust
 struct SessionOverride {
     run_mode: Option<RunMode>,              // 触发源决定，cron=Background
-    permission_mode: Option<PermissionMode>,// 用户在 WebUI/命令改
+    permission_mode: Option<PermissionMode>,// 用户在 WebSocket/命令改
     model: Option<String>,                  // 用户切模型
     thinking: Option<ThinkingConfig>,       // 跟 model
 }
@@ -654,19 +654,19 @@ trait Channel: Send + Sync {
 }
 ```
 
-`target` 来自 `session.last_message.reply_target`——对 ClientChannel 就是 WS auth token。
+`target` 来自 `session.last_message.reply_target`——对 WebSocketChannel 就是 WS auth token。
 
-ClientChannel 实现：
+WebSocketChannel 实现：
 
 ```rust
-struct ClientChannel {
+struct WebSocketChannel {
     connections: DashMap<u64, ClientConnection>,
     streams: DashMap<String, ClientStream>,    // target (reply_target) → (event_tx, cancel)
     // ...
 }
 
 #[async_trait]
-impl Channel for ClientChannel {
+impl Channel for WebSocketChannel {
     async fn push_event(&self, target: &str, event: TurnEvent) {
         if let Some(s) = self.streams.get(target) {
             let _ = s.event_tx.try_send(event);
@@ -791,19 +791,19 @@ impl UserResolver {
 
 未配置映射时 user_id = routing_key，行为等价现状。
 
-**UserResolver 的边界**：**只是只读视图层**——同一 user 的 rk_telegram 和 rk_webui 各有各的 active session，互不打通。user_id 只用于：
+**UserResolver 的边界**：**只是只读视图层**——同一 user 的 rk_telegram 和 rk_websocket 各有各的 active session，互不打通。user_id 只用于：
 - 列 session 列表（`list_sessions_for_user(uid)` 返回 owner = uid 的全部 session，跨 rk 可见）
 - Memory 路径（`workspace/users/{uid}/memory/`）
 - UserProfile 加载
 - 不用于 SessionManager.sessions 表的 key——仍然按 rk
 
-**暂不支持跨 channel 接管 session**：在 webui 看到 telegram 创建的 session 时只能浏览历史，不能 switch 进去继续聊。`switch_session(rk_webui, sid)` 仅接受本 rk 拥有的 session，否则返回 `SessionNotOwned`。
+**暂不支持跨 channel 接管 session**：在 websocket 看到 telegram 创建的 session 时只能浏览历史，不能 switch 进去继续聊。`switch_session(rk_websocket, sid)` 仅接受本 rk 拥有的 session，否则返回 `SessionNotOwned`。
 
 未来若引入"接管"功能，作为独立的显式 API（force_takeover）补，不混入 switch_session。
 
-### WebUI sender 要求
+### WebSocket sender 要求
 
-WebUI 必须和其他 channel 一样有**稳定的 sender 身份**——sender 就是 auth token：
+WebSocket 必须和其他 channel 一样有**稳定的 sender 身份**——sender 就是 auth token：
 
 ```
 WebSocket auth 消息：
@@ -818,7 +818,7 @@ verify_token(token) 通过后：
 - **不同用户用不同 token** → 不同 routing_key → 不同 session 视图
 - 不再支持"匿名连接 / per-conn id"——auth message 缺 token 直接拒绝
 
-实现层面 `ClientChannel` 内部维护：
+实现层面 `WebSocketChannel` 内部维护：
 - `connections: DashMap<conn_id, ws_sender>`——具体 WS 投递通道
 - `streams: DashMap<String, ClientStream>`——按 `reply_target` (= sender = token) 索引当前流式 turn 的 event_tx + cancel
 
@@ -895,7 +895,7 @@ retain_work_units = 3
 # ...
 
 [users]    # 阶段 4
-albert.routing_keys = ["telegram:bot1:12345", "client:webui:any"]
+albert.routing_keys = ["telegram:bot1:12345", "client:websocket:any"]
 ```
 
 **不出现的旧字段**：
@@ -1179,7 +1179,7 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
 | `SessionManager.cache` + `LoopRegistry.sessions` | 双层缓存（rk→sid + sid→AgentLoop），需 evict 同步 | 单表 `sessions: HashMap<rk, Arc<SessionContext>>` |
 | 跨 channel session 共享 | 暗中支持 | 不支持（暂时）；switch_session 仅接受本 rk 拥有的 session，返回 SessionNotOwned 错误 |
 | `WebhookContext` | 独立持 SessionManager + sessions 等 | 删除；`WebhookHandler` 退化为协议适配器 |
-| WebUI sender | 可选 client_id 或 per-conn id | 必须 = auth token |
+| WebSocket sender | 可选 client_id 或 per-conn id | 必须 = auth token |
 | `Channel` trait | listen / send | 加 `push_event(target, event)` + `cancel_signal(target)` 两个默认 no-op 方法；流式与取消的能力内化 |
 | `TurnStream` | 独立类型 | 删除（Channel trait 内化） |
 | `TurnInput` | 独立类型（content + images） | 删除（替代为 `ChannelMessage`，整条进 session.last_message） |
@@ -1290,7 +1290,7 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
     - 否则 `session_manager.get_context(rk).process_turn(msg, channel, rt).await`
 30. Orchestrator 字段加 `agent_runtime: Arc<AgentRuntime>`、`ask_router: Arc<AskRouter>` 等
 31. `AskRouter` 实现：`pending: DashMap<sid, oneshot::Sender<ChannelMessage>>`；`wait_for_reply` 返回 ChannelMessage；`fulfill(sid, msg)` 返回 bool
-32. ClientChannel 改造：
+32. WebSocketChannel 改造：
     - `streams: DashMap<reply_target, ClientStream>`
     - 实现 `push_event` / `cancel_signal`
     - 删 `loop_registry`、`evict_loop`
@@ -1330,7 +1330,7 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
 54. 删 `stream_first_chunk_timeout_secs` / `max_output_bytes` 配置项（改硬编码常量）
 55. 删 `IDENTITY.md` / `SOUL.md` / `RULES.md`（内容合并进 main/AGENT.md body）
 56. 删 `USER.md`（per-user UserProfile 替代）
-57. 删 `ClientChannel.loop_registry` / `evict_loop`
+57. 删 `WebSocketChannel.loop_registry` / `evict_loop`
 
 ### 模块 I：数据迁移
 

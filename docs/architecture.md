@@ -13,7 +13,7 @@
 | `main.rs` / `lib.rs` / `daemon.rs` | — | 入口与 Composition Root（`daemon.rs` 装配全局单例） |
 | `signal` / `hot_switch` / `sys_info` / `str_utils` | — | 进程信号、热切换、系统信息 |
 | `agents/` | 61 | Agent 身份与 `Agent::run`、SessionContext/Manager、Orchestrator 事件编排（inbound 责任链）、ContextEngine、ToolExecutor、调度、委派、AskRouter |
-| `channels/` | 14 | 通道适配：Telegram / QQBot / WeChat / Client(WebUI WS)、消息类型、TurnStream、安全策略 |
+| `channels/` | 14 | 通道适配：Telegram / QQBot / WeChat / Client(WebSocket WS)、消息类型、TurnStream、安全策略 |
 | `cli/` | 14 | `myclaw` 子命令：chat/status/reload/restart/stop/update/config/doctor/tools/tui/completion/exec |
 | `config/` | 9 | TOML：Agent / Channel / Provider / Routing / Scheduler / MCP / SubAgent / filters |
 | `mcp/` | 11 | MCP 客户端：HTTP / SSE / STDIO、工具发现与调用 |
@@ -3400,9 +3400,9 @@ priv struct ClientConnection {
 }
 ```
 
-**结构体** `ClientChannel`:
+**结构体** `WebSocketChannel`:
 ```rust
-pub struct ClientChannel {
+pub struct WebSocketChannel {
   config: ClientConfig,
   /// Outgoing messages for Orchestrator (filled by WS handlers).
   message_tx: mpsc::Sender<ChannelMessage>,
@@ -3432,7 +3432,7 @@ pub struct ClientChannel {
 }
 ```
 
-**Impl** `impl ClientChannel`:
+**Impl** `impl WebSocketChannel`:
 ```rust
   pub fn new(config: ClientConfig) -> Self
   pub fn set_pre_bound(&self, listener: std::net::TcpListener)
@@ -3445,7 +3445,7 @@ pub struct ClientChannel {
   async fn start(&self) -> anyhow::Result<()>
 ```
 
-**Impl** `impl Channel for ClientChannel`:
+**Impl** `impl Channel for WebSocketChannel`:
 ```rust
   fn name(&self) -> &str
   fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities

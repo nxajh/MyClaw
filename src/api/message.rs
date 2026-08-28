@@ -562,7 +562,7 @@ impl ChannelCapabilities {
         }
     }
 
-    /// ClientChannel (WebSocket WebUI/TUI): full streaming, plenty of slack.
+    /// WebSocketChannel (WebSocket WebSocket/TUI): full streaming, plenty of slack.
     pub const fn client() -> Self {
         Self {
             supports_streaming: true,

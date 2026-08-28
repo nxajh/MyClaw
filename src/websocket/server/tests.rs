@@ -322,7 +322,7 @@ fn sessions_list_surfaces_linked_channel_sessions() {
 /// keep hitting the bus through the exact candidate.
 #[tokio::test]
 async fn send_message_full_rk_receiver_hits_bus_directly() {
-    let channel = ClientChannel::new(ClientConfig::default());
+    let channel = WebSocketChannel::new(WebSocketConfig::default());
     let full_key = USER_KEY.to_string();
     channel
         .session_buses
@@ -344,7 +344,7 @@ async fn send_message_full_rk_receiver_hits_bus_directly() {
 /// routing_keys_for onto the identity bus.
 #[tokio::test]
 async fn send_message_legacy_key_resolves_via_resolver_to_identity_bus() {
-    let channel = ClientChannel::new(ClientConfig::default());
+    let channel = WebSocketChannel::new(WebSocketConfig::default());
     let resolver = Arc::new(UserResolver::new());
     resolver.set("client:default:ws-3".to_string(), USER_UID.to_string());
     resolver.set(USER_KEY.to_string(), USER_UID.to_string());
@@ -374,7 +374,7 @@ async fn send_message_legacy_key_resolves_via_resolver_to_identity_bus() {
 /// about a delivered /link code.
 #[tokio::test]
 async fn send_message_unknown_recipient_returns_err() {
-    let channel = ClientChannel::new(ClientConfig::default());
+    let channel = WebSocketChannel::new(WebSocketConfig::default());
     channel
         .session_buses
         .write()
@@ -443,7 +443,7 @@ fn bus_key_candidates_skips_cross_channel_keys() {
 /// back to non-streaming send).
 #[test]
 fn create_stream_resolves_bare_tail_and_misses_to_none() {
-    let channel = ClientChannel::new(ClientConfig::default());
+    let channel = WebSocketChannel::new(WebSocketConfig::default());
     channel
         .session_buses
         .write()

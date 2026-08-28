@@ -562,7 +562,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             .with_resolver(Arc::clone(&user_resolver)),
     );
     // issue #140: ShellTool was built before SessionManager existed (same
-    // ordering constraint ClientChannel/DelegationCoordinator hit) — wire it
+    // ordering constraint WebSocketChannel/DelegationCoordinator hit) — wire it
     // in now so `shell`'s tool calls can register pending async work
     // (`ShellTool::register_pending` → `SessionContext::add_pending_task`).
     shell_tool.set_session_manager(Arc::clone(&session_manager));
@@ -741,11 +741,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         );
     }
 
-    // Create ClientChannel separately (needs session_manager for management API).
-    #[cfg(feature = "client")]
-    let _client_channel: Option<Arc<crate::webui::ClientChannel>> =
+    // Create WebSocketChannel separately (needs session_manager for management API).
+    #[cfg(feature = "websocket")]
+    let _client_channel: Option<Arc<crate::websocket::WebSocketChannel>> =
         config.channels.client.as_ref().filter(|c| c.enabled).map(|cfg| {
-            let cc = crate::webui::ClientChannel::new(cfg.clone());
+            let cc = crate::websocket::WebSocketChannel::new(cfg.clone());
             cc.set_session_manager(session_manager.clone());
             cc.set_tool_specs(tools_arc.all_tools().iter().map(|t| t.spec()).collect());
             cc.set_workspace_dir(config.workspace_dir.clone());
@@ -784,7 +784,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             }
             Arc::new(cc)
         });
-    #[cfg(feature = "client")]
+    #[cfg(feature = "websocket")]
     if let Some(ref cc) = _client_channel {
         channels.push((
             "client".to_string(),
@@ -919,7 +919,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         orchestrator.ctx().channels.clone().into(),
     );
 
-    // H57: AgentLoop is gone; the ClientChannel's previous loop_registry +
+    // H57: AgentLoop is gone; the WebSocketChannel's previous loop_registry +
     // evict_loop dance to flush stale per-session AgentLoop instances on
     // /new and /switch is no longer needed. SessionContext is invalidated
     // directly by the slash command handlers.

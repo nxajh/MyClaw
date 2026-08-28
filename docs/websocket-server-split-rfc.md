@@ -1,4 +1,4 @@
-# RFC: webui/client.rs 拆分 — 2852 行 → client/ 目录 10 文件（P0 探路批）
+# RFC: websocket/client.rs 拆分 — 2852 行 → client/ 目录 10 文件（P0 探路批）
 
 > 状态：实施中（legacy-file-split-plan.md P0）
 > 日期：2026-08-28
@@ -9,9 +9,9 @@
 | 源行段 | 符号 | 去向 |
 |--------|------|------|
 | 43–174 | Subscriber / SessionOutputBus + impl | bus.rs |
-| 175–1035 | ClientConnection / ClientChannel / impl ClientChannel | channel.rs |
+| 175–1035 | ClientConnection / WebSocketChannel / impl WebSocketChannel | channel.rs |
 | 1036–1074 | bus_key_candidates | bus.rs |
-| 1075–1234 | impl Channel for ClientChannel | turn.rs |
+| 1075–1234 | impl Channel for WebSocketChannel | turn.rs |
 | 1235–1283 | ClientTurnStream + impl TurnStream + impl Drop | turn.rs |
 | 1284–1316 | is_safe_skill_name / resolve_skill_dir / reload_skills_from_workspace | api/skills.rs |
 | 1317–1334 | ApiContext | api/mod.rs |
@@ -27,15 +27,15 @@
 - file.read（1901）+ models.list/set + config.get/get_raw/save + commands.list + daemon.restart（~1930–2160）→ api/system.rs
 - skills.list/read/write/delete（尾部）→ api/skills.rs
 
-**外部消费者（唯一）**：`daemon/mod.rs:746/748` 经 `webui/mod.rs` 的 `pub use client::ClientChannel` —— client/mod.rs 转发 `pub use channel::ClientChannel` 后，两级 re-export 零改动。
+**外部消费者（唯一）**：`daemon/mod.rs:746/748` 经 `websocket/mod.rs` 的 `pub use client::WebSocketChannel` —— client/mod.rs 转发 `pub use channel::WebSocketChannel` 后，两级 re-export 零改动。
 
 ## 2. 目标形态
 
 ```
-src/webui/client/
-├── mod.rs        声明 + re-export（ClientChannel/ClientTurnStream 等，~60）
+src/websocket/client/
+├── mod.rs        声明 + re-export（WebSocketChannel/ClientTurnStream 等，~60）
 ├── bus.rs        Subscriber/SessionOutputBus/bus_key_candidates（~210）
-├── channel.rs    ClientConnection/ClientChannel/impl ClientChannel（~870）
+├── channel.rs    ClientConnection/WebSocketChannel/impl WebSocketChannel（~870）
 ├── turn.rs       impl Channel/ClientTurnStream/impl TurnStream/impl Drop（~260）
 ├── api/
 │   ├── mod.rs    ApiContext + handle_api_request 骨架 + tools.list + 兜底（~280）
@@ -46,11 +46,11 @@ src/webui/client/
 └── tests.rs      （~465，use super::* 经 mod.rs 转发面）
 ```
 
-**阈值自检**：最大文件 channel.rs ~870（≤800 目标线略超、§5.3 硬线 1400 ✓；impl ClientChannel 860 行为连接+会话+订阅高耦合块，P0 不强二拆，留 RFC 记录）；其余全部 ≤465。总计 2852 行守恒（±导入行）。
+**阈值自检**：最大文件 channel.rs ~870（≤800 目标线略超、§5.3 硬线 1400 ✓；impl WebSocketChannel 860 行为连接+会话+订阅高耦合块，P0 不强二拆，留 RFC 记录）；其余全部 ≤465。总计 2852 行守恒（±导入行）。
 
 ## 3. 符号可见性
 
-- `ClientChannel`：pub → mod.rs `pub use channel::ClientChannel`（webui/mod.rs 不动）
+- `WebSocketChannel`：pub → mod.rs `pub use channel::WebSocketChannel`（websocket/mod.rs 不动）
 - `ClientTurnStream`：pub(crate) → mod.rs `pub(crate) use turn::ClientTurnStream`
 - Subscriber/SessionOutputBus/ApiContext/各路由函数：文件私有或 pub(super)/pub(crate)，仅目录内可见
 - bus_key_candidates/reconstruct_history/memory_* 群：pub(super)（被兄弟文件调用）
@@ -64,9 +64,9 @@ src/webui/client/
 
 ## 5. 验收
 
-- [ ] `find src/webui -name "*.rs" \| xargs wc -l`：无 ≥1400，channel.rs ≤900
+- [ ] `find src/websocket -name "*.rs" \| xargs wc -l`：无 ≥1400，channel.rs ≤900
 - [ ] `#[test]`+`#[tokio::test]` 计数守恒（拆分前后）
-- [ ] `git diff master -- src/daemon/ src/webui/mod.rs` 为空（外部零改动）
+- [ ] `git diff master -- src/daemon/ src/websocket/mod.rs` 为空（外部零改动）
 - [ ] CI 三绿 × 每批；module_score 基线（2852/12pub/39privfn）vs 终态进 PR 描述
 
 ## 6. 风险
