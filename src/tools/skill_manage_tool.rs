@@ -158,7 +158,12 @@ impl SkillManageTool {
             ));
         }
 
-        let user_skills_dir = self.users_root.join(&ctx.owner).join("skills");
+        // Normalize FQID owner (`myclaw/u/{uuid}`) to the bare uuid directory
+        // name — the users/ tree layout is `users/{uuid}/skills`.
+        let user_skills_dir = self
+            .users_root
+            .join(crate::ids::bare_dir_name(&ctx.owner))
+            .join("skills");
         let skill_dir = user_skills_dir.join(name);
         std::fs::create_dir_all(&skill_dir)
             .map_err(|e| format!("Failed to create skill directory: {}", e))?;

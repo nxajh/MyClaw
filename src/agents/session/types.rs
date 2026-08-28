@@ -96,6 +96,12 @@ pub struct Session {
     /// RFC v2 renames "owner" semantically to `routing_key`; the field stays
     /// named `owner` for source-diff churn reasons.
     pub owner: String,
+    /// RFC #101 P1: the owner's FQID (`users/{uuid}` key), resolved from the
+    /// routing key via UserResolver at load time. Empty when unresolved —
+    /// layered lookups then treat the session as ownerless (agent + shared).
+    /// Kept separate from `owner`: session listing/recovery parse the routing
+    /// key format.
+    pub owner_fqid: String,
     /// Agent name that owns this session. References `workspace/agents/{name}/AGENT.md`.
     /// Defaults to "main"; sub-sessions inherit their delegating agent's name.
     pub agent_name: String,
@@ -208,6 +214,7 @@ impl Clone for Session {
         Self {
             id: self.id.clone(),
             owner: self.owner.clone(),
+            owner_fqid: self.owner_fqid.clone(),
             agent_name: self.agent_name.clone(),
             parent_session_id: self.parent_session_id.clone(),
             history: self.history.clone(),
@@ -241,6 +248,7 @@ impl std::fmt::Debug for Session {
         f.debug_struct("Session")
             .field("id", &self.id)
             .field("owner", &self.owner)
+            .field("owner_fqid", &self.owner_fqid)
             .field("agent_name", &self.agent_name)
             .field("parent_session_id", &self.parent_session_id)
             .field("history_len", &self.history.len())
@@ -263,6 +271,7 @@ impl Session {
     pub fn new(id: String) -> Self {
         Self {
             owner: String::new(),
+            owner_fqid: String::new(),
             id,
             agent_name: "main".to_string(),
             parent_session_id: None,

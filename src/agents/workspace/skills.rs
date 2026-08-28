@@ -112,11 +112,19 @@ impl SkillManager {
         self.agent_skills.len() + self.shared_skills.len()
     }
 
+    /// Normalize an owner id for `user_skills` lookups. The map is keyed by
+    /// bare uuid directory names (`users/{uuid}/skills`), but callers pass
+    /// full FQIDs (`myclaw/u/{uuid}`) resolved via UserResolver. Idempotent
+    /// for both forms; legacy routing keys pass through unchanged (and miss).
+    fn owner_key(owner: &str) -> String {
+        crate::ids::bare_dir_name(owner)
+    }
+
     /// Number of skills for a given owner.
     pub fn total_skill_count(&self, owner: Option<&str>) -> usize {
         let mut count = self.agent_skills.len() + self.shared_skills.len();
         if let Some(o) = owner {
-            if let Some(u) = self.user_skills.get(o) {
+            if let Some(u) = self.user_skills.get(&Self::owner_key(o)) {
                 count += u.len();
             }
         }
@@ -133,7 +141,7 @@ impl SkillManager {
             all.insert(k.as_str(), v);
         }
         if let Some(o) = owner {
-            if let Some(u) = self.user_skills.get(o) {
+            if let Some(u) = self.user_skills.get(&Self::owner_key(o)) {
                 for (k, v) in u {
                     all.insert(k.as_str(), v);
                 }
@@ -155,7 +163,7 @@ impl SkillManager {
     /// Get a skill by name.
     pub fn get(&self, name: &str, owner: Option<&str>) -> Option<&Skill> {
         if let Some(o) = owner {
-            if let Some(u) = self.user_skills.get(o) {
+            if let Some(u) = self.user_skills.get(&Self::owner_key(o)) {
                 if let Some(s) = u.get(name) {
                     return Some(s);
                 }
@@ -198,7 +206,10 @@ impl SkillManager {
             for def in defs {
                 map.insert(def.name.clone(), Skill::from_definition(&def));
             }
-            self.user_skills.insert(user_id, map);
+            // Defensive: normalize FQID keys to bare uuid — callers source
+            // the map from load_all_users_skills (already bare), but any
+            // future FQID-keyed caller must still land in the same bucket.
+            self.user_skills.insert(Self::owner_key(&user_id), map);
         }
 
         self.agent_skills.clear();

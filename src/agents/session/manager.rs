@@ -267,9 +267,14 @@ impl SessionManager {
             token_tracker.update_from_usage(total, 0, 0);
         }
 
+        // RFC #101 P1: resolve the routing key to the owner's FQID once at
+        // load time — layered skill/memory lookups key on `users/{uuid}`,
+        // never on the routing key itself.
+        let owner_fqid = self.resolver.resolve(&owner);
         let mut session = Session {
             id: session_id.clone(),
             owner,
+            owner_fqid,
             agent_name: self
                 .backend
                 .load_agent_name(&session_id)

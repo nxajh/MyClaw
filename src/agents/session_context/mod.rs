@@ -740,7 +740,8 @@ impl SessionContext {
             let skills_snap = runtime.skills.read();
             // Clone history to avoid borrow conflict with attachments.
             let history_clone = session.history.clone();
-            let owner = session.owner.clone();
+            // RFC #101 P1: pass the FQID (users/{uuid}), not the routing key.
+            let owner = session.owner_fqid.clone();
             session.attachments.diff_skills(&skills_snap, &history_clone, Some(owner.as_str()));
             let agent_list: Vec<(String, String)> = runtime
                 .agents
