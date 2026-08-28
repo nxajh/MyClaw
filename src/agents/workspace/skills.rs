@@ -30,6 +30,7 @@ pub struct Skill {
     pub user_invocable: bool,
     pub agent_invocable: bool,
     pub skill_dir: Option<PathBuf>,
+    pub source_layer: String,
 }
 
 impl Skill {
@@ -47,6 +48,7 @@ impl Skill {
             user_invocable: def.user_invocable,
             agent_invocable: def.agent_invocable,
             skill_dir: def.source_path.parent().map(|p| p.to_path_buf()),
+            source_layer: def.source_layer.clone(),
         }
     }
 
@@ -226,7 +228,7 @@ mod tests {
 // Arc<RwLock<SkillManager>>——与系统提示词注入用的是同一个活实例。
 
 impl crate::api::skill_registry::SkillRegistry for parking_lot::RwLock<SkillManager> {
-    fn find(&self, name: &str) -> Option<crate::api::skill_registry::SkillView> {
+    fn find(&self, name: &str, _owner: Option<&str>) -> Option<crate::api::skill_registry::SkillView> {
         use crate::api::skill_registry::SkillView;
         self.read().get(name).map(|s| SkillView {
             name: s.name.clone(),
@@ -237,15 +239,15 @@ impl crate::api::skill_registry::SkillRegistry for parking_lot::RwLock<SkillMana
         })
     }
 
-    fn skill_names(&self) -> Vec<String> {
+    fn skill_names(&self, _owner: Option<&str>) -> Vec<String> {
         self.read().skills_iter().map(|(n, _)| n.to_string()).collect()
     }
 
-    fn skill_dir(&self, name: &str) -> Option<std::path::PathBuf> {
+    fn skill_dir(&self, name: &str, _owner: Option<&str>) -> Option<std::path::PathBuf> {
         self.read().skill_dir(name).map(|p| p.to_path_buf())
     }
 
-    fn list(&self) -> Vec<crate::api::skill_registry::SkillSummary> {
+    fn list(&self, _owner: Option<&str>) -> Vec<crate::api::skill_registry::SkillSummary> {
         use crate::api::skill_registry::SkillSummary;
         self.read()
             .skills_iter()
@@ -258,12 +260,13 @@ impl crate::api::skill_registry::SkillRegistry for parking_lot::RwLock<SkillMana
                 agent_invocable: s.agent_invocable,
                 user_invocable: s.user_invocable,
                 skill_dir: s.skill_dir.clone(),
+                source_layer: s.source_layer.clone(),
             })
             .collect()
     }
 
-    fn reload_layered(&self, skills_dir: &Path, agents_skills_dir: Option<&Path>) {
-        let defs = super::skill_loader::load_skills_layered(skills_dir, agents_skills_dir);
+    fn reload_layered(&self, user_skills_dir: Option<&Path>, skills_dir: &Path, agents_skills_dir: Option<&Path>) {
+        let defs = super::skill_loader::load_skills_layered(user_skills_dir, skills_dir, agents_skills_dir);
         self.write().reload_from_definitions(defs);
     }
 }

@@ -34,28 +34,16 @@ pub struct SkillSummary {
     pub argument_hint: Option<String>,
     pub agent_invocable: bool,
     pub user_invocable: bool,
+    pub source_layer: String,
 }
 
 /// Facade over the live skill registry.
 pub trait SkillRegistry: Send + Sync {
-    /// Full view of a skill by name (`skill_view`'s lookup).
-    fn find(&self, name: &str) -> Option<SkillView>;
-
-    /// All registered skill names (not-found listings).
-    fn skill_names(&self) -> Vec<String>;
-
-    /// On-disk directory of a skill (shared-library read-only check in
-    /// `skill_manage`).
-    fn skill_dir(&self, name: &str) -> Option<PathBuf>;
-
-    /// Listing metadata for every skill (`skills_list`).
-    fn list(&self) -> Vec<SkillSummary>;
-
-    /// Post-edit hot reload: layered load (`workspace/skills` + shared
-    /// `~/.agents/skills`) then wholesale replace — the #174
-    /// `reload_from_definitions` convergence point, def parsing kept in
-    /// the agents layer.
-    fn reload_layered(&self, skills_dir: &Path, agents_skills_dir: Option<&Path>);
+    fn find(&self, name: &str, owner: Option<&str>) -> Option<SkillView>;
+    fn skill_names(&self, owner: Option<&str>) -> Vec<String>;
+    fn skill_dir(&self, name: &str, owner: Option<&str>) -> Option<PathBuf>;
+    fn list(&self, owner: Option<&str>) -> Vec<SkillSummary>;
+    fn reload_layered(&self, user_skills_dir: Option<&Path>, skills_dir: &Path, agents_skills_dir: Option<&Path>);
 }
 
 /// In-memory double for tests — register full views; listing metadata is
@@ -101,19 +89,19 @@ impl InMemorySkillRegistry {
 }
 
 impl SkillRegistry for InMemorySkillRegistry {
-    fn find(&self, name: &str) -> Option<SkillView> {
+    fn find(&self, name: &str, _owner: Option<&str>) -> Option<SkillView> {
         self.skills.read().unwrap().iter().find(|s| s.name == name).cloned()
     }
 
-    fn skill_names(&self) -> Vec<String> {
+    fn skill_names(&self, _owner: Option<&str>) -> Vec<String> {
         self.skills.read().unwrap().iter().map(|s| s.name.clone()).collect()
     }
 
-    fn skill_dir(&self, name: &str) -> Option<PathBuf> {
-        self.find(name).and_then(|v| v.skill_dir)
+    fn skill_dir(&self, name: &str, _owner: Option<&str>) -> Option<PathBuf> {
+        self.find(name, _owner).and_then(|v| v.skill_dir)
     }
 
-    fn list(&self) -> Vec<SkillSummary> {
+    fn list(&self, _owner: Option<&str>) -> Vec<SkillSummary> {
         let overrides = self.summary_overrides.lock().unwrap();
         self.skills
             .read()
@@ -133,12 +121,13 @@ impl SkillRegistry for InMemorySkillRegistry {
                         agent_invocable: s.agent_invocable,
                         user_invocable: true,
                         skill_dir: None,
+                        source_layer: "unknown".to_string(),
                     })
             })
             .collect()
     }
 
-    fn reload_layered(&self, _skills_dir: &Path, _agents_skills_dir: Option<&Path>) {
+    fn reload_layered(&self, _user_skills_dir: Option<&Path>, _skills_dir: &Path, _agents_skills_dir: Option<&Path>) {
         // Test double: no on-disk layering to perform.
     }
 }

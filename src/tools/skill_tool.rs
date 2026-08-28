@@ -62,10 +62,10 @@ impl Tool for SkillTool {
             .ok_or_else(|| anyhow::anyhow!("'name' is required"))?;
         let file_path = args["file_path"].as_str();
 
-        let skill = match self.skills.find(name) {
+        let skill = match self.skills.find(name, Some(&ctx.owner)) {
             Some(s) => s,
             None => {
-                let available = self.skills.skill_names();
+                let available = self.skills.skill_names(Some(&ctx.owner));
                 return Ok(ToolResult {
                     success: false,
                     output: json!({

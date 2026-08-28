@@ -45,12 +45,13 @@ impl Tool for SkillsListTool {
     ) -> anyhow::Result<ToolResult> {
         let mut entries: Vec<serde_json::Value> = self
             .skills
-            .list()
+            .list(Some(&_ctx.owner))
             .into_iter()
             .map(|skill| {
                 let mut entry = json!({
                     "name": skill.name,
                     "description": skill.description,
+                    "source_layer": skill.source_layer,
                 });
                 if let Some(v) = skill.when_to_use {
                     entry["when_to_use"] = json!(v);
