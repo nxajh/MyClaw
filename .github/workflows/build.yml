@@ -2,12 +2,21 @@ name: Build
 
 on:
   push:
-    branches: [master, refactor/*]
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+
+# Cancel superseded runs on rapid successive pushes to the same ref (issue
+# #149) instead of letting them queue and burn runner time. `push.branches`
+# is scoped to `master` only (below) so a PR's `pull_request` run and its
+# `push` run never both fire for the same commit in the first place —
+# concurrency here only dedupes same-ref runs from fast-following pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   migrate-script-tests:
@@ -32,9 +41,19 @@ jobs:
       - name: Verify layering
         run: bash scripts/verify-layering.sh
 
-  build:
+  # issue #149: mechanical lint failures (unused imports, clippy nits,
+  # rustfmt) used to only surface after Check+Clippy+Test+Build Release all
+  # ran serially in one job (~4-5 min). Split into its own job so those
+  # failures land fast without waiting on Test/Build Release, which now
+  # `needs: lint` and reuse this job's populated cargo cache.
+  #
+  # Note: unlike the issue's suggestion, this job still installs libclang —
+  # `qqbot` (which pulls in silk2wav's bindgen build script) is in the
+  # default feature set, so `cargo check`/`cargo clippy` need it too, not
+  # just the release build.
+  lint:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout MyClaw
         uses: actions/checkout@v4
@@ -45,9 +64,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Ensure clippy
-        run: rustup component add clippy
 
       - name: Cache
         uses: actions/cache@v4
@@ -67,14 +83,44 @@ jobs:
           sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20 || true
           sudo apt-get install -y libclang-dev clang
 
-
-
-
       - name: Check
         run: cargo check
 
       - name: Clippy
         run: cargo clippy -- -D warnings
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout MyClaw
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install libclang (for silk-rs bindgen)
+        run: |
+          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list.d/ubuntu.sources || true
+          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list || true
+          sudo sed -i 's/http:\/\/azure.archive.ubuntu.com/http:\/\/archive.ubuntu.com/g' /etc/apt/apt-mirrors.txt || true
+          echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt > /dev/null || true
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20 || true
+          sudo apt-get install -y libclang-dev clang
 
       - name: Test
         run: cargo test
