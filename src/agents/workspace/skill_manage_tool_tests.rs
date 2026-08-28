@@ -37,19 +37,22 @@ fn setup(workspace: &Path, skill_name: &str) -> Arc<RwLock<SkillManager>> {
 async fn test_create_and_refresh() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(RwLock::new(SkillManager::new()));
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().join("users"), dir.path().to_path_buf(), None);
     let result = tool.execute(json!({
         "action": "create", "name": "mys",
         "content": "---\nname: mys\ndescription: \"My skill\"\n---\n# My Skill\n\nDo stuff."
     }), &crate::api::tool::ToolContext { owner: "test".to_string(), session_id: "test".to_string(), agent_name: "main".to_string(), ..Default::default() }).await.unwrap();
     assert!(result.success, "{}", result.output);
-    assert!(mgr.read().get("mys").is_some());
+    // create writes into the owner's user layer (users/{owner}/skills) —
+    // assert against that owner's view, not the ownerless agent+shared view.
+    assert!(mgr.read().get("mys", Some("test")).is_some());
 }
 #[tokio::test]
 async fn test_create_reserved_name() {
     let dir = tempfile::tempdir().unwrap();
     let tool = SkillManageTool::new(
         Arc::new(RwLock::new(SkillManager::new())),
+        dir.path().join("users"),
         dir.path().to_path_buf(),
         None,
     );
@@ -69,7 +72,7 @@ async fn test_create_reserved_name() {
 async fn test_create_duplicate() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "existing");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().join("users"), dir.path().to_path_buf(), None);
     let result = tool.execute(json!({
         "action": "create", "name": "existing",
         "content": "---\nname: existing\ndescription: \"Exists\"\n---\n# Exists\n\nAlready here."
@@ -82,6 +85,7 @@ async fn test_name_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let tool = SkillManageTool::new(
         Arc::new(RwLock::new(SkillManager::new())),
+        dir.path().join("users"),
         dir.path().to_path_buf(),
         None,
     );
@@ -102,7 +106,7 @@ async fn test_name_mismatch() {
 async fn test_patch_success() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "myskill");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().join("users"), dir.path().to_path_buf(), None);
     let result = tool
         .execute(
             json!({
@@ -121,7 +125,7 @@ async fn test_patch_success() {
 async fn test_patch_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "myskill");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().join("users"), dir.path().to_path_buf(), None);
     let result = tool
         .execute(
             json!({
@@ -139,7 +143,7 @@ async fn test_patch_not_found() {
 async fn test_delete() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "myskill");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().join("users"), dir.path().to_path_buf(), None);
     let result = tool
         .execute(
             json!({"action": "delete", "name": "myskill"}),
@@ -148,7 +152,7 @@ async fn test_delete() {
         .await
         .unwrap();
     assert!(result.success, "{}", result.output);
-    assert!(mgr.read().get("myskill").is_none());
+    assert!(mgr.read().get("myskill", None).is_none());
 }
 /// Like `setup`, but the skill lives only in a separate shared-library
 /// dir (`~/.agents/skills` in production), not under `local_workspace`'s
@@ -171,6 +175,7 @@ async fn test_delete_rejects_shared_library_skill() {
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        local.path().join("users"),
         local.path().join("skills"),
         Some(shared_skills_dir),
     );
@@ -188,7 +193,7 @@ async fn test_delete_rejects_shared_library_skill() {
         shared.path().join("skills/sharedskill/SKILL.md").exists(),
         "shared skill file must survive a rejected delete"
     );
-    assert!(mgr.read().get("sharedskill").is_some());
+    assert!(mgr.read().get("sharedskill", None).is_some());
 }
 #[tokio::test]
 async fn test_patch_rejects_shared_library_skill() {
@@ -197,6 +202,7 @@ async fn test_patch_rejects_shared_library_skill() {
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        local.path().join("users"),
         local.path().join("skills"),
         Some(shared_skills_dir),
     );
@@ -226,6 +232,7 @@ async fn test_write_file_rejects_shared_library_skill() {
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        local.path().join("users"),
         local.path().join("skills"),
         Some(shared_skills_dir),
     );
@@ -251,6 +258,7 @@ async fn test_delete_self_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let tool = SkillManageTool::new(
         Arc::new(RwLock::new(SkillManager::new())),
+        dir.path().join("users"),
         dir.path().to_path_buf(),
         None,
     );
@@ -267,7 +275,7 @@ async fn test_delete_self_rejected() {
 async fn test_write_and_remove_file() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "myskill");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().join("users"), dir.path().to_path_buf(), None);
     let wr = tool
         .execute(
             json!({
@@ -296,7 +304,7 @@ async fn test_write_and_remove_file() {
 async fn test_path_traversal_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup(dir.path(), "myskill");
-    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf(), None);
+    let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().join("users"), dir.path().to_path_buf(), None);
     let result = tool
         .execute(
             json!({

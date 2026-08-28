@@ -56,6 +56,9 @@ pub struct AttachmentManager {
     memory_index: Option<String>,
     /// 上次注入的日期 "YYYY-MM-DD"（用于区分首次 vs 日期变化）
     last_injected_date: Option<String>,
+    /// 上次 diff_skills 时的会话 owner（FQID）——build_message 渲染
+    /// added delta 的技能摘要时按同一 owner 视角取 Skill。
+    owner: Option<String>,
 }
 
 impl AttachmentManager {
@@ -179,11 +182,12 @@ impl AttachmentManager {
 
     /// 与当前 SkillManager 做 diff，生成 skill listing delta。
     /// 从 history 重建 announced 状态。
-    pub fn diff_skills(&mut self, skills: &SkillManager, history: &[ChatMessage]) {
+    pub fn diff_skills(&mut self, skills: &SkillManager, history: &[ChatMessage], owner: Option<&str>) {
+        self.owner = owner.map(|s| s.to_string());
         let announced = Self::rebuild_from_history(history);
         // Only agent_invocable skills appear in the model's index.
         let current: HashSet<String> = skills
-            .agent_skills_iter()
+            .agent_skills_iter(owner)
             .map(|(n, _)| n.to_string())
             .collect();
 
@@ -415,7 +419,7 @@ impl AttachmentManager {
             sections.push(Self::render_autonomy(delta));
         }
         if let Some(delta) = self.pending.get(&AttachmentKind::SkillListing) {
-            sections.push(Self::render_skills(delta, skills));
+            sections.push(Self::render_skills(delta, skills, self.owner.as_deref()));
         }
         if let Some(delta) = self.pending.get(&AttachmentKind::AgentListing) {
             sections.push(Self::render_agents(delta));
@@ -519,7 +523,7 @@ impl AttachmentManager {
 
     // ── Private render ──────────────────────────────────────────────────
 
-    fn render_skills(delta: &Delta, skills: &SkillManager) -> String {
+    fn render_skills(delta: &Delta, skills: &SkillManager, owner: Option<&str>) -> String {
         let mut lines = vec!["## Skills".to_string()];
 
         if !delta.removed.is_empty() {
@@ -537,7 +541,7 @@ impl AttachmentManager {
                     .to_string(),
             );
             for name in &delta.added {
-                let skill = skills.get(name);
+                let skill = skills.get(name, owner);
                 let summary = skill.map(|s| s.injected_summary()).unwrap_or_default();
                 // issue #125: fold internal newlines to spaces so a
                 // multi-line `description` renders as one Markdown bullet
@@ -675,6 +679,7 @@ mod tests {
                 user_invocable: true,
                 agent_invocable: true,
                 skill_dir: None,
+                source_layer: "agent".to_string(),
             });
         }
         mgr
@@ -703,10 +708,11 @@ mod tests {
             user_invocable: true,
             agent_invocable: true,
             skill_dir: None,
+            source_layer: "agent".to_string(),
         });
 
         let mut am = AttachmentManager::new();
-        am.diff_skills(&mgr, &empty_history());
+        am.diff_skills(&mgr, &empty_history(), None);
         let msg = am.build_message(&mgr).unwrap();
         let text = msg.text_content();
 
@@ -732,10 +738,11 @@ mod tests {
             user_invocable: true,
             agent_invocable: true,
             skill_dir: None,
+            source_layer: "agent".to_string(),
         });
 
         let mut am = AttachmentManager::new();
-        am.diff_skills(&mgr, &empty_history());
+        am.diff_skills(&mgr, &empty_history(), None);
         let msg = am.build_message(&mgr).unwrap();
         let text = msg.text_content();
 
@@ -747,7 +754,7 @@ mod tests {
     fn empty_history_sends_all_skills() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a", "b"]);
-        am.diff_skills(&skills, &empty_history());
+        am.diff_skills(&skills, &empty_history(), None);
 
         let msg = am.build_message(&skills).unwrap();
         let text = msg.text_content();
@@ -761,14 +768,14 @@ mod tests {
         let skills = make_skills(&["a"]);
 
         // First: produce a system-reminder and "persist" it into a fake history.
-        am.diff_skills(&skills, &empty_history());
+        am.diff_skills(&skills, &empty_history(), None);
         let msg = am.build_message(&skills).unwrap();
         am.clear_pending();
 
         let history = vec![msg];
 
         // Second diff with same skills + history containing the prior reminder → no pending
-        am.diff_skills(&skills, &history);
+        am.diff_skills(&skills, &history, None);
         assert!(am.build_message(&skills).is_none());
     }
 
@@ -776,14 +783,14 @@ mod tests {
     fn added_skill_appears_in_delta() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
-        am.diff_skills(&skills, &empty_history());
+        am.diff_skills(&skills, &empty_history(), None);
         let msg = am.build_message(&skills).unwrap();
         am.clear_pending();
 
         let history = vec![msg];
 
         let skills2 = make_skills(&["a", "b"]);
-        am.diff_skills(&skills2, &history);
+        am.diff_skills(&skills2, &history, None);
 
         let msg2 = am.build_message(&skills2).unwrap();
         let text = msg2.text_content();
@@ -795,14 +802,14 @@ mod tests {
     fn removed_skill_appears_in_delta() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a", "b"]);
-        am.diff_skills(&skills, &empty_history());
+        am.diff_skills(&skills, &empty_history(), None);
         let msg = am.build_message(&skills).unwrap();
         am.clear_pending();
 
         let history = vec![msg];
 
         let skills2 = make_skills(&["a"]);
-        am.diff_skills(&skills2, &history);
+        am.diff_skills(&skills2, &history, None);
 
         let msg2 = am.build_message(&skills2).unwrap();
         let text = msg2.text_content();
@@ -814,13 +821,13 @@ mod tests {
         // After compaction, history is empty → next diff sends full listing.
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
-        am.diff_skills(&skills, &empty_history());
+        am.diff_skills(&skills, &empty_history(), None);
         am.clear_pending();
 
         // Simulate compaction: history is gone.
         let compacted_history: Vec<ChatMessage> = vec![];
 
-        am.diff_skills(&skills, &compacted_history);
+        am.diff_skills(&skills, &compacted_history, None);
         let msg = am.build_message(&skills).unwrap();
         assert!(msg.text_content().contains("- **a**"));
     }
@@ -856,7 +863,7 @@ mod tests {
     fn merged_sections_in_single_message() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
-        am.diff_skills(&skills, &empty_history());
+        am.diff_skills(&skills, &empty_history(), None);
         am.diff_agents(&[("coder".into(), "programmer".into())], &empty_history());
 
         let msg = am.build_message(&skills).unwrap();

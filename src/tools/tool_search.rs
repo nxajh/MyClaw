@@ -127,7 +127,7 @@ impl Tool for ToolSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::tool_listing::{StaticToolListing, ToolListing};
+    use crate::api::tool_listing::StaticToolListing;
 
     struct FakeTool {
         name: &'static str,

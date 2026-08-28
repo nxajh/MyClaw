@@ -740,7 +740,8 @@ impl SessionContext {
             let skills_snap = runtime.skills.read();
             // Clone history to avoid borrow conflict with attachments.
             let history_clone = session.history.clone();
-            session.attachments.diff_skills(&skills_snap, &history_clone);
+            let owner = session.owner.clone();
+            session.attachments.diff_skills(&skills_snap, &history_clone, Some(owner.as_str()));
             let agent_list: Vec<(String, String)> = runtime
                 .agents
                 .values_cloned()

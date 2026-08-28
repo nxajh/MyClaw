@@ -1,5 +1,5 @@
 use crate::agents::{
-    InMemoryBackend, McpManager, RunMode, Skill, SkillManager, SystemPromptConfig, ToolRegistry,
+    InMemoryBackend, McpManager, RunMode, SkillManager, SystemPromptConfig, ToolRegistry,
 };
 use anyhow::Context;
 use std::sync::Arc;
@@ -399,6 +399,7 @@ pub(crate) async fn build_tools(
     // from the live SkillManager.
     tools.register(Arc::new(crate::tools::SkillManageTool::new(
         Arc::clone(skills),
+        config.base_dir.join("users"),
         config.skills_root(),
         config.agents_skills_dir_opt(),
     )));
@@ -480,14 +481,19 @@ pub(crate) fn build_skill_manager(config: &crate::config::AppConfig) -> SkillMan
     let mut manager = SkillManager::new();
     let skills_dir = config.skills_root();
     let agents_dir = config.agents_skills_dir_opt();
-    let definitions = crate::agents::skill_loader::load_skills_layered(
-        &skills_dir,
-        agents_dir.as_deref(),
-    );
-    for def in definitions {
-        tracing::debug!(name = %def.name, "skill registered");
-        manager.register(Skill::from_definition(&def));
-    }
+    
+    let base_dir = config.base_dir.clone();
+    let users_dir = base_dir.join("users");
+    
+    let user_skills_map = crate::agents::skill_loader::load_all_users_skills(&users_dir);
+    let agent_defs = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
+    let shared_defs = if let Some(d) = &agents_dir {
+        crate::agents::skill_loader::load_skills_from_dir(d)
+    } else {
+        Vec::new()
+    };
+    
+    manager.reload_from_definitions(user_skills_map, agent_defs, shared_defs);
     tracing::info!(skill_count = manager.skill_count(), "skill manager built");
     manager
 }

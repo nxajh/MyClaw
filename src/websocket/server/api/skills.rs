@@ -6,7 +6,6 @@
 //! The `is_safe_skill_name` / `resolve_skill_dir` /
 //! `reload_skills_from_workspace` helpers moved alongside, unchanged.
 
-use crate::agents::Skill;
 use crate::agents::workspace::skill_loader;
 
 use super::ApiContext;
@@ -25,7 +24,8 @@ pub(super) fn is_safe_skill_name(name: &str) -> bool {
 /// `workspace/skills/{name}` only when the manager has no entry.
 pub(super) fn resolve_skill_dir(ctx: &ApiContext<'_>, name: &str) -> Option<std::path::PathBuf> {
     if let Some(mgr_arc) = ctx.skill_manager.get() {
-        if let Some(dir) = mgr_arc.read().skill_dir(name) {
+        let owner = session_owner(ctx);
+        if let Some(dir) = mgr_arc.read().skill_dir(name, owner.as_deref()) {
             return Some(dir.to_path_buf());
         }
     }
@@ -35,19 +35,33 @@ pub(super) fn resolve_skill_dir(ctx: &ApiContext<'_>, name: &str) -> Option<std:
         .filter(|p| p.exists())
 }
 
+/// RFC #101: the API's owner view — resolve the connection's routing key
+/// (`user_id`) to the bound FQID via UserResolver. Unbound keys resolve to
+/// their fallback identity, which simply has no user-layer skills.
+fn session_owner(ctx: &ApiContext<'_>) -> Option<String> {
+    ctx.user_resolver.get().map(|r| r.resolve(ctx.user_id))
+}
+
 pub(super) fn reload_skills_from_workspace(ctx: &ApiContext<'_>, workspace: &std::path::Path) {
     if let Some(mgr_arc) = ctx.skill_manager.get() {
-        let defs = skill_loader::load_skills_from_dir(&workspace.join("skills"));
-        let new_skills: Vec<Skill> = defs.iter().map(Skill::from_definition).collect();
-        mgr_arc.write().reload(new_skills);
+        // users root lives beside the workspace dir ({base_dir}/users);
+        // shared library is left untouched (config/watcher own its lifecycle).
+        let users_root = workspace.parent().map(|p| p.join("users"));
+        let user_map = match users_root {
+            Some(u) => skill_loader::load_all_users_skills(&u),
+            None => std::collections::HashMap::new(),
+        };
+        let agent_defs = skill_loader::load_skills_from_dir(&workspace.join("skills"));
+        mgr_arc.write().reload_user_agent_layers(user_map, agent_defs);
     }
 }
 
 pub(super) fn list(id: &str, ctx: &ApiContext<'_>) -> String {
+    let owner = session_owner(ctx);
     let result: Vec<serde_json::Value> = match ctx.skill_manager.get() {
         Some(mgr_arc) => {
             let mgr = mgr_arc.read();
-            mgr.skills_iter()
+            mgr.skills_iter(owner.as_deref())
                 .map(|(name, s)| serde_json::json!({
                     "name": name,
                     "description": s.description,

@@ -96,6 +96,7 @@ fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
             // reality instead of always reporting zero.
             let skills_dir = cfg.skills_root();
             let loaded = myclaw::agents::workspace::skill_loader::load_skills_layered(
+                None,
                 &skills_dir,
                 cfg.agents_skills_dir_opt().as_deref(),
             )
@@ -147,6 +148,7 @@ fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
         // Issue #102: see the matching comment in print_text_status.
         let skills_dir = c.skills_root();
         let loaded = myclaw::agents::workspace::skill_loader::load_skills_layered(
+            None,
             &skills_dir,
             c.agents_skills_dir_opt().as_deref(),
         )

@@ -193,6 +193,7 @@ pub struct SkillDefinition {
     pub agent_invocable: bool,
     /// Skill status — "draft" skills are filtered out of normal loading.
     pub status: Option<String>,
+    pub source_layer: String,
 }
 
 /// 解析 SKILL.md 文件
@@ -245,6 +246,7 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
         user_invocable,
         agent_invocable,
         status,
+        source_layer: "unknown".to_string(), // Set by load_skills_layered
     })
 }
 
@@ -325,6 +327,29 @@ pub fn list_draft_skill_names(skills_dir: &Path) -> Vec<String> {
     names
 }
 
+/// Load all users' skills: scans `users/*/skills` and returns a map of `user_id` -> `Vec<SkillDefinition>`.
+pub fn load_all_users_skills(users_root: &Path) -> std::collections::HashMap<String, Vec<SkillDefinition>> {
+    let mut users_map = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir(users_root) else {
+        return users_map;
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let user_id = entry.file_name().to_string_lossy().to_string();
+        let skills_dir = entry.path().join("skills");
+        if skills_dir.exists() {
+            let mut defs = load_skills_from_dir(&skills_dir);
+            for def in &mut defs {
+                def.source_layer = "user".to_string();
+            }
+            users_map.insert(user_id, defs);
+        }
+    }
+    users_map
+}
+
 /// Load skills across two layers: the local skills root and — when
 /// present — the cross-agent shared library `~/.agents/skills` (issue
 /// #83). Local skills always win a same-`name` conflict (front-matter
@@ -334,31 +359,43 @@ pub fn list_draft_skill_names(skills_dir: &Path) -> Vec<String> {
 /// `agents_dir: None` (config opted out, or the caller doesn't want the
 /// shared layer at all) behaves exactly like `load_skills_from_dir(local_dir)`.
 pub fn load_skills_layered(
-    local_dir: &Path,
-    agents_dir: Option<&Path>,
+    user_dir: Option<&Path>,
+    agent_dir: &Path,
+    shared_dir: Option<&Path>,
 ) -> Vec<SkillDefinition> {
-    let local_defs = load_skills_from_dir(local_dir);
-
-    let agents_defs = match agents_dir {
+    let mut user_defs = match user_dir {
         Some(dir) => load_skills_from_dir(dir),
         None => Vec::new(),
     };
-    if agents_defs.is_empty() {
-        return local_defs;
+    for def in &mut user_defs {
+        def.source_layer = "user".to_string();
     }
 
-    let local_names: std::collections::HashSet<&str> =
-        local_defs.iter().map(|d| d.name.as_str()).collect();
+    let mut agent_defs = load_skills_from_dir(agent_dir);
+    for def in &mut agent_defs {
+        def.source_layer = "agent".to_string();
+    }
 
-    let mut merged: Vec<SkillDefinition> = agents_defs
+    let mut shared_defs = match shared_dir {
+        Some(dir) => load_skills_from_dir(dir),
+        None => Vec::new(),
+    };
+    for def in &mut shared_defs {
+        def.source_layer = "shared".to_string();
+    }
+
+    let user_names: std::collections::HashSet<&str> =
+        user_defs.iter().map(|d| d.name.as_str()).collect();
+
+    let agent_filtered: Vec<SkillDefinition> = agent_defs
         .into_iter()
         .filter(|d| {
-            if local_names.contains(d.name.as_str()) {
+            if user_names.contains(d.name.as_str()) {
                 warn!(
                     name = %d.name,
-                    local_path = %local_dir.display(),
-                    agents_path = %d.source_path.display(),
-                    "skill name conflict: local skills root overrides ~/.agents/skills"
+                    user_path = ?user_dir,
+                    agent_path = %d.source_path.display(),
+                    "skill name conflict: user layer overrides agent layer"
                 );
                 false
             } else {
@@ -366,7 +403,28 @@ pub fn load_skills_layered(
             }
         })
         .collect();
-    merged.extend(local_defs);
+
+    let combined_local_names: std::collections::HashSet<&str> =
+        user_names.into_iter().chain(agent_filtered.iter().map(|d| d.name.as_str())).collect();
+
+    let mut merged: Vec<SkillDefinition> = shared_defs
+        .into_iter()
+        .filter(|d| {
+            if combined_local_names.contains(d.name.as_str()) {
+                warn!(
+                    name = %d.name,
+                    shared_path = %d.source_path.display(),
+                    "skill name conflict: local skills (user/agent) override ~/.agents/skills"
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    merged.extend(agent_filtered);
+    merged.extend(user_defs);
     merged.sort_by(|a, b| a.name.cmp(&b.name));
     merged
 }
@@ -703,7 +761,7 @@ description: "Get current weather conditions. Trigger words: weather, forecast, 
         write_skill(&local, "skill-a", "skill-a", "# A (local)");
         write_skill(&agents, "skill-b", "skill-b", "# B (shared)");
 
-        let merged = load_skills_layered(&local, Some(&agents));
+        let merged = load_skills_layered(None, &local, Some(&agents));
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].name, "skill-a");
         assert_eq!(merged[1].name, "skill-b");
@@ -717,7 +775,7 @@ description: "Get current weather conditions. Trigger words: weather, forecast, 
         write_skill(&local, "skill-a", "skill-a", "# local version");
         write_skill(&agents, "skill-a", "skill-a", "# shared version");
 
-        let merged = load_skills_layered(&local, Some(&agents));
+        let merged = load_skills_layered(None, &local, Some(&agents));
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].prompt_body, "# local version");
     }
@@ -728,7 +786,7 @@ description: "Get current weather conditions. Trigger words: weather, forecast, 
         let local = dir.path().join("local");
         write_skill(&local, "skill-a", "skill-a", "# A");
 
-        let merged = load_skills_layered(&local, None);
+        let merged = load_skills_layered(None, &local, None);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].name, "skill-a");
     }
@@ -739,7 +797,7 @@ description: "Get current weather conditions. Trigger words: weather, forecast, 
         let local = dir.path().join("local");
         write_skill(&local, "skill-a", "skill-a", "# A");
 
-        let merged = load_skills_layered(&local, Some(Path::new("/nonexistent")));
+        let merged = load_skills_layered(None, &local, Some(Path::new("/nonexistent")));
         assert_eq!(merged.len(), 1);
     }
 

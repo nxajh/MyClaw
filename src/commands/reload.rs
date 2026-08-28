@@ -20,21 +20,20 @@ pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
     // Reloading requires base_dir for skills and agents
     let base_dir = std::path::PathBuf::from(&ctx.runtime.defaults.prompt.base_dir);
 
-    // 1. Re-scan skills — layered with the shared `~/.agents/skills`
-    // library when enabled (issue #83), so a manual `/reload` doesn't drop
-    // it from the live SkillManager.
+    // 1. Re-scan skills — all three layers (user > agent > shared), so a
+    // manual `/reload` picks up user-layer edits too and never drops the
+    // shared `~/.agents/skills` library (issue #83) from the live manager.
     let skills_dir = base_dir.join("skills");
-    let new_defs = crate::agents::skill_loader::load_skills_layered(
-        &skills_dir,
-        ctx.runtime.agents_skills_dir.as_deref(),
-    );
-    let new_skills: Vec<crate::agents::Skill> = new_defs
-        .iter()
-        .map(crate::agents::Skill::from_definition)
-        .collect();
+    let users_dir = base_dir.join("users");
+    let user_map = crate::agents::skill_loader::load_all_users_skills(&users_dir);
+    let agent_defs = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
+    let shared_defs = match ctx.runtime.agents_skills_dir.as_deref() {
+        Some(d) => crate::agents::skill_loader::load_skills_from_dir(d),
+        None => Vec::new(),
+    };
     {
         let mut skills = ctx.runtime.skills.write();
-        skills.reload(new_skills);
+        skills.reload_from_definitions(user_map, agent_defs, shared_defs);
     }
 
     // 2. Re-scan agents
