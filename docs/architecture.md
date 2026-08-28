@@ -1,10 +1,7 @@
 # MyClaw 架构文档
 
-> **用途**：源码树 / 符号级索引（自动生成痕迹保留在下文各节）。  
-> **运行时架构（As-Is）**：请先读 [`architecture-current.md`](./architecture-current.md)。  
-> **目标设计原稿**：[`architecture-target.md`](./architecture-target.md) ·  
-> [`architecture-modules.md`](./architecture-modules.md)  
-> **重构进度**：[`refactor-progress.md`](./refactor-progress.md)  
+> **用途**：源码树 / 符号级索引。
+> **重构说明**：当前系统正在进行 Architecture Restructure (#151) 拆分重构，最新的架构计划请参考 [`architecture-restructure-plan.md`](./architecture-restructure-plan.md)。
 >
 > 模块统计刷新于 **2026-07-09**（约 **192** 个 `src/**/*.rs`）。  
 > 下文各文件的函数摘录可能落后于 HEAD，以源码为准。
