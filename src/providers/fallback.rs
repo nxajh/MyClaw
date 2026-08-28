@@ -248,41 +248,20 @@ impl ChatProvider for FallbackChatProvider {
                                     "chat() failed: {}", classified.message
                                 );
 
-                                if classified.should_rotate_credential
-                                    && entry.credential_pool.is_some()
-                                    && entry.shared_api_key.is_some()
-                                {
-                                    if let (Some(pool), Some(key)) =
-                                        (&entry.credential_pool, &entry.shared_api_key)
-                                    {
-                                        let old_key = key.get();
-                                        pool.mark_exhausted(
-                                            &old_key,
-                                            &entry.model_id,
-                                            &classified.reason,
-                                            classified
-                                                .cooldown_duration()
-                                                .unwrap_or(DEFAULT_EXHAUSTION_COOLDOWN),
-                                        );
-                                        match pool.next_credential(&entry.model_id) {
-                                            Some(new_key) => {
-                                                key.set(&new_key);
-                                                tracing::info!(
-                                                    model = %entry.model_id,
-                                                    key_prefix = %new_key.chars().take(4).collect::<String>(),
-                                                    "credential rotated (setup error), retrying same provider"
-                                                );
-                                                continue 'credential_retry;
-                                            }
-                                            None => {
-                                                tracing::warn!(
-                                                    model = %entry.model_id,
-                                                    "all credentials exhausted (setup error), failing over"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                                // No credential-rotation attempt here: `classify()` is called
+                                // above with a hardcoded `status = 0`, which `classify_http`
+                                // doesn't recognize, so this always lands on Layer 3's
+                                // `status == 0 => Timeout` — `classify_provider` (the only
+                                // path that could produce Auth/Billing/RateLimit) never runs.
+                                // `should_rotate_credential` is therefore always `false` here,
+                                // so a `mark_exhausted`/`next_credential` block used to sit in
+                                // this spot but could never execute — removed during #197
+                                // review (two independent review passes both misread the dead
+                                // block as reachable and asked for it to feed `record_cooldown`
+                                // the credential pool, which would have been wrong: nothing
+                                // here would have actually exhausted it). If setup errors ever
+                                // need real rotation, `e` would need an extractable status
+                                // passed into `classify()` instead of the hardcoded `0` first.
 
                                 // Same-model short retry (Overloaded/ServerError/Timeout/short RL).
                                 if is_same_model_retryable(&classified)
