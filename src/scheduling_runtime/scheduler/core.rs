@@ -12,23 +12,23 @@ use super::*;
 
 // ── #151 Phase 8+ SchedulerApi facade impl ───────────────────────────────────
 impl crate::scheduling_types::job_types::SchedulerApi for Scheduler {
-    pub(super) fn add_job(&self, entry: JobEntry) -> anyhow::Result<String> {
+    fn add_job(&self, entry: JobEntry) -> anyhow::Result<String> {
         Scheduler::add_job(self, entry)
     }
 
-    pub(super) fn update_job(&self, id: &str, update: JobUpdate) -> anyhow::Result<bool> {
+    fn update_job(&self, id: &str, update: JobUpdate) -> anyhow::Result<bool> {
         Scheduler::update_job(self, id, update)
     }
 
-    pub(super) fn jobs(&self) -> Vec<JobEntry> {
+    fn jobs(&self) -> Vec<JobEntry> {
         Scheduler::jobs(self)
     }
 
-    pub(super) fn set_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<bool> {
+    fn set_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<bool> {
         Scheduler::set_enabled(self, id, enabled)
     }
 
-    pub(super) fn remove_job(&self, id: &str) -> anyhow::Result<Option<JobRemovalAudit>> {
+    fn remove_job(&self, id: &str) -> anyhow::Result<Option<JobRemovalAudit>> {
         Scheduler::remove_job(self, id)
     }
 
