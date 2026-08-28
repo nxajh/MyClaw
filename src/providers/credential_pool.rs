@@ -4,28 +4,29 @@
 //! rotates to the next available key instead of failing over to a different
 //! provider (which may have higher cost or lower quality).
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::providers::FailoverReason;
 
-/// Status of a single credential.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CredentialStatus {
-    /// Key is healthy and available.
-    Active,
-    /// Key is temporarily exhausted (rate limit, billing) — on cooldown.
-    Exhausted,
-    /// Key has been manually disabled.
-    Disabled,
-}
-
 /// A single credential entry in the pool.
+///
+/// issue #197: quota exhaustion is scoped per `(key, scope)`, not per key
+/// alone. A single provider config can share one pool of keys across
+/// multiple models (`daemon/builder.rs` builds one `CredentialPool` per
+/// provider block and attaches a clone to every model under it), and on
+/// some providers a key's quota for one model is entirely independent of
+/// its quota for another. Recording exhaustion per key only meant a
+/// quota error on model A wrongly cooled that key down for every other
+/// model sharing the pool. `scope` is typically a chat model_id; callers
+/// with no per-model quota concept (e.g. search providers) pass `""`,
+/// which reduces to the old per-key-only behavior since every call for
+/// that pool then agrees on the same single scope.
 #[derive(Debug, Clone)]
 pub struct CredentialEntry {
     pub key: String,
-    pub status: CredentialStatus,
-    pub exhausted_until: Option<Instant>,
+    pub exhausted_until: HashMap<String, Instant>,
     pub last_used: Option<Instant>,
     pub use_count: u64,
 }
@@ -54,8 +55,7 @@ impl CredentialPool {
             .into_iter()
             .map(|key| CredentialEntry {
                 key,
-                status: CredentialStatus::Active,
-                exhausted_until: None,
+                exhausted_until: HashMap::new(),
                 last_used: None,
                 use_count: 0,
             })
@@ -78,17 +78,17 @@ impl CredentialPool {
         self.entries.is_empty()
     }
 
-    /// Refresh exhausted credentials whose cooldown has expired.
-    pub fn refresh(&mut self) {
+    /// Drop expired cooldown entries for `scope` across all keys.
+    fn refresh(&mut self, scope: &str) {
         let now = Instant::now();
         for entry in &mut self.entries {
-            if let Some(until) = entry.exhausted_until {
+            if let Some(&until) = entry.exhausted_until.get(scope) {
                 if now >= until {
-                    entry.status = CredentialStatus::Active;
-                    entry.exhausted_until = None;
+                    entry.exhausted_until.remove(scope);
                     tracing::info!(
                         provider = %self.provider_name,
                         key_prefix = %Self::mask_key(&entry.key),
+                        scope,
                         "credential cooldown expired, restored to active"
                     );
                 }
@@ -96,16 +96,16 @@ impl CredentialPool {
         }
     }
 
-    /// Get the next available credential key.
-    /// Returns None if all credentials are exhausted or disabled.
-    pub fn next_credential(&mut self) -> Option<&str> {
-        self.refresh();
+    /// Get the next available credential key for `scope`.
+    /// Returns None if every key is currently exhausted for this scope.
+    pub fn next_credential(&mut self, scope: &str) -> Option<&str> {
+        self.refresh(scope);
 
         let active_indices: Vec<usize> = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.status == CredentialStatus::Active)
+            .filter(|(_, e)| !e.exhausted_until.contains_key(scope))
             .map(|(i, _)| i)
             .collect();
 
@@ -136,20 +136,32 @@ impl CredentialPool {
         Some(&entry.key)
     }
 
-    /// Mark a credential as exhausted based on the error reason.
-    pub fn mark_exhausted(&mut self, key: &str, reason: &FailoverReason) {
-        let cooldown = Self::cooldown_for_reason(reason);
+    /// Mark `key` exhausted for `scope` until `duration` from now.
+    ///
+    /// `duration` comes from the caller's already-classified error
+    /// (`ClassifiedError::cooldown_duration()`) rather than a second,
+    /// independently-maintained reason→duration table here — issue #197
+    /// found the old local table (`RateLimit` = 1h) silently disagreeing
+    /// with `error_class.rs`'s (`RateLimit` default = 60s). `reason` is
+    /// kept only for logging.
+    pub fn mark_exhausted(
+        &mut self,
+        key: &str,
+        scope: &str,
+        reason: &FailoverReason,
+        duration: Duration,
+    ) {
         let now = Instant::now();
 
         for entry in &mut self.entries {
             if entry.key == key {
-                entry.status = CredentialStatus::Exhausted;
-                entry.exhausted_until = Some(now + cooldown);
+                entry.exhausted_until.insert(scope.to_string(), now + duration);
                 tracing::warn!(
                     provider = %self.provider_name,
                     key_prefix = %Self::mask_key(key),
+                    scope,
                     reason = ?reason,
-                    cooldown_secs = ?cooldown,
+                    cooldown_secs = duration.as_secs(),
                     "credential marked exhausted"
                 );
                 break;
@@ -157,37 +169,38 @@ impl CredentialPool {
         }
     }
 
-    /// Snapshot of current pool state for diagnostics.
-    pub fn snapshot(&self) -> Vec<(String, CredentialStatus, Option<Duration>)> {
+    /// Time until the soonest key currently exhausted for `scope` recovers.
+    /// `None` if no key is exhausted for this scope right now (including
+    /// when the pool has never seen an exhaustion for it).
+    pub fn soonest_recovery(&self, scope: &str) -> Option<Duration> {
+        let now = Instant::now();
+        self.entries
+            .iter()
+            .filter_map(|e| e.exhausted_until.get(scope))
+            .filter(|&&until| until > now)
+            .map(|&until| until - now)
+            .min()
+    }
+
+    /// Snapshot of current pool state for `scope`, for diagnostics.
+    pub fn snapshot(&self, scope: &str) -> Vec<(String, Option<Duration>)> {
         let now = Instant::now();
         self.entries
             .iter()
             .map(|e| {
-                let remaining = e.exhausted_until.map(|u| {
+                let remaining = e.exhausted_until.get(scope).map(|&u| {
                     if u > now {
-                        u.duration_since(now)
+                        u - now
                     } else {
                         Duration::ZERO
                     }
                 });
-                (Self::mask_key(&e.key), e.status, remaining)
+                (Self::mask_key(&e.key), remaining)
             })
             .collect()
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────
-
-    fn cooldown_for_reason(reason: &FailoverReason) -> Duration {
-        match reason {
-            FailoverReason::Auth => Duration::from_secs(5 * 60), // 5 minutes
-            FailoverReason::RateLimit => Duration::from_secs(60 * 60), // 1 hour
-            FailoverReason::Billing => Duration::from_secs(24 * 3600), // 24 hours
-            FailoverReason::Overloaded => Duration::from_secs(5 * 60), // 5 minutes
-            FailoverReason::ServerError => Duration::from_secs(10 * 60), // 10 minutes
-            FailoverReason::Timeout => Duration::from_secs(5 * 60), // 5 minutes
-            _ => Duration::from_secs(60 * 60),                   // 1 hour default
-        }
-    }
 
     fn mask_key(key: &str) -> String {
         if key.len() <= 8 {
@@ -254,19 +267,25 @@ impl SharedCredentialPool {
         }
     }
 
-    pub fn next_credential(&self) -> Option<String> {
+    pub fn next_credential(&self, scope: &str) -> Option<String> {
         let mut pool = self.inner.lock().unwrap();
-        pool.next_credential().map(|s| s.to_string())
+        pool.next_credential(scope).map(|s| s.to_string())
     }
 
-    pub fn mark_exhausted(&self, key: &str, reason: &FailoverReason) {
+    pub fn mark_exhausted(&self, key: &str, scope: &str, reason: &FailoverReason, duration: Duration) {
         let mut pool = self.inner.lock().unwrap();
-        pool.mark_exhausted(key, reason);
+        pool.mark_exhausted(key, scope, reason, duration);
     }
 
-    pub fn snapshot(&self) -> Vec<(String, CredentialStatus, Option<Duration>)> {
+    /// Time until the soonest key currently exhausted for `scope` recovers.
+    pub fn soonest_recovery(&self, scope: &str) -> Option<Duration> {
         let pool = self.inner.lock().unwrap();
-        pool.snapshot()
+        pool.soonest_recovery(scope)
+    }
+
+    pub fn snapshot(&self, scope: &str) -> Vec<(String, Option<Duration>)> {
+        let pool = self.inner.lock().unwrap();
+        pool.snapshot(scope)
     }
 
     pub fn len(&self) -> usize {
@@ -284,6 +303,9 @@ impl SharedCredentialPool {
 mod tests {
     use super::*;
 
+    const MODEL_A: &str = "model-a";
+    const MODEL_B: &str = "model-b";
+
     #[test]
     fn fill_first_uses_first_active() {
         let mut pool = CredentialPool::new(
@@ -291,8 +313,8 @@ mod tests {
             vec!["key1".to_string(), "key2".to_string()],
             RotationStrategy::FillFirst,
         );
-        assert_eq!(pool.next_credential(), Some("key1"));
-        assert_eq!(pool.next_credential(), Some("key1"));
+        assert_eq!(pool.next_credential(MODEL_A), Some("key1"));
+        assert_eq!(pool.next_credential(MODEL_A), Some("key1"));
     }
 
     #[test]
@@ -302,9 +324,9 @@ mod tests {
             vec!["key1".to_string(), "key2".to_string()],
             RotationStrategy::RoundRobin,
         );
-        assert_eq!(pool.next_credential(), Some("key1"));
-        assert_eq!(pool.next_credential(), Some("key2"));
-        assert_eq!(pool.next_credential(), Some("key1"));
+        assert_eq!(pool.next_credential(MODEL_A), Some("key1"));
+        assert_eq!(pool.next_credential(MODEL_A), Some("key2"));
+        assert_eq!(pool.next_credential(MODEL_A), Some("key1"));
     }
 
     #[test]
@@ -314,8 +336,8 @@ mod tests {
             vec!["key1".to_string(), "key2".to_string()],
             RotationStrategy::FillFirst,
         );
-        pool.mark_exhausted("key1", &FailoverReason::RateLimit);
-        assert_eq!(pool.next_credential(), Some("key2"));
+        pool.mark_exhausted("key1", MODEL_A, &FailoverReason::RateLimit, Duration::from_secs(3600));
+        assert_eq!(pool.next_credential(MODEL_A), Some("key2"));
     }
 
     #[test]
@@ -325,12 +347,75 @@ mod tests {
             vec!["key1".to_string()],
             RotationStrategy::FillFirst,
         );
-        pool.mark_exhausted("key1", &FailoverReason::Auth);
-        assert_eq!(pool.next_credential(), None);
+        pool.mark_exhausted("key1", MODEL_A, &FailoverReason::Auth, Duration::from_secs(300));
+        assert_eq!(pool.next_credential(MODEL_A), None);
 
         // Simulate cooldown expiration by manipulating the timestamp
-        pool.entries[0].exhausted_until = Some(Instant::now() - Duration::from_secs(1));
-        assert_eq!(pool.next_credential(), Some("key1"));
+        pool.entries[0]
+            .exhausted_until
+            .insert(MODEL_A.to_string(), Instant::now() - Duration::from_secs(1));
+        assert_eq!(pool.next_credential(MODEL_A), Some("key1"));
+    }
+
+    /// issue #197 (problem 1 root cause): a key exhausted for one model
+    /// must remain fully usable for a different model sharing the same
+    /// pool — `daemon/builder.rs` attaches one `CredentialPool` to every
+    /// model under a provider, and quota is per (key, model) on providers
+    /// like GLM, not per key alone.
+    #[test]
+    fn exhaustion_is_scoped_per_model_not_global_to_the_key() {
+        let mut pool = CredentialPool::new(
+            "test",
+            vec!["key1".to_string()],
+            RotationStrategy::FillFirst,
+        );
+        pool.mark_exhausted("key1", MODEL_A, &FailoverReason::Billing, Duration::from_secs(5 * 3600));
+
+        assert_eq!(
+            pool.next_credential(MODEL_A),
+            None,
+            "key1 must be unavailable for the model that actually hit quota"
+        );
+        assert_eq!(
+            pool.next_credential(MODEL_B),
+            Some("key1"),
+            "the same key must still be usable for an unrelated model"
+        );
+    }
+
+    /// Complementary case: a *different* key must never be blocked by
+    /// another key's exhaustion, for the same model or otherwise.
+    #[test]
+    fn one_key_exhausted_does_not_block_other_keys() {
+        let mut pool = CredentialPool::new(
+            "test",
+            vec!["key1".to_string(), "key2".to_string()],
+            RotationStrategy::FillFirst,
+        );
+        pool.mark_exhausted("key1", MODEL_A, &FailoverReason::Billing, Duration::from_secs(5 * 3600));
+        assert_eq!(pool.next_credential(MODEL_A), Some("key2"));
+    }
+
+    #[test]
+    fn soonest_recovery_reflects_the_shortest_remaining_cooldown_for_scope() {
+        let mut pool = CredentialPool::new(
+            "test",
+            vec!["key1".to_string(), "key2".to_string()],
+            RotationStrategy::FillFirst,
+        );
+        // key1: long Billing cooldown for MODEL_A.
+        pool.mark_exhausted("key1", MODEL_A, &FailoverReason::Billing, Duration::from_secs(5 * 3600));
+        // key2: much shorter RateLimit cooldown, same scope.
+        pool.mark_exhausted("key2", MODEL_A, &FailoverReason::RateLimit, Duration::from_secs(60));
+
+        let remaining = pool.soonest_recovery(MODEL_A).unwrap();
+        assert!(
+            remaining <= Duration::from_secs(60),
+            "soonest_recovery must reflect key2's short cooldown, not key1's long one, got {remaining:?}"
+        );
+
+        // A model that never had any exhaustion recorded for it sees nothing.
+        assert_eq!(pool.soonest_recovery(MODEL_B), None);
     }
 
     #[test]

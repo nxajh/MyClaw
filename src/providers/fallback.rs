@@ -43,6 +43,14 @@ const RATE_LIMIT_SLEEP_CAP: Duration = Duration::from_secs(60);
 /// Actual delays: attempt 1 = 2 s, attempt 2 = 4 s.
 const TRANSIENT_BACKOFF_BASE: Duration = Duration::from_secs(2);
 
+/// Fallback duration for `mark_exhausted` when the triggering error somehow
+/// carries no classified cooldown at all. Categories that set
+/// `should_rotate_credential` always have one in practice (checked against
+/// `recovery_hints_for` — every rotation-worthy category returns
+/// `Some(..)`), so this only guards against a future category gaining
+/// rotation eligibility without a cooldown.
+const DEFAULT_EXHAUSTION_COOLDOWN: Duration = Duration::from_secs(3600);
+
 /// Whether the classified error is worth retrying on the *same* chain entry
 /// (short RateLimit / Overloaded / ServerError / Timeout).
 fn is_same_model_retryable(classified: &ClassifiedError) -> bool {
@@ -116,12 +124,36 @@ impl FallbackChatProvider {
 }
 
 /// Record a cooldown deadline for `model_id` if the classified error carries one.
+///
+/// issue #197: when `credential_pool` is passed, prefer the pool's own
+/// `soonest_recovery(model_id)` over the classified error's cooldown. The
+/// classified error only reflects whichever single key failed *last* in a
+/// rotation sequence — using its duration directly could park the whole
+/// model behind a long Billing cooldown (e.g. 5h) even though another key
+/// in the pool, scoped to this same model, recovers in minutes.
+///
+/// Callers must only pass `credential_pool` when *this* failure is the one
+/// that actually exhausted it — i.e. right after `next_credential` returned
+/// `None` for this same call. `soonest_recovery` has no way to tell "this
+/// scope has an exhaustion record because of the failure we're handling
+/// right now" from "this scope has a stale, unrelated exhaustion record
+/// left over from a different key's different failure at some earlier
+/// time" — both look identical from inside the pool. Passing the pool for
+/// a failure that never called `mark_exhausted` (should_rotate_credential
+/// was false — e.g. ModelNotFound, ContentPolicy) would silently borrow
+/// that unrelated record's remaining duration instead of this error's own,
+/// with no causal relationship between the two. Callers on that path pass
+/// `None` and always get `classified.cooldown_duration()` untouched, same
+/// as before this fix existed.
 fn record_cooldown(
     cooldowns: &Mutex<HashMap<String, Instant>>,
     model_id: &str,
     classified: &ClassifiedError,
+    credential_pool: Option<&SharedCredentialPool>,
 ) {
-    if let Some(d) = classified.cooldown_duration() {
+    let pool_duration = credential_pool.and_then(|p| p.soonest_recovery(model_id));
+    let duration = pool_duration.or_else(|| classified.cooldown_duration());
+    if let Some(d) = duration {
         cooldowns
             .lock()
             .unwrap()
@@ -216,34 +248,20 @@ impl ChatProvider for FallbackChatProvider {
                                     "chat() failed: {}", classified.message
                                 );
 
-                                if classified.should_rotate_credential
-                                    && entry.credential_pool.is_some()
-                                    && entry.shared_api_key.is_some()
-                                {
-                                    if let (Some(pool), Some(key)) =
-                                        (&entry.credential_pool, &entry.shared_api_key)
-                                    {
-                                        let old_key = key.get();
-                                        pool.mark_exhausted(&old_key, &classified.reason);
-                                        match pool.next_credential() {
-                                            Some(new_key) => {
-                                                key.set(&new_key);
-                                                tracing::info!(
-                                                    model = %entry.model_id,
-                                                    key_prefix = %new_key.chars().take(4).collect::<String>(),
-                                                    "credential rotated (setup error), retrying same provider"
-                                                );
-                                                continue 'credential_retry;
-                                            }
-                                            None => {
-                                                tracing::warn!(
-                                                    model = %entry.model_id,
-                                                    "all credentials exhausted (setup error), failing over"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                                // No credential-rotation attempt here: `classify()` is called
+                                // above with a hardcoded `status = 0`, which `classify_http`
+                                // doesn't recognize, so this always lands on Layer 3's
+                                // `status == 0 => Timeout` — `classify_provider` (the only
+                                // path that could produce Auth/Billing/RateLimit) never runs.
+                                // `should_rotate_credential` is therefore always `false` here,
+                                // so a `mark_exhausted`/`next_credential` block used to sit in
+                                // this spot but could never execute — removed during #197
+                                // review (two independent review passes both misread the dead
+                                // block as reachable and asked for it to feed `record_cooldown`
+                                // the credential pool, which would have been wrong: nothing
+                                // here would have actually exhausted it). If setup errors ever
+                                // need real rotation, `e` would need an extractable status
+                                // passed into `classify()` instead of the hardcoded `0` first.
 
                                 // Same-model short retry (Overloaded/ServerError/Timeout/short RL).
                                 if is_same_model_retryable(&classified)
@@ -263,7 +281,7 @@ impl ChatProvider for FallbackChatProvider {
                                 }
 
                                 if should_failover_to_next(&classified) {
-                                    record_cooldown(&cooldowns, &entry.model_id, &classified);
+                                    record_cooldown(&cooldowns, &entry.model_id, &classified, None);
                                     broke_for_failover = true;
                                     break 'credential_retry;
                                 }
@@ -328,7 +346,7 @@ impl ChatProvider for FallbackChatProvider {
                                     }
 
                                     if should_failover_to_next(&classified) {
-                                        record_cooldown(&cooldowns, &entry.model_id, &classified);
+                                        record_cooldown(&cooldowns, &entry.model_id, &classified, None);
                                         should_failover = true;
                                         break;
                                     }
@@ -369,7 +387,7 @@ impl ChatProvider for FallbackChatProvider {
                                     }
 
                                     if should_failover_to_next(&classified) {
-                                        record_cooldown(&cooldowns, &entry.model_id, &classified);
+                                        record_cooldown(&cooldowns, &entry.model_id, &classified, None);
                                         tracing::warn!(
                                             model = %entry.model_id,
                                             category = %classified.category,
@@ -423,8 +441,15 @@ impl ChatProvider for FallbackChatProvider {
                             &last_classified,
                         ) {
                             let old_key = key.get();
-                            pool.mark_exhausted(&old_key, &classified.reason);
-                            match pool.next_credential() {
+                            pool.mark_exhausted(
+                                &old_key,
+                                &entry.model_id,
+                                &classified.reason,
+                                classified
+                                    .cooldown_duration()
+                                    .unwrap_or(DEFAULT_EXHAUSTION_COOLDOWN),
+                            );
+                            match pool.next_credential(&entry.model_id) {
                                 Some(new_key) => {
                                     key.set(&new_key);
                                     tracing::info!(
@@ -439,7 +464,7 @@ impl ChatProvider for FallbackChatProvider {
                                         model = %entry.model_id,
                                         "all credentials exhausted, failing over"
                                     );
-                                    record_cooldown(&cooldowns, &entry.model_id, classified);
+                                    record_cooldown(&cooldowns, &entry.model_id, classified, entry.credential_pool.as_ref());
                                 }
                             }
                         }
@@ -459,7 +484,7 @@ impl ChatProvider for FallbackChatProvider {
                         503,
                         "all credentials exhausted",
                     );
-                    record_cooldown(&cooldowns, &entry.model_id, &classified);
+                    record_cooldown(&cooldowns, &entry.model_id, &classified, None);
                 }
             }
 
@@ -489,6 +514,7 @@ impl ChatProvider for FallbackChatProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::FailoverReason;
 
     enum MockResult {
         FailHttp { status: u16, message: String },
@@ -527,6 +553,150 @@ mod tests {
             credential_pool: None,
             shared_api_key: None,
         }
+    }
+
+    /// issue #197 (problem 1): reproduces the reported incident directly
+    /// against `record_cooldown` — a Billing error on one key (5h cooldown)
+    /// must not park the whole model behind that 5h wait when another key
+    /// in the same pool, for the same model, only has ~1 minute left.
+    #[test]
+    fn record_cooldown_uses_pool_soonest_recovery_not_the_last_errors_duration() {
+        use crate::providers::credential_pool::{CredentialPool, RotationStrategy};
+
+        let pool = SharedCredentialPool::new(CredentialPool::new(
+            "glm",
+            vec!["key-8f85".to_string(), "key-e700".to_string()],
+            RotationStrategy::FillFirst,
+        ));
+        // key-8f85: short RateLimit cooldown, ~60s left.
+        pool.mark_exhausted(
+            "key-8f85",
+            "glm-5.2",
+            &FailoverReason::RateLimit,
+            Duration::from_secs(60),
+        );
+        // key-e700: the *last* error tried — long Billing cooldown, 5h.
+        pool.mark_exhausted(
+            "key-e700",
+            "glm-5.2",
+            &FailoverReason::Billing,
+            Duration::from_secs(5 * 3600),
+        );
+
+        // The "last classified error" the old code used verbatim — Billing,
+        // 5h. If record_cooldown ignored the pool, glm-5.2 would be parked
+        // for 5h even though key-8f85 recovers in ~60s.
+        let classified = ClassifiedError::new(FailoverReason::Billing, "quota exhausted");
+        assert_eq!(classified.cooldown_duration(), Some(Duration::from_secs(5 * 3600)));
+
+        let cooldowns: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+        record_cooldown(&cooldowns, "glm-5.2", &classified, Some(&pool));
+
+        let deadline = *cooldowns.lock().unwrap().get("glm-5.2").expect("cooldown recorded");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            remaining <= Duration::from_secs(60),
+            "model cooldown must reflect the pool's soonest-recovering key (~60s), \
+             not the last error's own 5h Billing duration, got {remaining:?}"
+        );
+    }
+
+    /// A failover reason unrelated to credential exhaustion (no key was
+    /// ever marked exhausted for this model) must still use the classified
+    /// error's own duration — the pool has nothing to derive from.
+    #[test]
+    fn record_cooldown_falls_back_to_classified_duration_without_pool_exhaustion() {
+        use crate::providers::credential_pool::{CredentialPool, RotationStrategy};
+
+        let pool = SharedCredentialPool::new(CredentialPool::new(
+            "glm",
+            vec!["key-1".to_string()],
+            RotationStrategy::FillFirst,
+        ));
+        // Note: no mark_exhausted call — this model's scope has no recorded
+        // exhaustion in the pool at all.
+
+        let classified = ClassifiedError::new(FailoverReason::Overloaded, "server overloaded");
+        let expected = classified.cooldown_duration().unwrap();
+
+        let cooldowns: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+        record_cooldown(&cooldowns, "glm-5.2", &classified, Some(&pool));
+
+        let deadline = *cooldowns.lock().unwrap().get("glm-5.2").expect("cooldown recorded");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            remaining <= expected && remaining > expected.saturating_sub(Duration::from_secs(1)),
+            "expected ~{expected:?}, got {remaining:?}"
+        );
+    }
+
+    /// End-to-end regression for the "borrowing" flaw found during PR review:
+    /// a failure that never touches the credential pool (`ModelNotFound`,
+    /// `should_rotate_credential == false`) must not inherit an unrelated
+    /// key's leftover exhaustion from the pool. Before this fix, every
+    /// `record_cooldown` call site unconditionally passed
+    /// `entry.credential_pool.as_ref()`, so a 404 on `glm-5.2` would have
+    /// borrowed `key-e700`'s stale 5h Billing cooldown (from some earlier,
+    /// unrelated failure) even though the 404 itself carries no cooldown at
+    /// all (`ModelNotFound => RecoveryHints { cooldown: None, .. }`).
+    ///
+    /// Verified via behavior, not internal state: a second immediate call
+    /// to the same model must still reach the provider (`CHAIN_EXHAUSTED_TAG`
+    /// — attempted and failed again) rather than being gated on arrival
+    /// (`CHAIN_ALL_COOLING_TAG` — skipped without an attempt), which is what
+    /// a wrongly-recorded multi-hour model cooldown would produce.
+    #[tokio::test]
+    async fn model_not_found_does_not_borrow_an_unrelated_keys_pool_cooldown() {
+        use crate::providers::credential_pool::{CredentialPool, RotationStrategy};
+
+        let pool = SharedCredentialPool::new(CredentialPool::new(
+            "glm",
+            vec!["key-8f85".to_string(), "key-e700".to_string()],
+            RotationStrategy::FillFirst,
+        ));
+        // key-e700 has an unrelated, long-lived exhaustion record for this
+        // same model scope — e.g. from a Billing error on a different
+        // request, hours ago, still not expired.
+        pool.mark_exhausted(
+            "key-e700",
+            "glm-5.2",
+            &FailoverReason::Billing,
+            Duration::from_secs(5 * 3600),
+        );
+
+        let fb = FallbackChatProvider::new(vec![FallbackEntry {
+            provider: Arc::new(MockChatProvider {
+                result: MockResult::FailHttp {
+                    status: 404,
+                    message: "model not found".into(),
+                },
+            }),
+            model_id: "glm-5.2".to_string(),
+            provider_id: "glm".to_string(),
+            credential_pool: Some(pool),
+            shared_api_key: Some(SharedApiKey::new("key-8f85")),
+        }]);
+
+        let first: Vec<StreamEvent> = fb.chat(request("glm-5.2")).unwrap().collect().await;
+        assert!(
+            first.iter().any(|e| matches!(e, StreamEvent::Error(msg) if msg.contains(CHAIN_EXHAUSTED_TAG))),
+            "first call must actually attempt the model and exhaust the chain, got {first:?}"
+        );
+
+        // If ModelNotFound had wrongly borrowed key-e700's 5h Billing
+        // cooldown, this second call — issued immediately after — would be
+        // gated at arrival (CHAIN_ALL_COOLING_TAG) instead of reaching the
+        // provider again.
+        let second: Vec<StreamEvent> = fb.chat(request("glm-5.2")).unwrap().collect().await;
+        assert!(
+            second.iter().any(|e| matches!(e, StreamEvent::Error(msg) if msg.contains(CHAIN_EXHAUSTED_TAG))),
+            "second call must still attempt the model (ModelNotFound carries no cooldown of \
+             its own) — got {second:?}, which would mean it was gated on an unrelated key's cooldown"
+        );
+        assert!(
+            !second.iter().any(|e| matches!(e, StreamEvent::Error(msg) if msg.contains(CHAIN_ALL_COOLING_TAG))),
+            "second call must not be skipped as 'on cooldown', got {second:?}"
+        );
     }
 
     fn request(model: &str) -> ChatRequest<'_> {
