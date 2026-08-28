@@ -173,6 +173,7 @@ async fn test_delete_rejects_shared_library_skill() {
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        local.path().join("users"),
         local.path().join("skills"),
         Some(shared_skills_dir),
     );
@@ -199,6 +200,7 @@ async fn test_patch_rejects_shared_library_skill() {
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        local.path().join("users"),
         local.path().join("skills"),
         Some(shared_skills_dir),
     );
@@ -228,6 +230,7 @@ async fn test_write_file_rejects_shared_library_skill() {
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        local.path().join("users"),
         local.path().join("skills"),
         Some(shared_skills_dir),
     );
