@@ -48,12 +48,15 @@ impl Tool for SkillManageTool {
         "Manage skills (create, edit, patch, delete). Skills are reusable approaches for \
          recurring task types.\n\nActions: create (full SKILL.md), patch (old_string/new_string \
          — preferred for fixes), edit (full rewrite — major overhauls), delete, write_file, \
-         remove_file.\n\nCreate when: complex task succeeded (5+ tool calls), errors overcome, \
-         user-corrected approach worked, or user asks to remember a procedure.\nUpdate when: \
-         instructions stale/wrong, missing steps or pitfalls found during use.\n\nGood skills \
-         include: trigger conditions, numbered steps with exact commands, pitfalls section, \
-         verification steps. Use skill_view() to see format examples.\n\nConfirm with user \
-         before creating or deleting skills. Skip for simple one-off tasks."
+         remove_file.\n\nWrites only ever touch the user layer: editing an agent-layer or \
+         shared skill automatically forks it into your personal copy (the original stays \
+         untouched); deleting a shared original is refused.\n\nCreate when: complex task \
+         succeeded (5+ tool calls), errors overcome, user-corrected approach worked, or user \
+         asks to remember a procedure.\nUpdate when: instructions stale/wrong, missing steps \
+         or pitfalls found during use.\n\nGood skills include: trigger conditions, numbered \
+         steps with exact commands, pitfalls section, verification steps. Use skill_view() to \
+         see format examples.\n\nConfirm with user before creating or deleting skills. Skip \
+         for simple one-off tasks."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -151,11 +154,25 @@ impl SkillManageTool {
         if name == "self" {
             return Err("Cannot create skill with reserved name 'self'".to_string());
         }
-        if self.skills.find(name, Some(&ctx.owner)).is_some() {
-            return Err(format!(
-                "Skill '{}' already exists. Use 'edit' or 'patch' to modify it.",
-                name
-            ));
+        if let Some(existing) = self.skills.find(name, Some(&ctx.owner)) {
+            return Err(match existing
+                .skill_dir
+                .as_deref()
+                .and_then(|dir| self.layer_of(dir, &self.user_root(ctx)))
+            {
+                // A read-only original with this name exists — steer the
+                // caller to the mutating actions, which auto-fork it into
+                // the user layer (RFC #101 §2.6).
+                Some(layer @ ("agent" | "shared")) => format!(
+                    "Skill '{name}' already exists in the {layer} layer. Use patch/edit instead — \
+                     it will auto-fork the skill into your user layer."
+                ),
+                // User layer (or unclassifiable) — the original wording.
+                _ => format!(
+                    "Skill '{}' already exists. Use 'edit' or 'patch' to modify it.",
+                    name
+                ),
+            });
         }
 
         // Normalize FQID owner (`myclaw/u/{uuid}`) to the bare uuid directory
@@ -197,16 +214,19 @@ impl SkillManageTool {
         validate_frontmatter(content, name)?;
         validate_content_size(content)?;
 
-        let skill_dir = self.get_skill_dir(name, ctx)?;
-        atomic_write(&skill_dir.join("SKILL.md"), content)
+        let resolved = self.get_skill_dir(name, ctx, true)?;
+        atomic_write(&resolved.dir.join("SKILL.md"), content)
             .map_err(|e| format!("Failed to write SKILL.md: {}", e))?;
 
         self.refresh_skills();
 
-        Ok(json!({
-            "success": true,
-            "message": format!("Skill '{}' updated.", name)
-        }))
+        Ok(with_fork_note(
+            json!({
+                "success": true,
+                "message": format!("Skill '{}' updated.", name)
+            }),
+            resolved.forked_from,
+        ))
     }
 
     fn action_patch(
@@ -223,7 +243,8 @@ impl SkillManageTool {
             .ok_or("'new_string' is required for patch")?;
         let file_path = args["file_path"].as_str();
 
-        let skill_dir = self.get_skill_dir(name, ctx)?;
+        let resolved = self.get_skill_dir(name, ctx, true)?;
+        let skill_dir = resolved.dir;
 
         let target = match file_path {
             None => skill_dir.join("SKILL.md"),
@@ -264,18 +285,24 @@ impl SkillManageTool {
 
         self.refresh_skills();
 
-        Ok(json!({
-            "success": true,
-            "message": format!("Patched 1 replacement in {}.", file_label)
-        }))
+        Ok(with_fork_note(
+            json!({
+                "success": true,
+                "message": format!("Patched 1 replacement in {}.", file_label)
+            }),
+            resolved.forked_from,
+        ))
     }
 
     fn action_delete(&self, name: &str, ctx: &crate::api::tool::ToolContext) -> Result<serde_json::Value, String> {
         if name == "self" {
             return Err("Cannot delete reserved skill 'self'".to_string());
         }
-        let skill_dir = self.get_skill_dir(name, ctx)?;
-        std::fs::remove_dir_all(&skill_dir)
+        // allow_fork=false: deleting a fork that was just created is
+        // meaningless — non-user-layer targets are refused outright
+        // (RFC #101 §2.6).
+        let resolved = self.get_skill_dir(name, ctx, false)?;
+        std::fs::remove_dir_all(&resolved.dir)
             .map_err(|e| format!("Failed to delete skill directory: {}", e))?;
 
         self.refresh_skills();
@@ -309,7 +336,8 @@ impl SkillManageTool {
             ));
         }
 
-        let skill_dir = self.get_skill_dir(name, ctx)?;
+        let resolved = self.get_skill_dir(name, ctx, true)?;
+        let skill_dir = resolved.dir;
         let target = skill_dir.join(file_path);
         if !target.starts_with(&skill_dir) {
             return Err("Path traversal not allowed.".to_string());
@@ -322,12 +350,16 @@ impl SkillManageTool {
 
         atomic_write(&target, file_content).map_err(|e| format!("Failed to write file: {}", e))?;
 
-        // Auxiliary files don't affect skill metadata — no refresh needed.
-        Ok(json!({
-            "success": true,
-            "message": format!("File '{}' written.", file_path),
-            "path": format!("skills/{}/{}", name, file_path)
-        }))
+        // Auxiliary files don't affect skill metadata — no refresh needed
+        // (a fork refreshed already inside get_skill_dir).
+        Ok(with_fork_note(
+            json!({
+                "success": true,
+                "message": format!("File '{}' written.", file_path),
+                "path": format!("skills/{}/{}", name, file_path)
+            }),
+            resolved.forked_from,
+        ))
     }
 
     fn action_remove_file(
@@ -341,7 +373,8 @@ impl SkillManageTool {
             .ok_or("'file_path' is required for remove_file")?;
         validate_supporting_file_path(file_path)?;
 
-        let skill_dir = self.get_skill_dir(name, ctx)?;
+        let resolved = self.get_skill_dir(name, ctx, true)?;
+        let skill_dir = resolved.dir;
         let target = skill_dir.join(file_path);
         if !target.starts_with(&skill_dir) {
             return Err("Path traversal not allowed.".to_string());
@@ -366,90 +399,171 @@ impl SkillManageTool {
             }
         }
 
-        Ok(json!({
-            "success": true,
-            "message": format!("File '{}' removed from skill '{}'.", file_path, name)
-        }))
+        Ok(with_fork_note(
+            json!({
+                "success": true,
+                "message": format!("File '{}' removed from skill '{}'.", file_path, name)
+            }),
+            resolved.forked_from,
+        ))
     }
 
-    /// Resolve `name` to its on-disk skill directory for a write operation
+    /// Resolve `name` to the on-disk skill directory a write operation
     /// (edit/patch/delete/write_file/remove_file — the only callers of this
-    /// method). Rejects a skill sourced from `agents_skills_dir` (issue #83's
-    /// cross-agent shared library, `~/.agents/skills`): that library is
-    /// read-only by design (`skill_manage` only ever writes under
-    /// `skills_root`), but before this check `get_skill_dir` returned the
-    /// shared path anyway and every caller happily wrote/deleted through it
-    /// (issue #93 — filing this as "should say read-only instead of 'not
-    /// found'" undersold it: nothing ever produced "not found" for a
-    /// shared-only skill, the writes/deletes silently succeeded against the
-    /// shared library).
+    /// method) should act on, under the **fork model** (RFC #101 §2.6,
+    /// decided 2026-08-29):
     ///
-    /// RFC #101 P1.1 additionally makes the agent layer (`skills_root`,
-    /// `~/.myclaw/skills`) read-only for `skill_manage`: it is a system-level
-    /// layer shared by all owners and managed through the workspace
-    /// filesystem/git, yet the registry's owner-aware resolution happily
-    /// handed an agent-layer dir to any owner's edit/patch/delete/
-    /// write_file/remove_file, letting one user mutate (or delete) system
-    /// skills for everyone. Writes now only ever land in the caller's user
-    /// layer (`users/{owner}/skills`); the same-name check order (user →
-    /// agent → shared) matches the registry's shadowing precedence, so a
-    /// user-layer copy still resolves first and stays writable. The leading
-    /// `validate_name` also closes a path-injection hole: edit/patch/delete
-    /// previously reached directory resolution with unvalidated names
-    /// (`../`, `/`, …).
+    /// - target in the caller's own user layer (`users/{owner}/skills`,
+    ///   owner normalized via `bare_dir_name`) → returned as-is (written
+    ///   in place);
+    /// - target in the agent layer (`skills_root`) or the shared library
+    ///   (`agents_skills_dir`, `~/.agents/skills` — issue #83/#99) → those
+    ///   originals are read-only: with `allow_fork` the skill is **lazily
+    ///   forked** — fully copied into the caller's user layer (shadowing
+    ///   precedence user > agent > shared makes the copy take effect) and
+    ///   the copy's path is returned; `forked_from` records the source
+    ///   layer so the caller can flag the fork in its response. Without
+    ///   `allow_fork` (delete — forking just to delete the copy would be
+    ///   meaningless) the request is refused;
+    /// - registry dir outside every known root → refused (nothing writes
+    ///   there by design).
+    ///
+    /// The leading `validate_name` also keeps the path-injection hole
+    /// closed: edit/patch/delete must never reach directory resolution
+    /// with unvalidated names (`../`, `/`, …).
     fn get_skill_dir(
         &self,
         name: &str,
         ctx: &crate::api::tool::ToolContext,
-    ) -> Result<PathBuf, String> {
+        allow_fork: bool,
+    ) -> Result<ResolvedSkillDir, String> {
         validate_name(name)?;
 
-        let user_root = self.users_root.join(crate::ids::bare_dir_name(&ctx.owner));
+        let user_root = self.user_root(ctx);
 
         let dir = self
             .skills
             .skill_dir(name, Some(&ctx.owner))
             .ok_or_else(|| format!("Skill '{}' not found.", name))?;
 
-        // User layer (users/{owner}/skills) — the only writable layer.
-        // Checked before `skills_root`: the roots are not guaranteed to be
-        // disjoint, and a user skill nested under skills_root must still
-        // resolve as user-owned.
-        if dir.starts_with(&user_root) {
-            return Ok(dir);
+        match self.layer_of(&dir, &user_root) {
+            // User layer (users/{owner}/skills) — the only layer written
+            // in place. Checked before `skills_root`: the roots are not
+            // guaranteed to be disjoint, and a user skill nested under
+            // skills_root must still resolve as user-owned.
+            Some("user") => Ok(ResolvedSkillDir {
+                dir,
+                forked_from: None,
+            }),
+            // Agent layer / shared library — read-only originals, fork
+            // channel for mutating actions (RFC #101 §2.6).
+            Some(layer) => {
+                if !allow_fork {
+                    return Err(format!(
+                        "Skill '{name}' is a shared original ({layer} layer: {path}) — \
+                         originals are read-only and can't be deleted via skill_manage. \
+                         Delete your user-layer fork instead; the original is managed via \
+                         the workspace filesystem/git.",
+                        path = dir.display()
+                    ));
+                }
+                let forked_dir = self.fork_to_user_layer(&dir, name, layer, ctx)?;
+                // The copy takes over resolution (user > agent > shared):
+                // refresh so subsequent operations on the same name hit
+                // the user layer instead of trying to fork again.
+                self.refresh_skills();
+                Ok(ResolvedSkillDir {
+                    dir: forked_dir,
+                    forked_from: Some(layer),
+                })
+            }
+            // Registry returned a directory outside every known layer
+            // root. Nothing writes there by design — refuse rather than
+            // fall through.
+            None => Err(format!(
+                "Skill '{name}' resolves outside your user skills directory \
+                 ({}) and outside every known skills layer — refusing to write.",
+                user_root.display()
+            )),
         }
+    }
 
-        // Agent layer (skills_root) — read-only for skill_manage.
-        if dir.starts_with(&self.skills_root) {
+    /// The caller's user-layer root (`users/{owner}`), with the FQID owner
+    /// (`myclaw/u/{uuid}`) normalized to the bare uuid directory name —
+    /// the users/ tree layout is `users/{uuid}/skills`.
+    fn user_root(&self, ctx: &crate::api::tool::ToolContext) -> PathBuf {
+        self.users_root.join(crate::ids::bare_dir_name(&ctx.owner))
+    }
+
+    /// Classify an on-disk skill directory by layer (RFC #101 §2.1/§2.5).
+    /// User layer is checked first: the roots are not guaranteed to be
+    /// disjoint, and a user skill nested under another root must still
+    /// count as user-owned. Returns `None` for directories outside every
+    /// known layer root.
+    fn layer_of(&self, dir: &Path, user_root: &Path) -> Option<&'static str> {
+        if dir.starts_with(user_root) {
+            Some("user")
+        } else if dir.starts_with(&self.skills_root) {
+            Some("agent")
+        } else if self
+            .agents_skills_dir
+            .as_deref()
+            .is_some_and(|shared| dir.starts_with(shared))
+        {
+            Some("shared")
+        } else {
+            None
+        }
+    }
+
+    /// Lazily fork a read-only original (agent layer / shared library)
+    /// into the caller's user layer (RFC #101 §2.6): full recursive copy
+    /// of the skill directory plus a `.fork-origin` provenance sidecar
+    /// (kept out of SKILL.md — layering stays directory-authoritative).
+    ///
+    /// Atomic on success: the copy is built under a dot-prefixed temporary
+    /// sibling (with SKILL.md written last, so the loader — which requires
+    /// a SKILL.md per directory — can never pick up a half-fork even if a
+    /// watcher races the copy) and renamed into place. On any failure the
+    /// temporary directory is removed and the original is untouched.
+    fn fork_to_user_layer(
+        &self,
+        src: &Path,
+        name: &str,
+        source_layer: &str,
+        ctx: &crate::api::tool::ToolContext,
+    ) -> Result<PathBuf, String> {
+        let user_skills = self.user_root(ctx).join("skills");
+        let dest = user_skills.join(name);
+        let tmp = user_skills.join(format!(".{}.fork-tmp", name));
+
+        std::fs::create_dir_all(&user_skills)
+            .map_err(|e| format!("Failed to create user skills directory: {}", e))?;
+        // Leftover from an aborted fork — never loaded (dot-prefixed, no
+        // loader contract on it), safe to discard.
+        let _ = std::fs::remove_dir_all(&tmp);
+        if dest.exists() {
             return Err(format!(
-                "Skill '{name}' comes from the agent layer ({}) and is read-only \
-                 here — it is managed via the workspace filesystem/git, not via \
-                 skill_manage. To customize it, use action='create' to make a \
-                 same-named skill in your user layer, which shadows the \
-                 agent-layer one.",
-                self.skills_root.display()
+                "A user-layer copy of skill '{name}' already exists at {dest} — \
+                 the registry should have resolved it; remove it first if it is \
+                 broken and you want to re-fork from the {source_layer} layer.",
+                dest = dest.display()
             ));
         }
 
-        if let Some(shared) = &self.agents_skills_dir {
-            if dir.starts_with(shared) {
-                return Err(format!(
-                    "Skill '{name}' comes from the shared library ({}) and is read-only \
-                     here — it can't be edited, patched, deleted, or have files added/removed \
-                     via skill_manage.",
-                    shared.display()
-                ));
+        let build = copy_dir_recursive(src, &tmp)
+            .and_then(|()| write_fork_origin(&tmp, source_layer, src));
+        match build {
+            Ok(()) => std::fs::rename(&tmp, &dest).map_err(|e| {
+                let _ = std::fs::remove_dir_all(&tmp);
+                format!("Failed to move the forked skill into place: {}", e)
+            }),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp);
+                Err(e)
             }
         }
-
-        // Registry returned a directory outside every known layer root.
-        // Nothing writes there by design — refuse rather than fall through.
-        Err(format!(
-            "Skill '{name}' resolves outside your user skills directory \
-             ({}) and is read-only here — skill_manage writes are limited \
-             to your own user-layer skills.",
-            user_root.display()
-        ))
+        .map(|()| dest)
     }
 
     fn refresh_skills(&self) {
@@ -461,6 +575,88 @@ impl SkillManageTool {
             self.agents_skills_dir.as_deref(),
         );
     }
+}
+
+// ── Fork model (RFC #101 §2.6) ────────────────────────────────────────────────
+
+/// A write operation's resolved target directory plus — when the lazy
+/// fork fired — the layer the personal copy was forked from.
+struct ResolvedSkillDir {
+    dir: PathBuf,
+    forked_from: Option<&'static str>,
+}
+
+/// Annotate a successful action's response when its target was forked
+/// from a read-only original (RFC #101 §2.6): the caller must be able to
+/// see the write landed on a personal copy, not the shared original.
+fn with_fork_note(
+    mut value: serde_json::Value,
+    forked_from: Option<&'static str>,
+) -> serde_json::Value {
+    if let Some(layer) = forked_from {
+        value["forked"] = json!(true);
+        value["note"] = json!(format!(
+            "Created your personal copy; the {layer}-layer original is untouched."
+        ));
+    }
+    value
+}
+
+/// Recursively copy a skill directory (SKILL.md + every subdirectory)
+/// into `dst`, which must not exist yet. SKILL.md is written last so a
+/// concurrent loader/watcher scan of the destination can never see a
+/// half-copied skill (the loader only considers directories with a
+/// SKILL.md). Refuses sources without a SKILL.md.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst)
+        .map_err(|e| format!("Failed to create {}: {}", dst.display(), e))?;
+    let entries =
+        std::fs::read_dir(src).map_err(|e| format!("Failed to read {}: {}", src.display(), e))?;
+    let mut skill_md: Option<PathBuf> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if name == "SKILL.md" {
+            skill_md = Some(path);
+            continue;
+        }
+        let target = dst.join(&name);
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else if path.is_file() {
+            std::fs::copy(&path, &target)
+                .map_err(|e| format!("Failed to copy {}: {}", path.display(), e))?;
+        }
+    }
+    match skill_md {
+        Some(md) => std::fs::copy(&md, dst.join("SKILL.md"))
+            .map(|_| ())
+            .map_err(|e| format!("Failed to copy {}: {}", md.display(), e)),
+        None => Err(format!(
+            "Source skill {} has no SKILL.md — refusing to fork a malformed skill.",
+            src.display()
+        )),
+    }
+}
+
+/// Write the `.fork-origin` provenance sidecar for a forked copy (RFC
+/// #101 §2.6): source layer, source path and fork timestamp, as JSON.
+/// Lives beside SKILL.md — never inside it (directory-authoritative
+/// layering, no frontmatter scope fields).
+fn write_fork_origin(
+    forked_dir: &Path,
+    source_layer: &str,
+    source_path: &Path,
+) -> Result<(), String> {
+    let origin = json!({
+        "source_layer": source_layer,
+        "source_path": source_path.display().to_string(),
+        "forked_at": chrono::Local::now().to_rfc3339(),
+    });
+    let body = serde_json::to_string_pretty(&origin)
+        .map_err(|e| format!("Failed to serialize .fork-origin: {}", e))?;
+    std::fs::write(forked_dir.join(".fork-origin"), body)
+        .map_err(|e| format!("Failed to write .fork-origin: {}", e))
 }
 
 // ── Validation helpers ────────────────────────────────────────────────────────

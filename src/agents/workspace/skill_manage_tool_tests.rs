@@ -4,8 +4,9 @@
 //! + 写后热重载），L3 层经 api 门面无法构造具体类型，故整体迁到 L4：
 //! L4→L3 引用方向合法，测试语义与工具对外行为零改动。
 //!
-//! RFC #101 P1.1 后 skill_manage 写操作只落 user 层：agent 层（skills_root）
-//! 与 shared 层（agents_skills_dir）一律只读拦截，见各 fixture 注释。
+//! RFC #101 P1.1（2026-08-29 修订为 fork 模型）：user 层直接写；agent 层
+//! （skills_root）与 shared 层（agents_skills_dir）原始版只读——写操作惰性
+//! fork 到本人 user 层副本（§2.6），delete 对非 user 层直接拒绝。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,8 +44,8 @@ fn ctx(owner: &str) -> crate::api::tool::ToolContext {
 }
 
 /// User-layer fixture (RFC #101 P1): the skill lives in
-/// `users/{owner}/skills/{name}` — the only layer `skill_manage` write
-/// actions may touch since P1.1.
+/// `users/{owner}/skills/{name}` — the only layer written in place;
+/// non-user layers are forked into it (RFC #101 §2.6).
 fn setup_user(workspace: &Path, owner: &str, skill_name: &str) -> Arc<RwLock<SkillManager>> {
     write_skill(
         &workspace.join("users").join(owner).join("skills"),
@@ -57,8 +58,9 @@ fn setup_user(workspace: &Path, owner: &str, skill_name: &str) -> Arc<RwLock<Ski
 }
 
 /// Agent-layer fixture: the skill lives in `workspace/skills/{name}`
-/// (`skills_root` — the system-level, git-managed layer). P1.1 makes it
-/// read-only for every skill_manage write action.
+/// (`skills_root` — the system-level, git-managed layer). A read-only
+/// original: mutating actions fork it into the caller's user layer
+/// (RFC #101 §2.6), `delete` is refused.
 fn setup_agent(workspace: &Path, skill_name: &str) -> Arc<RwLock<SkillManager>> {
     write_skill(&workspace.join("skills"), skill_name);
     let agent_defs = skill_loader::load_skills_from_dir(&workspace.join("skills"));
@@ -265,6 +267,19 @@ fn setup_shared_only(
     }
     (Arc::new(RwLock::new(mgr)), shared_skills_dir)
 }
+/// Parse the `.fork-origin` sidecar of a forked user-layer copy and
+/// return its `source_layer` (RFC #101 §2.6).
+fn fork_origin_source_layer(forked_skill_dir: &Path) -> String {
+    let body = std::fs::read_to_string(forked_skill_dir.join(".fork-origin"))
+        .expect(".fork-origin sidecar must exist in the forked copy");
+    let origin: serde_json::Value =
+        serde_json::from_str(&body).expect(".fork-origin must be valid JSON");
+    origin["source_layer"]
+        .as_str()
+        .expect(".fork-origin must carry source_layer")
+        .to_string()
+}
+
 #[tokio::test]
 async fn test_delete_rejects_shared_library_skill() {
     let local = tempfile::tempdir().unwrap();
@@ -283,9 +298,11 @@ async fn test_delete_rejects_shared_library_skill() {
         )
         .await
         .unwrap();
+    // fork model (RFC #101 §2.6): delete of a non-user-layer original is
+    // refused outright — forking just to delete the copy is meaningless.
     assert!(!result.success);
     assert!(
-        result.output.contains("shared library"),
+        result.output.contains("shared original"),
         "{}",
         result.output
     );
@@ -297,7 +314,7 @@ async fn test_delete_rejects_shared_library_skill() {
     assert!(mgr.read().get("sharedskill", None).is_some());
 }
 #[tokio::test]
-async fn test_patch_rejects_shared_library_skill() {
+async fn test_patch_forks_shared_library_skill() {
     let local = tempfile::tempdir().unwrap();
     let shared = tempfile::tempdir().unwrap();
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
@@ -317,17 +334,28 @@ async fn test_patch_rejects_shared_library_skill() {
         )
         .await
         .unwrap();
-    assert!(!result.success);
-    assert!(result.output.contains("read-only"), "{}", result.output);
-    let content =
-        std::fs::read_to_string(shared.path().join("skills/sharedskill/SKILL.md")).unwrap();
-    assert!(
-        content.contains("Do stuff."),
-        "shared skill content must be unchanged, got: {content}"
+    // The #93 read-only interception is superseded by the fork channel:
+    // the patch lands on a fresh user-layer copy, the shared original is
+    // byte-identical.
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("\"forked\":true"), "{}", result.output);
+    let copy = std::fs::read_to_string(
+        local.path().join("users/test/skills/sharedskill/SKILL.md"),
+    )
+    .unwrap();
+    assert!(copy.contains("Do something else."));
+    assert_eq!(
+        fork_origin_source_layer(&local.path().join("users/test/skills/sharedskill")),
+        "shared"
+    );
+    assert_eq!(
+        std::fs::read_to_string(shared.path().join("skills/sharedskill/SKILL.md")).unwrap(),
+        "---\nname: sharedskill\ndescription: \"Test\"\n---\n# Test\n\nDo stuff.",
+        "shared original must be byte-identical after the fork+patch"
     );
 }
 #[tokio::test]
-async fn test_write_file_rejects_shared_library_skill() {
+async fn test_write_file_forks_shared_library_skill() {
     let local = tempfile::tempdir().unwrap();
     let shared = tempfile::tempdir().unwrap();
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
@@ -347,13 +375,25 @@ async fn test_write_file_rejects_shared_library_skill() {
         )
         .await
         .unwrap();
-    assert!(!result.success);
-    assert!(result.output.contains("read-only"), "{}", result.output);
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("\"forked\":true"), "{}", result.output);
+    assert!(
+        local
+            .path()
+            .join("users/test/skills/sharedskill/references/notes.md")
+            .exists(),
+        "the file must land in the forked user-layer copy"
+    );
+    assert_eq!(
+        fork_origin_source_layer(&local.path().join("users/test/skills/sharedskill")),
+        "shared"
+    );
     assert!(
         !shared
             .path()
             .join("skills/sharedskill/references/notes.md")
-            .exists()
+            .exists(),
+        "the shared library must stay untouched"
     );
 }
 #[tokio::test]
@@ -436,10 +476,15 @@ async fn test_path_traversal_rejected() {
     assert!(!result.success);
 }
 
-// ── RFC #101 P1.1: agent layer (skills_root) is read-only for writes ─────────
+// ── RFC #101 §2.6: agent layer (skills_root) — read-only originals,
+//    mutating writes lazily fork into the caller's user layer ─────────────────
+
+/// Byte-expectation for a `write_skill` fixture — originals must stay
+/// byte-identical across a fork, not merely "contain" their old text.
+const AGENT_ORIGINAL: &str = "---\nname: agentskill\ndescription: \"Test\"\n---\n# Test\n\nDo stuff.";
 
 #[tokio::test]
-async fn test_edit_rejects_agent_layer_skill() {
+async fn test_edit_forks_agent_layer_skill() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup_agent(dir.path(), "agentskill");
     let tool = SkillManageTool::new(
@@ -452,23 +497,29 @@ async fn test_edit_rejects_agent_layer_skill() {
         .execute(
             json!({
                 "action": "edit", "name": "agentskill",
-                "content": "---\nname: agentskill\ndescription: \"Test\"\n---\n# Test\n\nHijacked."
+                "content": "---\nname: agentskill\ndescription: \"Test\"\n---\n# Test\n\nForked and rewritten."
             }),
             &ctx("test"),
         )
         .await
         .unwrap();
-    assert!(!result.success);
-    assert!(result.output.contains("agent layer"), "{}", result.output);
-    assert!(result.output.contains("read-only"), "{}", result.output);
-    let content = std::fs::read_to_string(dir.path().join("skills/agentskill/SKILL.md")).unwrap();
-    assert!(
-        content.contains("Do stuff."),
-        "agent-layer file must be unchanged, got: {content}"
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("\"forked\":true"), "{}", result.output);
+    let copy =
+        std::fs::read_to_string(dir.path().join("users/test/skills/agentskill/SKILL.md")).unwrap();
+    assert!(copy.contains("Forked and rewritten."));
+    assert_eq!(
+        fork_origin_source_layer(&dir.path().join("users/test/skills/agentskill")),
+        "agent"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("skills/agentskill/SKILL.md")).unwrap(),
+        AGENT_ORIGINAL,
+        "agent-layer original must be byte-identical after the fork+edit"
     );
 }
 #[tokio::test]
-async fn test_patch_rejects_agent_layer_skill() {
+async fn test_patch_forks_agent_layer_skill() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup_agent(dir.path(), "agentskill");
     let tool = SkillManageTool::new(
@@ -487,43 +538,38 @@ async fn test_patch_rejects_agent_layer_skill() {
         )
         .await
         .unwrap();
-    assert!(!result.success);
-    assert!(result.output.contains("agent layer"), "{}", result.output);
-    assert!(result.output.contains("read-only"), "{}", result.output);
-    let content = std::fs::read_to_string(dir.path().join("skills/agentskill/SKILL.md")).unwrap();
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("\"forked\":true"), "{}", result.output);
+    assert!(result.output.contains("original is untouched"), "{}", result.output);
+    // the patch landed on the user-layer copy…
+    let copy =
+        std::fs::read_to_string(dir.path().join("users/test/skills/agentskill/SKILL.md")).unwrap();
+    assert!(copy.contains("Do something else."));
+    // …the original is byte-identical…
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("skills/agentskill/SKILL.md")).unwrap(),
+        AGENT_ORIGINAL,
+        "agent-layer original must be byte-identical after the fork+patch"
+    );
+    // …provenance recorded (§2.6 sidecar)…
+    assert_eq!(
+        fork_origin_source_layer(&dir.path().join("users/test/skills/agentskill")),
+        "agent"
+    );
+    // …and the copy shadows the original for its owner (user > agent).
+    let resolved = mgr
+        .read()
+        .skill_dir("agentskill", Some("test"))
+        .expect("skill must still resolve after the fork")
+        .to_path_buf();
     assert!(
-        content.contains("Do stuff."),
-        "agent-layer file must be unchanged, got: {content}"
+        resolved.starts_with(dir.path().join("users/test/skills")),
+        "post-fork resolution must prefer the user-layer copy, got {}",
+        resolved.display()
     );
 }
 #[tokio::test]
-async fn test_delete_rejects_agent_layer_skill() {
-    let dir = tempfile::tempdir().unwrap();
-    let mgr = setup_agent(dir.path(), "agentskill");
-    let tool = SkillManageTool::new(
-        Arc::clone(&mgr),
-        dir.path().join("users"),
-        dir.path().join("skills"),
-        None,
-    );
-    let result = tool
-        .execute(
-            json!({"action": "delete", "name": "agentskill"}),
-            &ctx("test"),
-        )
-        .await
-        .unwrap();
-    assert!(!result.success);
-    assert!(result.output.contains("agent layer"), "{}", result.output);
-    assert!(result.output.contains("read-only"), "{}", result.output);
-    assert!(
-        dir.path().join("skills/agentskill/SKILL.md").exists(),
-        "agent-layer skill must survive a rejected delete"
-    );
-    assert!(mgr.read().get("agentskill", None).is_some());
-}
-#[tokio::test]
-async fn test_write_file_rejects_agent_layer_skill() {
+async fn test_write_file_forks_agent_layer_skill() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup_agent(dir.path(), "agentskill");
     let tool = SkillManageTool::new(
@@ -542,21 +588,27 @@ async fn test_write_file_rejects_agent_layer_skill() {
         )
         .await
         .unwrap();
-    assert!(!result.success);
-    assert!(result.output.contains("agent layer"), "{}", result.output);
-    assert!(result.output.contains("read-only"), "{}", result.output);
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("\"forked\":true"), "{}", result.output);
+    assert!(
+        dir.path()
+            .join("users/test/skills/agentskill/references/notes.md")
+            .exists(),
+        "the file must land in the forked user-layer copy"
+    );
     assert!(
         !dir.path()
             .join("skills/agentskill/references/notes.md")
-            .exists()
+            .exists(),
+        "the agent layer must stay untouched"
     );
 }
 #[tokio::test]
-async fn test_remove_file_rejects_agent_layer_skill() {
+async fn test_remove_file_forks_agent_layer_skill() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = setup_agent(dir.path(), "agentskill");
-    // A real target file, so the rejection proves path interception (not a
-    // missing-file shortcut).
+    // A real target file in the original, so the removal proves the fork
+    // path (the copy inherits the file, then drops it there).
     std::fs::create_dir_all(dir.path().join("skills/agentskill/references")).unwrap();
     std::fs::write(
         dir.path().join("skills/agentskill/references/notes.md"),
@@ -579,14 +631,121 @@ async fn test_remove_file_rejects_agent_layer_skill() {
         )
         .await
         .unwrap();
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("\"forked\":true"), "{}", result.output);
+    // removed in the forked copy…
+    assert!(
+        !dir
+            .path()
+            .join("users/test/skills/agentskill/references/notes.md")
+            .exists(),
+        "the file must be gone from the user-layer copy"
+    );
+    // …still present (byte-identical dir) in the original.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("skills/agentskill/references/notes.md")).unwrap(),
+        "note",
+        "the agent-layer original must keep its file"
+    );
+}
+#[tokio::test]
+async fn test_delete_rejects_agent_layer_skill() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = setup_agent(dir.path(), "agentskill");
+    let tool = SkillManageTool::new(
+        Arc::clone(&mgr),
+        dir.path().join("users"),
+        dir.path().join("skills"),
+        None,
+    );
+    let result = tool
+        .execute(
+            json!({"action": "delete", "name": "agentskill"}),
+            &ctx("test"),
+        )
+        .await
+        .unwrap();
+    // fork model (RFC #101 §2.6): forking just to delete the copy would
+    // be meaningless — non-user-layer targets are refused outright.
     assert!(!result.success);
-    assert!(result.output.contains("agent layer"), "{}", result.output);
+    assert!(result.output.contains("shared original"), "{}", result.output);
     assert!(result.output.contains("read-only"), "{}", result.output);
     assert!(
-        dir.path()
-            .join("skills/agentskill/references/notes.md")
-            .exists(),
-        "agent-layer file must survive a rejected remove_file"
+        dir.path().join("skills/agentskill/SKILL.md").exists(),
+        "agent-layer skill must survive a rejected delete"
+    );
+    assert!(mgr.read().get("agentskill", None).is_some());
+}
+#[tokio::test]
+async fn test_delete_user_fork_copy_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = setup_agent(dir.path(), "agentskill");
+    let tool = SkillManageTool::new(
+        Arc::clone(&mgr),
+        dir.path().join("users"),
+        dir.path().join("skills"),
+        None,
+    );
+    // Create the fork (recovery baseline: a broken copy can be deleted
+    // and re-forked — RFC #101 §2.6 motivation).
+    let forked = tool
+        .execute(
+            json!({
+                "action": "patch", "name": "agentskill",
+                "old_string": "Do stuff.", "new_string": "My own take."
+            }),
+            &ctx("test"),
+        )
+        .await
+        .unwrap();
+    assert!(forked.success, "{}", forked.output);
+    // Deleting the personal fork is an ordinary user-layer delete.
+    let result = tool
+        .execute(
+            json!({"action": "delete", "name": "agentskill"}),
+            &ctx("test"),
+        )
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.output);
+    assert!(
+        !dir.path().join("users/test/skills/agentskill").exists(),
+        "the user-layer fork must be deleted"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("skills/agentskill/SKILL.md")).unwrap(),
+        AGENT_ORIGINAL,
+        "the agent-layer original must survive as the recovery baseline"
+    );
+}
+#[tokio::test]
+async fn test_create_agent_layer_duplicate_points_to_fork() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = setup_agent(dir.path(), "agentskill");
+    let tool = SkillManageTool::new(
+        Arc::clone(&mgr),
+        dir.path().join("users"),
+        dir.path().join("skills"),
+        None,
+    );
+    let result = tool
+        .execute(
+            json!({
+                "action": "create", "name": "agentskill",
+                "content": "---\nname: agentskill\ndescription: \"Mine\"\n---\n# Mine\n\nBody."
+            }),
+            &ctx("test"),
+        )
+        .await
+        .unwrap();
+    assert!(!result.success);
+    assert!(result.output.contains("agent layer"), "{}", result.output);
+    assert!(result.output.contains("patch"), "{}", result.output);
+    assert!(result.output.contains("auto-fork"), "{}", result.output);
+    // no fork was created — create is not a fork channel.
+    assert!(
+        !dir.path().join("users/test/skills/agentskill").exists(),
+        "create must not fork the agent-layer skill"
     );
 }
 #[tokio::test]

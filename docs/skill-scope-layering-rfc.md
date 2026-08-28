@@ -4,6 +4,7 @@
 - **日期**: 2026-08-21
 - **关联**: issue #89（draft 积压可见性，PR #100）、#83/#85（共享库）、#93/#99（共享库写保护）、PR #100 评审备注（draft 名单跨用户暴露）、`docs/rfc-two-tier-memory.md`（记忆两层既有 frontmatter 语义，§6 将其存储同构化）
 - **决策人**: 用户（nxajh），2026-08-21 会话定稿
+- **修订**: 2026-08-29（决策人 nxajh）——「agent 层写权限」由"保持全体可写"改为 **fork 模型**：原始技能（agent 层/共享库）经 `skill_manage` 只读；修改经**惰性 fork** 落本人 user 层副本（详见 §2.6）。推翻原因：对话场景（用户要求 agent 改进共享 skill）下"全体可写"无法防御单用户改坏全员技能且无恢复手段；fork 保留零摩擦改进循环，破坏半径收敛到副本，原始版即恢复基线。§2.4/§2.5/§5 同步更新。
 
 ## 0. 问题陈述
 
@@ -21,7 +22,7 @@
 |---|---|
 | 分层模型 | 两层：user 层 + agent 层（对齐 memory 两层与 `load_skills_layered` 惯例） |
 | 存量迁移 | **全部 21 个（4 draft + 17 active）归 user 层**，agent 层从空开始，此后仅经「提升」进入 |
-| agent 层写权限 | **保持全体可写**（信任模型现状不变；#99 写保护仅针对 `~/.agents/skills` 共享库） |
+| agent 层写权限 | **fork 模型**（2026-08-29 修订）：原始技能经 `skill_manage` 只读；修改自动 fork 到本人 user 层副本（遮蔽生效）。更新原始版走 operator 的文件系统/git 或 P3 `promote`（`~/.agents/skills` 共享库 #99 保护不变，同为 fork 源） |
 | extract 默认落点 | user 层（从谁的会话提取落谁的层），除 headless/无主会话外，普通用户交互不允许直接产 agent 层 draft |
 
 ## 2. 设计
@@ -63,7 +64,7 @@ user 层 ∪ agent 层 ∪ 共享库
 triage 词表（保留/合并/删除）增加「**提升**」：
 
 - user→agent 晋升即审核动作本身：`skill_manage` 新 action `promote`（operator 或
-  技能 owner 可发起；agent 层全体可写 ⇒ 晋升后其他用户可再修改，信任模型一致）。
+  技能 owner 可发起；晋升后原始版仍只读，其他用户的改进同样经 fork→再 promote 循环，信任模型一致）。
 - 晋升时去标识化检查（同 memory agent-scope 规则）：提示词正文不得含 user_id、
   个人路径、会话专属引用；由执行者（agent）自查 + 提示确认。
 
@@ -72,8 +73,24 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 | 层 | owner | operator | 其他用户 |
 |---|---|---|---|
 | user 层（本人） | 读/写 | 读 | 不可见 |
-| agent 层 | — | 读/写 | 读/写（决策：保持全体可写） |
-| 共享库 `~/.agents/skills` | — | 只读 | 只读（#99） |
+| agent 层 | — | 只读*（fork 源） | 只读（fork 源） |
+| 共享库 `~/.agents/skills` | — | 只读（#99，fork 源） | 只读（#99，fork 源） |
+
+*operator 更新原始版走 workspace 文件系统/git（或 P3 `promote`）；`skill_manage` 通道一律 fork（2026-08-29 修订）。
+
+### 2.6 fork 模型（2026-08-29 增补，P1.1 实施）
+
+`skill_manage` 写操作（edit/patch/delete/write_file/remove_file）目标解析规则：
+
+- 目标在本人 user 层 → 直接写（现状不变）。
+- 目标在 agent 层 / 共享库（合成读命中非 user 层）→ **惰性 fork**：完整复制技能目录
+  （SKILL.md + 全部子目录）到本人 user 层，随后在副本上执行原操作；返回信息注明
+  「已创建你的副本，原始版未动」。
+- `delete` 对非 user 层目标直接拒绝（fork 后删副本无意义），提示该技能为共享原始技能。
+- 副本来源记录：sidecar 文件 `.fork-origin`（JSON：源层、源路径、fork 时间戳），不写
+  SKILL.md 正文（目录权威原则）。
+- 动机：零摩擦改进循环 + 破坏半径收敛到副本 + 原始版即恢复基线（副本改坏 → 删副本
+  重新 fork）。与 §6.2 记忆写语义（默认落 owner 层）对齐。
 
 ## 3. 存量迁移
 
@@ -104,6 +121,7 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 - [ ] backlog 提醒：user 层积压注入本人；agent 层积压注入 operator；互不越层
 - [ ] promote：owner/operator 可发起；去标识化检查提示；晋升后 agent 层可写语义
 - [ ] skill_manage：user 层本人五操作可写；其他用户对 user 层得到 not-found（不可见性）
+- [ ] fork：edit/patch/write_file 对 agent 层目标自动建副本后写入、原始版逐字节不变；delete 对非 user 层拒绝；`.fork-origin` 生成；副本遮蔽生效
 - [ ] 迁移脚本：21 个计数守恒、draft/active 状态守恒、幂等、回滚
 - [ ] watcher：user 层技能增删热载
 
