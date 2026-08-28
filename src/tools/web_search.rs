@@ -13,6 +13,18 @@ use crate::tools::search_cooldown::{
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// `CredentialPool` scopes exhaustion per `(key, scope)` (issue #197) so a
+/// key's quota on one chat model doesn't wrongly block another model
+/// sharing the same pool. Search providers have no per-model quota concept
+/// at all, so every call here uses the same fixed scope — behaviorally
+/// identical to the old per-key-only tracking.
+const SEARCH_CREDENTIAL_SCOPE: &str = "";
+
+/// Fallback duration for `mark_exhausted` when the classified error carries
+/// no cooldown of its own (see the equivalent constant in `fallback.rs`).
+const DEFAULT_EXHAUSTION_COOLDOWN: Duration = Duration::from_secs(3600);
 
 pub struct WebSearchTool {
     registry: Arc<dyn ProviderRegistry>,
@@ -193,8 +205,15 @@ impl Tool for WebSearchTool {
                                     reason = ?classified.reason,
                                     "credential failed, rotating to next key"
                                 );
-                                pool.mark_exhausted(&old_key, &classified.reason);
-                                match pool.next_credential() {
+                                pool.mark_exhausted(
+                                    &old_key,
+                                    SEARCH_CREDENTIAL_SCOPE,
+                                    &classified.reason,
+                                    classified
+                                        .cooldown_duration()
+                                        .unwrap_or(DEFAULT_EXHAUSTION_COOLDOWN),
+                                );
+                                match pool.next_credential(SEARCH_CREDENTIAL_SCOPE) {
                                     Some(new_key) => {
                                         key.set(&new_key);
                                         tracing::info!(

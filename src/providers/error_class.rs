@@ -422,7 +422,18 @@ fn recovery_hints_for(category: &ErrorCategory, retry_after: Option<Duration>) -
         },
         ErrorCategory::Billing => RecoveryHints {
             retry: false,
-            cooldown: Some(Duration::from_secs(86400)),
+            // issue #197: was a hardcoded 24h regardless of `retry_after` —
+            // GLM's 1308/1309 "5-hour usage cap" errors got parked for 5x
+            // longer than the window actually is. Prefer a parsed
+            // retry_after when the body provides one (same pattern as the
+            // other categories below); otherwise default to 5h to match
+            // that window instead of an arbitrary 24h. This does not yet
+            // parse GLM's free-text Chinese reset timestamp (e.g. "您的限额
+            // 将在 ... 重置") — only structured fields recognized by
+            // `extract_retry_after` — so GLM 1308 still falls through to
+            // the 5h default in practice; text parsing is tracked
+            // separately.
+            cooldown: retry_after.or(Some(Duration::from_secs(5 * 3600))),
             report: true,
         },
         ErrorCategory::RateLimit => RecoveryHints {
@@ -984,6 +995,29 @@ mod tests {
             r#"{"error":{"message":"insufficient_quota"}}"#,
         );
         assert!(err.should_report());
+    }
+
+    /// issue #197: Billing used to hardcode a 24h cooldown regardless of
+    /// the actual reset window — GLM's 1308/1309 errors are a 5-hour usage
+    /// cap, not a day-long ban, so the default now matches that window
+    /// instead of an arbitrary 24h.
+    #[test]
+    fn billing_default_cooldown_is_five_hours() {
+        let body = r#"{"error":{"code":1308,"message":"已达到 5 小时的使用上限"}}"#;
+        let err = ClassifiedError::classify("glm", 429, body);
+        assert_eq!(err.category, ErrorCategory::Billing);
+        assert_eq!(err.cooldown_duration(), Some(Duration::from_secs(5 * 3600)));
+    }
+
+    /// Billing now honors a parsed `retry_after` when the body provides
+    /// one, same as every other category — previously this was ignored
+    /// outright regardless of what was extracted.
+    #[test]
+    fn billing_uses_retry_after_when_present() {
+        let body = r#"{"error":{"insufficient_quota":true,"retry_after":120}}"#;
+        let err = ClassifiedError::classify("openai", 429, body);
+        assert_eq!(err.category, ErrorCategory::Billing);
+        assert_eq!(err.cooldown_duration(), Some(Duration::from_secs(120)));
     }
 
     #[test]

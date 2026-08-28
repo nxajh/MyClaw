@@ -57,8 +57,7 @@ pub mod xiaomi;
 
 pub use vendor_overrides::{AnthropicProvider, KimiProvider};
 pub use credential_pool::{
-    CredentialEntry, CredentialPool, CredentialStatus, RotationStrategy, SharedApiKey,
-    SharedCredentialPool,
+    CredentialEntry, CredentialPool, RotationStrategy, SharedApiKey, SharedCredentialPool,
 };
 pub use fallback::FallbackChatProvider;
 pub use glm::GlmProvider;
