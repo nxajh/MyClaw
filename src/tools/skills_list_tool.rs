@@ -208,6 +208,7 @@ mod tests {
             agent_invocable: false,
             user_invocable: false,
             skill_dir: None,
+            source_layer: "agent".to_string(),
         });
         let tool = SkillsListTool::new(reg);
 

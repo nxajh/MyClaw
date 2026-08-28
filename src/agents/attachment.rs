@@ -679,6 +679,7 @@ mod tests {
                 user_invocable: true,
                 agent_invocable: true,
                 skill_dir: None,
+                source_layer: "agent".to_string(),
             });
         }
         mgr
@@ -707,6 +708,7 @@ mod tests {
             user_invocable: true,
             agent_invocable: true,
             skill_dir: None,
+            source_layer: "agent".to_string(),
         });
 
         let mut am = AttachmentManager::new();
@@ -736,6 +738,7 @@ mod tests {
             user_invocable: true,
             agent_invocable: true,
             skill_dir: None,
+            source_layer: "agent".to_string(),
         });
 
         let mut am = AttachmentManager::new();

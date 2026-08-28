@@ -238,6 +238,7 @@ mod tests {
             user_invocable: true,
             agent_invocable: true,
             skill_dir: None,
+            source_layer: "agent".to_string(),
         }
     }
 
