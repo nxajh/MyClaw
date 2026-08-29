@@ -899,6 +899,7 @@ async fn test_fork_normalizes_routing_key_owner_to_uuid_dir() {
     let resolved = mgr
         .read()
         .skill_dir("agentskill", Some(fqid))
+        .map(|p| p.to_path_buf())
         .expect("registry must resolve the forked copy for the owner");
     assert!(resolved.starts_with(&uuid_copy));
 }
