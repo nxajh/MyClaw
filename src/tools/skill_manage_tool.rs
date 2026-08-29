@@ -551,7 +551,7 @@ impl SkillManageTool {
             ));
         }
 
-        let build = copy_dir_recursive(src, &tmp)
+        let build = fork_copy_skill(src, &tmp)
             .and_then(|()| write_fork_origin(&tmp, source_layer, src));
         match build {
             Ok(()) => std::fs::rename(&tmp, &dest).map_err(|e| {
@@ -607,36 +607,46 @@ fn with_fork_note(
 /// concurrent loader/watcher scan of the destination can never see a
 /// half-copied skill (the loader only considers directories with a
 /// SKILL.md). Refuses sources without a SKILL.md.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+/// Two-phase fork copy: everything except SKILL.md first, then SKILL.md
+/// last — a half-written skill dir never looks loadable. The SKILL.md
+/// requirement applies to the skill root only; subdirectories
+/// (references/, scripts/, …) are plain data and must not trigger the
+/// malformed-skill refusal (the recursive copy reaches them without one).
+fn fork_copy_skill(src: &Path, dst: &Path) -> Result<(), String> {
+    if !src.join("SKILL.md").is_file() {
+        return Err(format!(
+            "Source skill {} has no SKILL.md — refusing to fork a malformed skill.",
+            src.display()
+        ));
+    }
+    copy_dir_recursive(src, dst, true)?;
+    std::fs::copy(src.join("SKILL.md"), dst.join("SKILL.md"))
+        .map(|_| ())
+        .map_err(|e| format!("Failed to copy {}: {}", src.join("SKILL.md").display(), e))
+}
+
+/// Recursive directory copy. `skip_skill_md` defers the root SKILL.md to
+/// the caller (fork's two-phase ordering); nested SKILL.md copies in place.
+fn copy_dir_recursive(src: &Path, dst: &Path, skip_skill_md: bool) -> Result<(), String> {
     std::fs::create_dir_all(dst)
         .map_err(|e| format!("Failed to create {}: {}", dst.display(), e))?;
     let entries =
         std::fs::read_dir(src).map_err(|e| format!("Failed to read {}: {}", src.display(), e))?;
-    let mut skill_md: Option<PathBuf> = None;
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name();
-        if name == "SKILL.md" {
-            skill_md = Some(path);
+        if skip_skill_md && name == "SKILL.md" {
             continue;
         }
         let target = dst.join(&name);
         if path.is_dir() {
-            copy_dir_recursive(&path, &target)?;
+            copy_dir_recursive(&path, &target, false)?;
         } else if path.is_file() {
             std::fs::copy(&path, &target)
                 .map_err(|e| format!("Failed to copy {}: {}", path.display(), e))?;
         }
     }
-    match skill_md {
-        Some(md) => std::fs::copy(&md, dst.join("SKILL.md"))
-            .map(|_| ())
-            .map_err(|e| format!("Failed to copy {}: {}", md.display(), e)),
-        None => Err(format!(
-            "Source skill {} has no SKILL.md — refusing to fork a malformed skill.",
-            src.display()
-        )),
-    }
+    Ok(())
 }
 
 /// Write the `.fork-origin` provenance sidecar for a forked copy (RFC
