@@ -741,12 +741,13 @@ mod tests {
     #[test]
     fn candidate_collection_is_incremental() {
         let d = tmp_dir("incr");
-        std::fs::create_dir_all(d.join("skills/same")).unwrap();
-        std::fs::create_dir_all(d.join("skills/changed")).unwrap();
+        // Real layout: users/{user}/skills/{name}/SKILL.md
+        std::fs::create_dir_all(d.join("u1/skills/same")).unwrap();
+        std::fs::create_dir_all(d.join("u1/skills/changed")).unwrap();
         let same = "---\nname: same\n---\nbody";
         let changed = "---\nname: changed\n---\nbody v1";
-        std::fs::write(d.join("skills/same/SKILL.md"), same).unwrap();
-        std::fs::write(d.join("skills/changed/SKILL.md"), changed).unwrap();
+        std::fs::write(d.join("u1/skills/same/SKILL.md"), same).unwrap();
+        std::fs::write(d.join("u1/skills/changed/SKILL.md"), changed).unwrap();
         let agent = tmp_dir("incr_agent");
 
         // Index from a previous pass: "same" recorded, "changed" recorded
