@@ -197,8 +197,8 @@ mod tests {
             write_draft_skill(&user_skills_dir(base.path()), &format!("draft-{i}"));
         }
         let first = check_and_arm(base.path(), 0, OWNER_FQID, false);
-        assert_eq!(first.map(|b| b.user_layer.len()), Some(THRESHOLD));
-        assert!(first.is_some_and(|b| b.agent_layer.is_empty()));
+        assert_eq!(first.as_ref().map(|b| b.user_layer.len()), Some(THRESHOLD));
+        assert!(first.as_ref().is_some_and(|b| b.agent_layer.is_empty()));
 
         // Second call same day: throttled even though the backlog is
         // still (more than) big enough.
