@@ -59,8 +59,9 @@ pub struct ProposerInput {
     pub skills_root: PathBuf,
     /// Directory for proposal files (`{base_dir}/skill-proposals`).
     pub proposals_dir: PathBuf,
-    /// State dir (`{base_dir}/state/skill-proposer`).
-    pub state_dir: PathBuf,
+    /// Sha index from the caller's persistent state (name → content sha at
+    /// last classification) — the increment filter for candidate collection.
+    pub classified: HashMap<String, String>,
 }
 
 /// A user-layer skill candidate collected for classification.
@@ -294,10 +295,12 @@ fn sha256_hex(data: &str) -> String {
 
 /// Collect classification candidates: active user-layer skills that are not
 /// shadowed by an agent-layer name and whose sha changed since last pass.
+/// `classified_shas` is the incremental index (name → content sha at last
+/// classification); a skill whose sha matches is skipped.
 fn collect_candidates(
     users_dir: &Path,
     skills_root: &Path,
-    state: &ProposerState,
+    classified_shas: &HashMap<String, String>,
 ) -> Vec<Candidate> {
     let mut out = Vec::new();
     for skill_md in iter_user_skill_files(users_dir) {
@@ -334,11 +337,7 @@ fn collect_candidates(
         };
         let sha = sha256_hex(&content);
         // Increment: unchanged since it was last classified B/C.
-        if state
-            .classified_shas
-            .get(&name)
-            .is_some_and(|prev| prev == &sha)
-        {
+        if classified_shas.get(&name).is_some_and(|prev| prev == &sha) {
             continue;
         }
         let identifiers = scan_personal_identifiers(&content, users_dir);
@@ -487,15 +486,23 @@ fn write_proposal_file(
     path
 }
 
-/// Run one proposer pass. Returns (promoted_count, tier_b_count) on success.
+/// Run one proposer pass. Returns (promoted_count, tier_b_count, classified)
+/// on success, where `classified` maps skill name → content sha for every
+/// non-promoted candidate the pass classified (B or C). The caller owns the
+/// persistent ProposerState (single writer) and merges this into
+/// `classified_shas` when recording the attempt — the pass itself never
+/// loads or saves state (the previous two-instance pattern let the caller's
+/// stale copy overwrite the pass's sha index on record_attempt).
 /// Concurrent passes are prevented by a global semaphore.
-pub async fn run_skill_proposer(input: ProposerInput) -> Result<(usize, usize)> {
+pub async fn run_skill_proposer(
+    input: ProposerInput,
+) -> Result<(usize, usize, HashMap<String, String>)> {
     let semaphore = PROPOSER_SEMAPHORE.get_or_init(|| Semaphore::new(1));
     let permit = match semaphore.try_acquire() {
         Ok(permit) => permit,
         Err(_) => {
             tracing::debug!("skill_proposer: skipped because another pass is running");
-            return Ok((0, 0));
+            return Ok((0, 0, HashMap::new()));
         }
     };
 
@@ -504,13 +511,13 @@ pub async fn run_skill_proposer(input: ProposerInput) -> Result<(usize, usize)> 
     drop(permit);
 
     match result {
-        Ok(Ok(counts)) => {
+        Ok(Ok((promoted, tier_b, classified))) => {
             tracing::info!(
-                promoted = counts.0,
-                tier_b = counts.1,
+                promoted = promoted,
+                tier_b = tier_b,
                 "skill_proposer: finished"
             );
-            Ok(counts)
+            Ok((promoted, tier_b, classified))
         }
         Ok(Err(e)) => {
             tracing::warn!(err = %e, "skill_proposer: failed");
@@ -524,14 +531,13 @@ pub async fn run_skill_proposer(input: ProposerInput) -> Result<(usize, usize)> 
     }
 }
 
-async fn run_skill_proposer_inner(input: ProposerInput) -> Result<(usize, usize)> {
-    let state_dir = input.state_dir;
-    let mut state = ProposerState::load(&state_dir);
-
-    let candidates = collect_candidates(&input.users_dir, &input.skills_root, &state);
+async fn run_skill_proposer_inner(
+    input: ProposerInput,
+) -> Result<(usize, usize, HashMap<String, String>)> {
+    let candidates = collect_candidates(&input.users_dir, &input.skills_root, &input.classified);
     if candidates.is_empty() {
         tracing::debug!("skill_proposer: no new/changed user-layer skills, nothing to do");
-        return Ok((0, 0));
+        return Ok((0, 0, HashMap::new()));
     }
 
     // Batch by input budget.
@@ -622,19 +628,17 @@ async fn run_skill_proposer_inner(input: ProposerInput) -> Result<(usize, usize)
         }
     }
 
-    // Record B/C classifications for incremental skip; promoted skills left
-    // the user layer so they will not be re-collected anyway.
+    // Sha index for every non-promoted candidate the pass classified (B/C).
+    // Promoted skills left the user layer so they will not be re-collected.
+    let mut classified = HashMap::new();
     for c in &candidates {
         if !promoted.iter().any(|(n, _)| n == &c.name) {
-            state
-                .classified_shas
-                .insert(c.name.clone(), c.sha.clone());
+            classified.insert(c.name.clone(), c.sha.clone());
         }
     }
-    state.save(&state_dir);
 
     if promoted.is_empty() && tier_b.is_empty() && tier_c.is_empty() {
-        return Ok((0, 0));
+        return Ok((0, 0, classified));
     }
     let path = write_proposal_file(&input.proposals_dir, &promoted, &tier_b, &tier_c);
     tracing::info!(
@@ -644,7 +648,7 @@ async fn run_skill_proposer_inner(input: ProposerInput) -> Result<(usize, usize)
         tier_c = tier_c.len(),
         "skill_proposer: proposal written"
     );
-    Ok((promoted.len(), tier_b.len()))
+    Ok((promoted.len(), tier_b.len(), classified))
 }
 
 /// Collect a chat response stream into plain text.
@@ -732,6 +736,34 @@ mod tests {
             hits
         );
         let _ = std::fs::remove_dir_all(&users);
+    }
+
+    #[test]
+    fn candidate_collection_is_incremental() {
+        let d = tmp_dir("incr");
+        std::fs::create_dir_all(d.join("skills/same")).unwrap();
+        std::fs::create_dir_all(d.join("skills/changed")).unwrap();
+        let same = "---\nname: same\n---\nbody";
+        let changed = "---\nname: changed\n---\nbody v1";
+        std::fs::write(d.join("skills/same/SKILL.md"), same).unwrap();
+        std::fs::write(d.join("skills/changed/SKILL.md"), changed).unwrap();
+        let agent = tmp_dir("incr_agent");
+
+        // Index from a previous pass: "same" recorded, "changed" recorded
+        // against an older sha.
+        let mut index = std::collections::HashMap::new();
+        index.insert("same".to_string(), sha256_hex(same));
+        index.insert("changed".to_string(), sha256_hex("---\nname: changed\n---\nold"));
+
+        let got = collect_candidates(&d, &agent, &index);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "changed");
+
+        // Empty index (fresh state / lost index): everything is a candidate.
+        let all = collect_candidates(&d, &agent, &std::collections::HashMap::new());
+        assert_eq!(all.len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&agent);
     }
 
     #[test]
