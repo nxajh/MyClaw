@@ -21,7 +21,7 @@
 | 决策点 | 结论 |
 |---|---|
 | 分层模型 | 两层：user 层 + agent 层（对齐 memory 两层与 `load_skills_layered` 惯例） |
-| 存量迁移 | **全部 21 个（4 draft + 17 active）归 user 层**，agent 层从空开始，此后仅经「提升」进入 |
+| 存量迁移 | **全部 21 个（4 draft + 17 active）归 user 层**，agent 层从空开始，此后仅经「提升」进入。2026-08-29 定位注记：这是定位确立前的保守起点——按 §2.0 定性复查，operator 存量中属去上下文普适能力者（github/行情/机票/发邮件类）应在 P3 promote 落地后首轮 triage 归位 agent 层，否则生命体「阅历共享（记忆全局注入）而能力私有（技能困于 owner user 层）」，人格行为面不一致 |
 | agent 层写权限 | **fork 模型**（2026-08-29 修订）：原始技能经 `skill_manage` 只读；修改自动 fork 到本人 user 层副本（遮蔽生效）。更新原始版走 operator 的文件系统/git 或 P3 `promote`（`~/.agents/skills` 共享库 #99 保护不变，同为 fork 源） |
 | extract 默认落点 | user 层（从谁的会话提取落谁的层）。无主会话**不提取**（owner 缺失视为 bug，warn + skip，不写任何层，2026-08-29 P2 修订）；CLI 身份经必填 `--user`（exec/chat 一致，不允许无身份运行——`[system] operator` 不作 CLI 隐式身份，只服务 P3 promote 授权与 agent 层 backlog 路由）、cron 经 `JobEntry.creator` 补齐 |
 
@@ -92,8 +92,9 @@ user 层 ∪ agent 层 ∪ 共享库
 - #100 层② backlog 提醒按层分账（P2 实施）：user 层积压只注入该 owner 会话
   （`users/{uuid}/skill_draft_reminder_state.json` 独立按日节流，满 5 触发）；
   agent 层积压（`{base_dir}/skill_draft_reminder_state.json`，兼容原位置）仅注入
-  operator 会话（`[system] operator` 归一化比对 `session.owner_fqid`），文案注明
-  "agent layer drafts"（收编 PR #100 评审备注 issue）。
+  监护人（operator）会话（`[system] operator` 归一化比对 `session.owner_fqid`），
+  文案注明 "agent layer drafts"（收编 PR #100 评审备注 issue）。语义：agent 层
+  是生命体的能力池，其积压的 triage 是监护责任而非运维杂务（§2.0）。
 
 ### 2.4 审核动词与晋升
 
@@ -183,7 +184,13 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 ## 6. 记忆存储分拆（同构延伸，已定稿）
 
 记忆两层目前仅靠 frontmatter 判定（`scope`+`user_id`），物理仍是单池
-`{base_dir}/memory/`。技能层定型后，记忆存储同构分拆为目录分层。本节规则与
+`{base_dir}/memory/`。技能层定型后，记忆存储同构分拆为目录分层。
+
+> ⚠️ **P4 迁移预注（2026-08-29）**：现存约 500 条记忆的 `scope` 标注全部早于
+> 定位讨论（§2.0/§6.0），存在系统性错标——实证：`agent_as_person_multi_tenant_model`
+> 标 `scope: user` 却物理躺在 agent 层根目录且内容是全局架构认知。P4 分拆
+> **不得按旧标注机械搬运**，必须逐条按"生命体认知 vs 关系记忆"重审（可用
+> 蒸馏判别力辅助 + 监护人抽检）。本节规则与
 §2 惯例对齐；uuid 与条目身份问题经三轮讨论定稿（2026-08-21，决策人 nxajh）。
 
 ### 6.0 设计哲学：多段人际关系模型（2026-08-28 确立）
