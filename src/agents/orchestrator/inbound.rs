@@ -463,6 +463,19 @@ impl Interceptor for DispatchTurn {
     }
 }
 
+/// issue #205: `TurnSuspension.pending` is a shared list carrying both real
+/// sub-agent delegation ids and pending background shell process ids
+/// (`sh_`-prefixed, pushed by `ShellTool::register_pending` per issue #140).
+/// Count only the former here — shell entries are surfaced separately (and
+/// correctly) via `running_shell` in `render_background_work_reminder`, so
+/// including them here double-counts them under the wrong label ("子代理").
+fn count_pending_sub_agents(pending: &[String]) -> usize {
+    pending
+        .iter()
+        .filter(|id| !crate::tools::shell::is_shell_process_id(id))
+        .count()
+}
+
 /// issue #131 decision 8: build the background-work status reminder for a
 /// user turn that interrupts pending async work. `pending_sub_agents` is the
 /// count of not-yet-collected delegation terminals (from the suspension
@@ -611,7 +624,7 @@ pub(super) fn dispatch_turn_spawn(
         if msg.silenced_override.is_none() {
             let pending_sub_agents = session_ctx
                 .suspension_snapshot()
-                .map(|s| s.pending.len())
+                .map(|s| count_pending_sub_agents(&s.pending))
                 .unwrap_or(0);
             let running_shell = ctx.running_shell_processes(&sk).await;
             if pending_sub_agents > 0 || !running_shell.is_empty() {
@@ -822,6 +835,30 @@ mod tests {
                 "dispatch_turn",
             ]
         );
+    }
+
+    // ── issue #205: pending-shell entries must not count as sub-agents ────
+
+    #[test]
+    fn count_pending_sub_agents_excludes_shell_process_ids() {
+        let pending = vec![
+            "sh_abc123".to_string(),
+            "real-sub-session-id".to_string(),
+            "sh_def456".to_string(),
+        ];
+        assert_eq!(count_pending_sub_agents(&pending), 1);
+    }
+
+    #[test]
+    fn count_pending_sub_agents_is_zero_when_only_shell_entries_pending() {
+        let pending = vec!["sh_abc123".to_string(), "sh_def456".to_string()];
+        assert_eq!(count_pending_sub_agents(&pending), 0);
+    }
+
+    #[test]
+    fn count_pending_sub_agents_counts_real_delegations_normally() {
+        let pending = vec!["sub-session-a".to_string(), "sub-session-b".to_string()];
+        assert_eq!(count_pending_sub_agents(&pending), 2);
     }
 
     fn key() -> SessionKey {
