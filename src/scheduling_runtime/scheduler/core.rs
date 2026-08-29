@@ -95,6 +95,9 @@ pub struct Scheduler {
     timezone: String,
     /// Idle-time distillation config (None = disabled).
     distill_config: Option<DistillConfig>,
+    /// Idle-time skill proposer config (None = disabled). Same shape as the
+    /// distill tick config (idle_secs + interval_secs).
+    proposer_config: Option<DistillConfig>,
     /// Unix seconds of the last inbound user message. 0 = never.
     last_inbound: AtomicU64,
     /// Event channel to orchestrator.
@@ -120,6 +123,7 @@ impl Scheduler {
         namespace: &str,
         timezone: String,
         distill_config: Option<DistillConfig>,
+        proposer_config: Option<DistillConfig>,
         event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
         last_channel_file: PathBuf,
         last_recipient_file: PathBuf,
@@ -190,6 +194,7 @@ impl Scheduler {
             last_mtime: ParkMutex::new(last_mtime),
             timezone,
             distill_config,
+            proposer_config,
             last_inbound: AtomicU64::new(0),
             event_tx,
             last_channel: Arc::new(tokio::sync::Mutex::new(last_channel_value)),
@@ -224,9 +229,38 @@ impl Scheduler {
         self.last_inbound.store(now, Ordering::Relaxed);
     }
 
-    /// Whether the scheduler should run (has distill or cron jobs).
+    /// Whether the scheduler should run (has distill/proposer ticks or cron jobs).
     pub fn should_run(&self) -> bool {
-        self.distill_config.is_some() || !self.jobs.read().jobs.is_empty()
+        self.distill_config.is_some()
+            || self.proposer_config.is_some()
+            || !self.jobs.read().jobs.is_empty()
+    }
+
+    /// Proposer tick: fire a `ProposeSkills` event when the system has been
+    /// idle for `idle_secs` (same idle gate as the distill tick).
+    async fn maybe_fire_proposer(&self) {
+        let Some(cfg) = self.proposer_config.as_ref() else {
+            return;
+        };
+        let last_inbound = self.last_inbound.load(Ordering::Relaxed);
+        if last_inbound > 0 {
+            let now = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now.saturating_sub(last_inbound) < cfg.idle_secs {
+                tracing::debug!(
+                    idle_secs = cfg.idle_secs,
+                    elapsed_secs = now.saturating_sub(last_inbound),
+                    "skill_proposer: skipped, system not idle"
+                );
+                return;
+            }
+        }
+        match self.event_tx.send(SchedulerEvent::ProposeSkills).await {
+            Ok(()) => tracing::debug!("skill_proposer: propose event sent to orchestrator"),
+            Err(e) => tracing::warn!(err = %e, "failed to send propose event"),
+        }
     }
 
     /// Distill tick: fire a `Distill` event when the system has been idle
@@ -271,8 +305,15 @@ impl Scheduler {
             t
         });
 
+        let mut proposer_ticker = self.proposer_config.as_ref().map(|cfg| {
+            let mut t = tokio::time::interval(Duration::from_secs(cfg.interval_secs.max(60)));
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            t
+        });
+
         tracing::info!(
             distill = distill_ticker.is_some(),
+            proposer = proposer_ticker.is_some(),
             cron_jobs = self.jobs.read().jobs.len(),
             "scheduler started (JSON store mode)"
         );
@@ -284,6 +325,12 @@ impl Scheduler {
                     else { std::future::pending::<()>().await; }
                 }, if distill_ticker.is_some() => {
                     self.maybe_fire_distill().await;
+                }
+                _ = async {
+                    if let Some(t) = proposer_ticker.as_mut() { t.tick().await; }
+                    else { std::future::pending::<()>().await; }
+                }, if proposer_ticker.is_some() => {
+                    self.maybe_fire_proposer().await;
                 }
                 _ = cron_ticker.tick() => {
                     // Clean up one-shot jobs that reached max_runs + delete_after_run.

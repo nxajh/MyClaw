@@ -102,14 +102,32 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 
 - user→agent 晋升即审核动作本身：`skill_manage` 新 action `promote`（operator 或
   技能 owner 可发起；晋升后原始版仍只读，其他用户的改进同样经 fork→再 promote 循环，信任模型一致）。
+  **2026-08-29 决策注记**：`promote` action 自 P3 撤出（YAGNI）——单 operator 部署
+  下，文件层 mv + watcher 热重载 + 提议器 A 档直写已覆盖全部晋升路径；action 化的
+  授权面留给多用户场景再建。
 - 晋升时去标识化检查（同 memory agent-scope 规则）：提示词正文不得含 user_id、
   个人路径、会话专属引用；由执行者（agent）自查 + 提示确认。
-- **内化提议器**（2026-08-29 增补，P3 范围）：生命体主动发现"已普适的关系
-  技能"并提议内化——复用 `memory_distill` 已有的跨用户泛化判别力（同一判据：
-  是否仍绑定单一用户上下文），对 user 层技能生成 promote 提议（附去标识化
-  diff 预览），仍需 operator 签名执行。提议器不绕过签名，只把 triage 从
-  operator 被动巡检变为生命体主动发起——对应 §2.0 的成长模型（能力内化
-  需监护人签名，但发现权在生命体）。
+- **内化提议器**（2026-08-29 增补，P3 范围；同日代码化定稿）：daemon 内置的
+  idle-time 机制（`agents/skill_proposer.rs`，与 `memory_distill` 同构挂载——
+  scheduler 空闲 tick + 信号量防重入 + 状态文件增量），生命体主动扫描
+  `users/*/skills/`（排除 draft 与 agent 层同名）并按跨用户泛化判据分档：
+
+  - **A 档（零改写直迁）**：硬闸（代码级个人标识符扫描：home 路径/uuid/routing
+    key/云主机名 + hostname、user 目录名等实例值）零命中 + LLM 泛化判据通过 →
+    直接 `mv` 晋升 agent 层（watcher 热重载生效），提议文件记录来源与回滚方式。
+    无损搬移不需要签名——LLM 判 A 但硬闸命中则强制降级 B。
+  - **B 档（需去标识化改写）**：只写提议文件（含待替换标识符清单与实值提取
+    清单），等 operator 签名。签名后的执行语义：①改写正文入 agent 层普适版
+    （实例值换 `<myclaw-repo>`、`<gateway-port>` 类占位符）②被替换实值提取为
+    user 层记忆条目（技能=方法论在 agent 层持续演进；记忆=个人上下文在 user 层
+    实例化）③user 层原始版**删除**（非保留遮蔽——遮蔽会冻结 owner 在旧副本，
+    普适版演进对 owner 失效）④owner 触发时加载普适版，占位符从记忆/会话解析。
+  - **C 档（个人绑定）**：绑定个人资产/主机/业务流，留 user 层。
+
+  提议器是 agent 层唯一的自动写入者（A 档 mv），正文改写（B 档执行）永远经
+  operator 签名——发现权在生命体，编辑权在监护人。配置 `[skills]
+  proposer_enabled`（默认关）/`proposer_idle_secs`/`proposer_interval_secs`；
+  提议文件落 `{base_dir}/skill-proposals/{date}.md`。
 
 ### 2.5 写权限矩阵
 
@@ -167,7 +185,7 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 |---|---|---|
 | P1 | 存储布局 + loader 三层合成 + 迁移脚本 | #100 合并（backlog 分账基于其提醒机制） |
 | P2 | extract 落 user 层 + backlog 按层分账 | P1 |
-| P3 | `promote` action + 去标识化检查 + 内化提议器（§2.4）+ watcher user 层监听 | P1 |
+| P3 | 内化提议器代码化（§2.4：A 档硬闸直迁 + B 档提议签名）+ 存量首轮 triage + watcher user 层监听（#204）。`promote` action 撤出（多用户场景再建） | P1 |
 | P4 | 记忆存储分拆（§6）+ 迁移脚本 | P1（复用 `users/{uuid}/` 布局与迁移脚本模式，可与 P2/P3 并行） |
 
 ## 5. 测试清单

@@ -334,18 +334,42 @@ pub struct SkillsConfig {
     /// library entirely.
     #[serde(default = "default_true")]
     pub include_agents_dir: bool,
+    /// Enable the idle-time skill internalization proposer (RFC #101 §2.4).
+    /// Default off — tier-A skills are relocated verbatim into the globally
+    /// visible agent layer, which is a behavioral surface change; opt in.
+    #[serde(default = "default_proposer_enabled")]
+    pub proposer_enabled: bool,
+    /// Idle threshold in seconds: no inbound messages for this long before
+    /// a proposer pass may run.
+    #[serde(default = "default_proposer_idle_secs")]
+    pub proposer_idle_secs: u64,
+    /// How often the scheduler checks for a pending proposer pass (seconds).
+    #[serde(default = "default_proposer_interval_secs")]
+    pub proposer_interval_secs: u64,
 }
 
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
             include_agents_dir: true,
+            proposer_enabled: default_proposer_enabled(),
+            proposer_idle_secs: default_proposer_idle_secs(),
+            proposer_interval_secs: default_proposer_interval_secs(),
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+fn default_proposer_enabled() -> bool {
+    false
+}
+fn default_proposer_idle_secs() -> u64 {
+    1800
+}
+fn default_proposer_interval_secs() -> u64 {
+    3600
 }
 
 /// Cross-agent shared skills directory: `~/.agents/skills`. Read-only from
@@ -569,6 +593,18 @@ pub fn memory_audit_dir(base_dir: &Path) -> PathBuf {
 /// `agents/orchestrator/scheduled.rs`).
 pub fn memory_distill_state_dir(base_dir: &Path) -> PathBuf {
     state_root(base_dir).join("memory")
+}
+
+/// Skill proposer state dir: `{base_dir}/state/skill-proposer` (runtime
+/// state, mirrors `memory_distill_state_dir`).
+pub fn skill_proposer_state_dir(base_dir: &Path) -> PathBuf {
+    state_root(base_dir).join("skill-proposer")
+}
+
+/// Skill proposal files dir: `{base_dir}/skill-proposals` — operator-facing
+/// tier-B proposals awaiting signature.
+pub fn skill_proposals_dir(base_dir: &Path) -> PathBuf {
+    base_dir.join("skill-proposals")
 }
 
 /// Telegram polling offset file: `{base_dir}/telegram_offset`.

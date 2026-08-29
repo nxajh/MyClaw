@@ -16,6 +16,7 @@ mod mcp_manager;
 #[cfg(test)]
 mod media_e2e_test;
 pub mod memory_distill;
+pub mod skill_proposer;
 pub mod memory_fork;
 pub mod skill_draft_reminder;
 pub mod skill_extract;

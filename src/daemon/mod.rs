@@ -408,6 +408,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             &config.system.namespace,
             tz_name.clone(),
             None,
+            None,
             dummy_tx,
             config.last_channel_path(),
             config.last_recipient_path(),
@@ -428,11 +429,23 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         None
     };
 
+    // Idle-time skill internalization proposer config (None disables the
+    // proposer tick; RFC #101 §2.4).
+    let proposer_config = if config.skills.proposer_enabled {
+        Some(crate::scheduling_runtime::scheduler::DistillConfig {
+            idle_secs: config.skills.proposer_idle_secs,
+            interval_secs: config.skills.proposer_interval_secs,
+        })
+    } else {
+        None
+    };
+
     let shared_scheduler = crate::scheduling_runtime::scheduler::Scheduler::new(
         jobs_root,
         &config.system.namespace,
         tz_name.clone(),
         distill_config,
+        proposer_config,
         scheduler_tx.clone(),
         config.last_channel_path(),
         config.last_recipient_path(),
