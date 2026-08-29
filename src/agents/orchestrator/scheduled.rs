@@ -468,16 +468,22 @@ pub(crate) async fn run_proposer_task(orch: Arc<OrchestratorCtx>) {
         users_dir,
         skills_root: base.join("skills"), // same as AppConfig::skills_root()
         proposals_dir: crate::config::skill_proposals_dir(base),
-        state_dir: state_dir.clone(),
+        classified: state.classified_shas.clone(),
     };
 
     let result = run_skill_proposer(input).await;
     let success = result.is_ok();
+    if let Ok((_, _, classified)) = &result {
+        // Single writer: merge the pass's sha index into the one persistent
+        // state instance, then record the attempt — one save, no stale copy
+        // overwriting the index (bug seen on first production pass).
+        state.classified_shas.extend(classified.clone());
+    }
     state.record_attempt(success, &state_dir);
-    if success {
+    if let Ok((promoted, tier_b, _)) = &result {
         tracing::info!(
-            promoted = result.as_ref().map(|c| c.0).unwrap_or(0),
-            tier_b = result.as_ref().map(|c| c.1).unwrap_or(0),
+            promoted = promoted,
+            tier_b = tier_b,
             "skill_proposer: pass recorded"
         );
     } else {
