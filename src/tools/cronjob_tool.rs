@@ -7,25 +7,34 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::providers::{Tool, ToolResult};
 use crate::scheduling_types::cron_types::{
     DeliveryConfig, DeliveryMode, FailureAlertConfig, RetryConfig, ScheduleKind, ScheduleSpec,
 };
 use crate::scheduling_types::job_types::{
-    is_active_hours, is_route_slug, parse_target_string, scan_prompt_injection,
-    validate_active_hours, validate_at_timestamp, validate_schedule, validate_tz, JobEntry,
-    JobUpdate, SchedulerApi, WebhookDef, WebhookFilter,
+    JobEntry, JobUpdate, SchedulerApi, WebhookDef, WebhookFilter, is_active_hours, is_route_slug,
+    parse_target_string, scan_prompt_injection, validate_active_hours, validate_at_timestamp,
+    validate_schedule, validate_tz,
 };
-use crate::providers::{Tool, ToolResult};
 
 pub struct CronJobTool {
     /// `pub(crate)`：scheduling_runtime 层的集成测试（cronjob_tool_tests）
     /// 需要读取任务状态断言；L3 之外不暴露。
     pub(crate) scheduler: Arc<dyn SchedulerApi>,
+    /// #101 P2：调用者身份归一化（routing key → FQID），与 skill_manage /
+    /// memory 工具同一注入先例。未绑定的 key（CLI、测试）解析为自身。
+    resolver: Arc<crate::identity::user_profile::UserResolver>,
 }
 
 impl CronJobTool {
-    pub fn new<S: SchedulerApi + 'static>(scheduler: Arc<S>) -> Self {
-        Self { scheduler }
+    pub fn new<S: SchedulerApi + 'static>(
+        scheduler: Arc<S>,
+        resolver: Arc<crate::identity::user_profile::UserResolver>,
+    ) -> Self {
+        Self {
+            scheduler,
+            resolver,
+        }
     }
 }
 
@@ -181,12 +190,12 @@ impl Tool for CronJobTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: &crate::api::tool::ToolContext,
+        ctx: &crate::api::tool::ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
         match action {
-            "create" => self.handle_create(&args),
+            "create" => self.handle_create(&args, ctx),
             "update" => self.handle_update(&args),
             "list" => self.handle_list(&args),
             "pause" => self.handle_set_enabled(&args, false),
@@ -207,10 +216,17 @@ impl Tool for CronJobTool {
 }
 
 impl CronJobTool {
-    pub(crate) fn handle_create(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
+    pub(crate) fn handle_create(
+        &self,
+        args: &serde_json::Value,
+        ctx: &crate::api::tool::ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         // Orthogonal trigger model: schedule is optional (webhook-only jobs),
         // but a job needs at least one trigger channel.
-        let schedule_input = args.get("schedule").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let schedule_input = args
+            .get("schedule")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
             None => return Ok(err_result("Missing required field: prompt")),
@@ -227,7 +243,7 @@ impl CronJobTool {
             _ => {
                 return Ok(err_result(
                     "Missing required field: name (job name; for webhook jobs it is also the route POST /hooks/{name})",
-                ))
+                ));
             }
         };
         let active_hours = args
@@ -338,17 +354,15 @@ impl CronJobTool {
             last_failure_alert_at: None,
             context_policy: crate::config::scheduler::ContextPolicy::Inject,
             webhook: webhook.clone(),
+            // #101 P2: attribute the job to its creator (routing key →
+            // FQID via the injected resolver, same normalization as
+            // skill_manage). Unbound keys resolve to themselves.
+            creator: Some(self.resolver.resolve(&ctx.owner)),
         };
 
         match self.scheduler.add_job(entry) {
             Ok(id) => {
-                let mut details = vec![
-                    format!(
-                        "Created job '{}' (id: {})",
-                        name,
-                        id
-                    ),
-                ];
+                let mut details = vec![format!("Created job '{}' (id: {})", name, id)];
                 if let Some(ref spec) = schedule {
                     details.push(format!("  schedule: {}", spec.describe()));
                 }
@@ -469,7 +483,9 @@ impl CronJobTool {
                 update.schedule_changed = true;
             } else if let Some(schedule_input) = v.as_str() {
                 if schedule_input.trim().is_empty() {
-                    return Ok(err_result("'schedule' must be a cron/every/at expression or null (to clear)."));
+                    return Ok(err_result(
+                        "'schedule' must be a cron/every/at expression or null (to clear).",
+                    ));
                 }
                 let spec = match parse_schedule_input(schedule_input) {
                     Ok(v) => v,
@@ -502,12 +518,15 @@ impl CronJobTool {
                 update.webhook = None;
                 update.webhook_changed = true;
             } else {
-                match parse_webhook_channel(&{
-                    // pass webhook object through the same parser
-                    let mut a = serde_json::Map::new();
-                    a.insert("webhook".to_string(), v.clone());
-                    serde_json::Value::Object(a)
-                }, current_name.as_deref()) {
+                match parse_webhook_channel(
+                    &{
+                        // pass webhook object through the same parser
+                        let mut a = serde_json::Map::new();
+                        a.insert("webhook".to_string(), v.clone());
+                        serde_json::Value::Object(a)
+                    },
+                    current_name.as_deref(),
+                ) {
                     Ok(Some(wh)) => {
                         update.webhook = Some(Some(wh));
                         update.webhook_changed = true;
@@ -785,7 +804,15 @@ impl CronJobTool {
                     success: true,
                     output: format!(
                         "Job '{}' ({}) scheduled for immediate execution: fires on the next scheduler tick (within ~30s).\nSchedule: {}\nDelivery: {}{}",
-                        name, job.id, job.schedule.as_ref().map(ScheduleSpec::describe).as_deref().unwrap_or("(webhook-only)"), describe_delivery(&job.delivery), note
+                        name,
+                        job.id,
+                        job.schedule
+                            .as_ref()
+                            .map(ScheduleSpec::describe)
+                            .as_deref()
+                            .unwrap_or("(webhook-only)"),
+                        describe_delivery(&job.delivery),
+                        note
                     ),
                     error: None,
                 })
@@ -969,9 +996,14 @@ pub(crate) fn parse_webhook_channel(
     args: &serde_json::Value,
     name: Option<&str>,
 ) -> Result<Option<WebhookDef>, String> {
-    let Some(wh) = args.get("webhook") else { return Ok(None) };
+    let Some(wh) = args.get("webhook") else {
+        return Ok(None);
+    };
     let Some(obj) = wh.as_object() else {
-        return Err("'webhook' must be an object: { auth?, secret, events?, filters?, payload_off? }".to_string());
+        return Err(
+            "'webhook' must be an object: { auth?, secret, events?, filters?, payload_off? }"
+                .to_string(),
+        );
     };
     if obj.is_empty() {
         return Ok(None);
@@ -990,7 +1022,10 @@ pub(crate) fn parse_webhook_channel(
         .unwrap_or("hmac")
         .to_string();
     if !matches!(auth.as_str(), "hmac" | "bearer") {
-        return Err(format!("invalid 'webhook.auth' '{}': use \"hmac\" or \"bearer\"", auth));
+        return Err(format!(
+            "invalid 'webhook.auth' '{}': use \"hmac\" or \"bearer\"",
+            auth
+        ));
     }
 
     let route = name.unwrap_or("");
@@ -1007,15 +1042,18 @@ pub(crate) fn parse_webhook_channel(
         ));
     }
 
-    let events = obj
-        .get("events")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>());
+    let events = obj.get("events").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect::<Vec<_>>()
+    });
     let filters = if let Some(arr) = obj.get("filters").and_then(|v| v.as_array()) {
         let mut out = Vec::new();
         for v in arr {
             let Some(f) = v.as_object() else {
-                return Err("Each filter must be an object {field, equals/matches, not?}".to_string());
+                return Err(
+                    "Each filter must be an object {field, equals/matches, not?}".to_string(),
+                );
             };
             let Some(field) = f.get("field").and_then(|x| x.as_str()) else {
                 return Err("Webhook filter requires a 'field' property (string)".to_string());
@@ -1169,7 +1207,9 @@ fn parse_delivery_object(v: &serde_json::Value) -> Result<DeliveryConfig, String
 /// `delivery` object (with `mode`) wins when present; the legacy `target`
 /// string ("last" | "none" | "channel[:account]") is a one-version alias;
 /// neither given defaults to `Last` (the old implicit `target: "last"`).
-pub(crate) fn resolve_delivery_for_create(args: &serde_json::Value) -> Result<DeliveryConfig, String> {
+pub(crate) fn resolve_delivery_for_create(
+    args: &serde_json::Value,
+) -> Result<DeliveryConfig, String> {
     if let Some(v) = args.get("delivery") {
         return parse_delivery_object(v);
     }
@@ -1181,7 +1221,9 @@ pub(crate) fn resolve_delivery_for_create(args: &serde_json::Value) -> Result<De
 
 /// Same resolution as [`resolve_delivery_for_create`], but for `update`:
 /// `Ok(None)` means neither field was provided — "don't change delivery".
-pub(crate) fn resolve_delivery_for_update(args: &serde_json::Value) -> Result<Option<DeliveryConfig>, String> {
+pub(crate) fn resolve_delivery_for_update(
+    args: &serde_json::Value,
+) -> Result<Option<DeliveryConfig>, String> {
     if let Some(v) = args.get("delivery") {
         return parse_delivery_object(v).map(Some);
     }

@@ -59,6 +59,10 @@ pub struct AttachmentManager {
     /// 上次 diff_skills 时的会话 owner（FQID）——build_message 渲染
     /// added delta 的技能摘要时按同一 owner 视角取 Skill。
     owner: Option<String>,
+    /// 待注入的 draft-backlog 提醒中的 agent 层积压名单（#101 P2）。
+    /// Delta 槽位承载 user 层名单；agent 层（仅 operator 会话可见）挂
+    /// 这里，一次提醒即可同时覆盖两个 scope。
+    skill_draft_agent_layer: Vec<String>,
 }
 
 impl AttachmentManager {
@@ -182,7 +186,12 @@ impl AttachmentManager {
 
     /// 与当前 SkillManager 做 diff，生成 skill listing delta。
     /// 从 history 重建 announced 状态。
-    pub fn diff_skills(&mut self, skills: &SkillManager, history: &[ChatMessage], owner: Option<&str>) {
+    pub fn diff_skills(
+        &mut self,
+        skills: &SkillManager,
+        history: &[ChatMessage],
+        owner: Option<&str>,
+    ) {
         self.owner = owner.map(|s| s.to_string());
         let announced = Self::rebuild_from_history(history);
         // Only agent_invocable skills appear in the model's index.
@@ -431,7 +440,7 @@ impl AttachmentManager {
             sections.push(Self::render_memory(delta));
         }
         if let Some(delta) = self.pending.get(&AttachmentKind::SkillDraftBacklog) {
-            sections.push(Self::render_skill_draft_backlog(delta));
+            sections.push(Self::render_skill_draft_backlog(self, delta));
         }
 
         if sections.is_empty() {
@@ -489,17 +498,22 @@ impl AttachmentManager {
     /// 清空 pending（每 turn 结算后调用）。
     pub fn clear_pending(&mut self) {
         self.pending.clear();
+        self.skill_draft_agent_layer.clear();
     }
 
     /// Queue a one-shot system-reminder about an accumulating draft-skill
     /// backlog. The caller (`skill_draft_reminder::check_and_arm`) already
-    /// decided this should fire now (threshold + once-per-day throttle) —
-    /// this method just renders it into the turn like any other attachment.
-    pub fn push_skill_draft_reminder(&mut self, draft_names: Vec<String>) {
+    /// decided this should fire now (threshold + once-per-day throttle,
+    /// per scope) — this method just renders it into the turn like any
+    /// other attachment. #101 P2: the user layer rides the pending Delta;
+    /// the agent layer (operator sessions only) rides the dedicated field
+    /// so one reminder covers both scopes.
+    pub fn push_skill_draft_reminder(&mut self, user_layer: Vec<String>, agent_layer: Vec<String>) {
+        self.skill_draft_agent_layer = agent_layer;
         self.pending.insert(
             AttachmentKind::SkillDraftBacklog,
             Delta {
-                added: draft_names,
+                added: user_layer,
                 removed: vec![],
             },
         );
@@ -603,16 +617,31 @@ impl AttachmentManager {
         lines.join("\n")
     }
 
-    fn render_skill_draft_backlog(delta: &Delta) -> String {
+    /// #101 P2：draft-backlog 提醒按层渲染——user 层文案沿用原格式；
+    /// agent 层积压（仅 operator 会话会传入）单列一段并注明来源层。
+    fn render_skill_draft_backlog(&self, delta: &Delta) -> String {
         let mut lines = vec!["## Draft Skills Pending Review".to_string()];
-        lines.push(format!(
-            "{} draft skill(s) have accumulated, hidden from normal loading until reviewed: {}. \
-             Mention this backlog to the user and offer to triage it — view each with \
-             `skill_view`, propose promote (drop `status: draft`) / merge into an existing \
-             skill / delete, and apply only after the user confirms.",
-            delta.added.len(),
-            delta.added.join(", ")
-        ));
+        if !delta.added.is_empty() {
+            lines.push(format!(
+                "{} draft skill(s) have accumulated, hidden from normal loading until reviewed: {}. \
+                 Mention this backlog to the user and offer to triage it — view each with \
+                 `skill_view`, propose promote (drop `status: draft`) / merge into an existing \
+                 skill / delete, and apply only after the user confirms.",
+                delta.added.len(),
+                delta.added.join(", ")
+            ));
+        }
+        if !self.skill_draft_agent_layer.is_empty() {
+            lines.push(format!(
+                "{} agent layer drafts have accumulated in the shared agent layer \
+                 ({}), hidden from normal loading until reviewed: {}. You are seeing these \
+                 because this is the operator's session — propose promote / merge / delete \
+                 and apply only after the user confirms.",
+                self.skill_draft_agent_layer.len(),
+                "skills visible to every user",
+                self.skill_draft_agent_layer.join(", ")
+            ));
+        }
         lines.join("\n")
     }
 
@@ -1024,13 +1053,42 @@ mod tests {
     #[test]
     fn skill_draft_backlog_reminder_names_every_draft() {
         let mut am = AttachmentManager::new();
-        am.push_skill_draft_reminder(vec!["draft-one".to_string(), "draft-two".to_string()]);
+        am.push_skill_draft_reminder(
+            vec!["draft-one".to_string(), "draft-two".to_string()],
+            Vec::new(),
+        );
         let msg = am.build_message(&SkillManager::new()).unwrap();
         let text = msg.text_content();
         assert!(text.contains("## Draft Skills Pending Review"));
         assert!(text.contains("draft-one"));
         assert!(text.contains("draft-two"));
         assert!(text.contains("2 draft skill"));
+        assert!(!text.contains("agent layer drafts"));
+    }
+
+    #[test]
+    fn skill_draft_backlog_reminder_lists_agent_layer_separately() {
+        // #101 P2: operator sessions can carry both scopes in one
+        // reminder; the agent layer gets its own "agent layer drafts"
+        // paragraph.
+        let mut am = AttachmentManager::new();
+        am.push_skill_draft_reminder(
+            vec!["user-draft".to_string()],
+            vec!["agent-draft-a".to_string(), "agent-draft-b".to_string()],
+        );
+        let msg = am.build_message(&SkillManager::new()).unwrap();
+        let text = msg.text_content();
+        assert!(text.contains("user-draft"));
+        assert!(text.contains("agent layer drafts"));
+        assert!(text.contains("agent-draft-a"));
+        assert!(text.contains("agent-draft-b"));
+
+        // clear_pending must drop the agent layer too — the next turn's
+        // reminder starts from a clean slate.
+        am.clear_pending();
+        am.push_skill_draft_reminder(vec!["user-draft".to_string()], Vec::new());
+        let msg2 = am.build_message(&SkillManager::new()).unwrap();
+        assert!(!msg2.text_content().contains("agent layer drafts"));
     }
 
     #[test]

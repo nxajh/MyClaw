@@ -166,7 +166,10 @@ impl OrchestratorCtx {
     /// all. This method stays a plain live registry read because the status
     /// reminder has no race to avoid — it's informational, never gates
     /// anything.
-    pub async fn running_shell_processes(&self, session_id: &str) -> Vec<crate::tools::shell::ProcSummary> {
+    pub async fn running_shell_processes(
+        &self,
+        session_id: &str,
+    ) -> Vec<crate::tools::shell::ProcSummary> {
         let Some(registry) = &self.shell_registry else {
             return Vec::new();
         };
@@ -203,19 +206,11 @@ impl OrchestratorCtx {
 /// removed direct calls used — no behavior change.
 #[async_trait::async_trait]
 impl crate::scheduling_runtime::scheduler::OrchestratorHook for OrchestratorCtx {
-    async fn run_scheduled_turn(
-        &self,
-        session_key: &str,
-        prompt: &str,
-    ) -> anyhow::Result<String> {
-        super::scheduled::run_scheduled_turn(self, session_key, prompt, None).await
+    async fn run_scheduled_turn(&self, session_key: &str, prompt: &str) -> anyhow::Result<String> {
+        super::scheduled::run_scheduled_turn(self, session_key, prompt, None, None).await
     }
 
-    fn outbound_channel(
-        &self,
-        channel_type: &str,
-        account_id: &str,
-    ) -> Option<Arc<dyn Channel>> {
+    fn outbound_channel(&self, channel_type: &str, account_id: &str) -> Option<Arc<dyn Channel>> {
         self.channels
             .get(&(channel_type.to_string(), account_id.to_string()))
     }
@@ -250,8 +245,15 @@ fn _p1_drain_chain_send_guards() {
         unreachable!()
     }
 
-    drop(require_send(super::inbound::dispatch_turn(never_ctx(), never_key(), never_msg())));
-    drop(require_send(super::delegation::drain_delegation_notices(never_ctx(), never_str())));
+    drop(require_send(super::inbound::dispatch_turn(
+        never_ctx(),
+        never_key(),
+        never_msg(),
+    )));
+    drop(require_send(super::delegation::drain_delegation_notices(
+        never_ctx(),
+        never_str(),
+    )));
     assert_send::<crate::api::message::ChannelInboundMessage>();
     // spawn 闭包按 move 捕获 ctx、drain 跨 await 持有 key —— Sync 不够, 必须 Send
     assert_send::<OrchestratorCtx>();

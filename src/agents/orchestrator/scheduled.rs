@@ -20,6 +20,7 @@ pub(crate) async fn run_scheduled_turn(
     session_key: &str,
     prompt: &str,
     model_override: Option<String>,
+    creator: Option<String>,
 ) -> anyhow::Result<String> {
     // Get-or-create the SessionContext, applying the per-call model override
     // on every invocation so cron jobs that change `model` mid-stream are
@@ -40,6 +41,25 @@ pub(crate) async fn run_scheduled_turn(
     if let Some(ref m) = model_override {
         let mut session = session_ctx.session.lock().await;
         session.session_override.model = Some(m.clone());
+    }
+
+    // #101 P2: attribute the turn to the job creator. The session's
+    // owner_fqid is only "real" when load_session resolved a bound
+    // routing key; job session keys (`_job_*`) are unbound and resolve
+    // to themselves, and freshly-created sessions default to empty —
+    // overwrite exactly those placeholders with the creator FQID.
+    // Inject-mode turns reuse the user's session, whose owner_fqid is
+    // already correctly resolved (≠ session_key), so it is never touched.
+    if let Some(creator) = creator {
+        let mut session = session_ctx.session.lock().await;
+        if session.owner_fqid.is_empty() || session.owner_fqid == session_key {
+            tracing::debug!(
+                session_key = %session_key,
+                creator = %creator,
+                "scheduled turn: attributing session to job creator"
+            );
+            session.owner_fqid = creator;
+        }
     }
 
     // Synthetic ChannelInboundMessage so process_turn drives the same code path
@@ -78,6 +98,7 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
         job_id,
         model,
         context_policy,
+        creator,
     } = trigger;
 
     let start = std::time::Instant::now();
@@ -85,9 +106,15 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
     // Choose session key based on context policy.
     // Inject: resolve the user's active session routing key and inject into it.
     // Isolated: use the cron job's session key (each job has its own session).
-    let effective_session_key = if context_policy == crate::config::scheduler::ContextPolicy::Inject {
+    let effective_session_key = if context_policy == crate::config::scheduler::ContextPolicy::Inject
+    {
         // Resolve the user's routing key from last_channel + last_recipient.
-        let routing_key = resolve_user_routing_key(&orch, target_channel.as_deref(), target_recipient.as_deref()).await;
+        let routing_key = resolve_user_routing_key(
+            &orch,
+            target_channel.as_deref(),
+            target_recipient.as_deref(),
+        )
+        .await;
         match routing_key {
             Some(key) => {
                 tracing::debug!(job_id = %job_id, routing_key = %key, "cron job injecting into user session");
@@ -103,7 +130,14 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
         session_key
     };
 
-    let result = run_scheduled_turn(&orch, &effective_session_key, &prompt, model.clone()).await;
+    let result = run_scheduled_turn(
+        &orch,
+        &effective_session_key,
+        &prompt,
+        model.clone(),
+        creator,
+    )
+    .await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     // Build run record and mark result in scheduler.
@@ -165,7 +199,15 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
     // behavior (the cron path never actually enforced "none" here).
     if let Some(alert_msg) = failure_alert {
         tracing::warn!(job_id = %job_id, alert = %alert_msg, "sending failure alert");
-        send_to_target_internal(&orch, target_channel, target_account, target_recipient, target_thread, &alert_msg).await;
+        send_to_target_internal(
+            &orch,
+            target_channel,
+            target_account,
+            target_recipient,
+            target_thread,
+            &alert_msg,
+        )
+        .await;
     }
 }
 
@@ -194,7 +236,13 @@ async fn resolve_user_routing_key(
     // Resolve recipient from target or last_recipient.
     let recipient = match target_recipient {
         Some(r) => r.to_string(),
-        None => orch.scheduler.as_ref()?.last_recipient.lock().await.clone()?,
+        None => orch
+            .scheduler
+            .as_ref()?
+            .last_recipient
+            .lock()
+            .await
+            .clone()?,
     };
 
     Some(format!("{}:{}:{}", ch_type, acc_id, recipient))
@@ -270,7 +318,9 @@ async fn send_to_target_internal(
 /// task. Pre-flight checks (pending memories, backoff) run inline; the LLM
 /// pass itself runs inside `run_memory_distill`.
 pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
-    use crate::agents::memory_distill::{DistillState, has_pending_user_memories, run_memory_distill};
+    use crate::agents::memory_distill::{
+        DistillState, has_pending_user_memories, run_memory_distill,
+    };
 
     let memory_root = orch.runtime.defaults.prompt.memory_root.clone();
     if memory_root.is_empty() {
@@ -347,15 +397,22 @@ pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
         tool_specs,
         tool_registry: Arc::clone(&orch.runtime.tools),
         memory_root,
-        registry: Arc::clone(&orch.runtime.providers) as Arc<dyn crate::providers::ProviderRegistry>,
+        registry: Arc::clone(&orch.runtime.providers)
+            as Arc<dyn crate::providers::ProviderRegistry>,
     };
 
     let result = run_memory_distill(input).await;
     let success = result.is_ok();
     state.record_attempt(success, &state_dir);
     if success {
-        tracing::info!(files_written = result.unwrap_or(0), "memory_distill: pass recorded");
+        tracing::info!(
+            files_written = result.unwrap_or(0),
+            "memory_distill: pass recorded"
+        );
     } else {
-        tracing::warn!(failures = state.consecutive_failures, "memory_distill: pass failed");
+        tracing::warn!(
+            failures = state.consecutive_failures,
+            "memory_distill: pass failed"
+        );
     }
 }

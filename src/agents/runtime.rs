@@ -19,9 +19,9 @@ use crate::agents::loop_breaker::LoopBreaker;
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::prompt::SystemPromptConfig;
 use crate::agents::tool_executor::ToolExecutor;
-use crate::identity::user_registry::UserRegistry;
 use crate::agents::workspace::skills::SkillManager;
 use crate::config::agent::PermissionMode;
+use crate::identity::user_registry::UserRegistry;
 use crate::providers::ProviderRegistry;
 use crate::tools::SearchProviderCooldown;
 
@@ -40,6 +40,13 @@ pub struct RuntimeDefaults {
     pub prompt: SystemPromptConfig,
     /// Enable automatic TTS for replies.
     pub auto_tts: bool,
+    /// Operator identity as a bare uuid (#101 P2) — `[system] operator`
+    /// normalized at assembly time (FQID/uuid/username → uuid via
+    /// `identity::user_registry::normalize_operator_id`). Used by
+    /// turn-side injections to decide whether this session may see
+    /// agent-layer draft backlogs. `None` = no operator configured (or it
+    /// failed to resolve) → agent-layer reminders stay off.
+    pub operator: Option<String>,
 }
 
 impl Default for RuntimeDefaults {
@@ -48,6 +55,7 @@ impl Default for RuntimeDefaults {
             permission_mode: PermissionMode::Default,
             prompt: SystemPromptConfig::default(),
             auto_tts: false,
+            operator: None,
         }
     }
 }

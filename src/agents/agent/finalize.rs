@@ -126,22 +126,36 @@ impl super::Agent {
             && loop_breaker_total_calls >= 5
             && session.parent_session_id.is_none()
         {
-            let mut skill_messages = messages.to_vec();
-            skill_messages.push(msg.clone());
-            let skill_input = crate::agents::skill_extract::SkillExtractInput {
-                messages: skill_messages,
-                model_id: model_id.to_string(),
-                provider: Arc::clone(provider),
-                tool_specs: tool_specs.to_vec(),
-                tool_registry: Arc::clone(&runtime.tools),
-                session_id: session.id.clone(),
-                base_dir: runtime.defaults.prompt.base_dir.clone(),
-                channel: session.resolve_channel(),
-                reply_target: session.reply_target().map(str::to_string),
-            };
-            tokio::spawn(async move {
-                crate::agents::skill_extract::run_skill_extract(skill_input).await;
-            });
+            // RFC #101 P2: drafts are attributed to the session owner —
+            // extraction without a resolved owner_fqid is skipped (an
+            // unattributed write would leak into the agent layer / an
+            // orphan user dir). Owner identity comes from load_session's
+            // resolver (daemon), `--user`/operator (CLI exec), or
+            // JobEntry.creator (Isolated cron turns).
+            if session.owner_fqid.is_empty() {
+                tracing::warn!(
+                    session_id = %session.id,
+                    "skill_extract: session has no owner_fqid — skipping extraction"
+                );
+            } else {
+                let mut skill_messages = messages.to_vec();
+                skill_messages.push(msg.clone());
+                let skill_input = crate::agents::skill_extract::SkillExtractInput {
+                    messages: skill_messages,
+                    model_id: model_id.to_string(),
+                    provider: Arc::clone(provider),
+                    tool_specs: tool_specs.to_vec(),
+                    tool_registry: Arc::clone(&runtime.tools),
+                    session_id: session.id.clone(),
+                    base_dir: runtime.defaults.prompt.base_dir.clone(),
+                    owner_fqid: session.owner_fqid.clone(),
+                    channel: session.resolve_channel(),
+                    reply_target: session.reply_target().map(str::to_string),
+                };
+                tokio::spawn(async move {
+                    crate::agents::skill_extract::run_skill_extract(skill_input).await;
+                });
+            }
         }
 
         Ok(TurnResult {

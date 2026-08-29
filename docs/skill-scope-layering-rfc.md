@@ -23,7 +23,7 @@
 | 分层模型 | 两层：user 层 + agent 层（对齐 memory 两层与 `load_skills_layered` 惯例） |
 | 存量迁移 | **全部 21 个（4 draft + 17 active）归 user 层**，agent 层从空开始，此后仅经「提升」进入 |
 | agent 层写权限 | **fork 模型**（2026-08-29 修订）：原始技能经 `skill_manage` 只读；修改自动 fork 到本人 user 层副本（遮蔽生效）。更新原始版走 operator 的文件系统/git 或 P3 `promote`（`~/.agents/skills` 共享库 #99 保护不变，同为 fork 源） |
-| extract 默认落点 | user 层（从谁的会话提取落谁的层），除 headless/无主会话外，普通用户交互不允许直接产 agent 层 draft |
+| extract 默认落点 | user 层（从谁的会话提取落谁的层）。无主会话**不提取**（owner 缺失视为 bug，warn + skip，不写任何层，2026-08-29 P2 修订）；headless 身份经 CLI `--user` / `[system] operator`、cron 经 `JobEntry.creator` 补齐 |
 
 ## 2. 设计
 
@@ -51,13 +51,27 @@ user 层 ∪ agent 层 ∪ 共享库
   视角 = agent 层 ∪ 共享库。
 - `WorkspaceWatcher` 增加 user 层目录监听（热载同现有机制）。
 
-### 2.3 skill_extract 落点（源头关闭泄露）
+### 2.3 skill_extract 落点（源头关闭泄露；2026-08-29 P2 修订）
 
-- `SkillExtractInput` 已有 session 归属（#100 加了 channel/reply_target，同处取
-  owner user id）→ 写入 `users/{uuid}/skills/`。
-- headless / cron / 无 owner 会话：落 agent 层（operator 上下文），draft 状态不变。
-- #100 层② backlog 提醒按层分账：user 层积压只注入该用户会话；agent 层积压注入
-  operator（收编 PR #100 评审备注 issue）。
+- `SkillExtractInput` 携带 session owner（#100 加了 channel/reply_target，P2 同处加
+  `owner_fqid`）→ `ToolContext.owner` 一律落 owner 的 user 层
+  （`users/{uuid}/skills/`）；extract 的去重索引同时覆盖 owner user 层 + agent 层
+  （同名 user 层优先），与写入视角一致。
+- headless / cron / 无 owner 会话：**不再落 agent 层**（P2 修订）。owner 缺失 =
+  调用方 bug，fork 直接 warn + 返回（不写任何层）。身份补齐路径：
+  - CLI：`myclaw exec --user <username|uuid>`，未给时取 `[system] operator`
+    （`[system]` 新增 `operator` 配置，支持 FQID/裸 uuid/username，username 经
+    `users/*/meta.json` 静态反查归一化为 uuid）；
+  - cron：`JobEntry` 新增 `creator` 字段（创建时经 UserResolver 归一化记录），
+    scheduler 触发时经 `CronTrigger.creator` 带出，Isolated `_job_*` 会话（owner
+    未归属）据此设置 `session.owner_fqid`；Inject 模式注入用户会话，owner 已由
+    load_session 正确解析，不覆盖。
+  - draft 状态不变。
+- #100 层② backlog 提醒按层分账（P2 实施）：user 层积压只注入该 owner 会话
+  （`users/{uuid}/skill_draft_reminder_state.json` 独立按日节流，满 5 触发）；
+  agent 层积压（`{base_dir}/skill_draft_reminder_state.json`，兼容原位置）仅注入
+  operator 会话（`[system] operator` 归一化比对 `session.owner_fqid`），文案注明
+  "agent layer drafts"（收编 PR #100 评审备注 issue）。
 
 ### 2.4 审核动词与晋升
 
@@ -92,6 +106,15 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 - 动机：零摩擦改进循环 + 破坏半径收敛到副本 + 原始版即恢复基线（副本改坏 → 删副本
   重新 fork）。与 §6.2 记忆写语义（默认落 owner 层）对齐。
 
+### 2.7 修订记录
+
+- 2026-08-29 P2（本 PR）：§1 决策表 + §2.3 修订——extract 一律落 owner user 层，
+  无主会话不提取；headless 身份补齐（CLI `--user` / `[system] operator` /
+  `JobEntry.creator`）；backlog 提醒按层分账（scope 独立节流，agent 层仅 operator
+  可见）。§5 对应项勾选。
+- 2026-08-29 P1.1：§2.6 fork 模型增补（skill_manage 写路径惰性 fork）。
+- 2026-08-21 初稿；2026-08-28 §6 记忆分拆定稿。
+
 ## 3. 存量迁移
 
 - 范围：实测 21 个（4 draft + 17 active；PR #100 声称 36/31 与实测不符，按实测计，
@@ -117,8 +140,8 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 ## 5. 测试清单
 
 - [ ] loader：三层合成、同名优先级（user>agent>共享库）、无 user 上下文（子代理）视角
-- [ ] extract：user 会话落 user 层；headless 落 agent 层；draft 状态保持
-- [ ] backlog 提醒：user 层积压注入本人；agent 层积压注入 operator；互不越层
+- [x] extract：user 会话落 user 层；headless 无主不提取（warn+skip，P2 修订）；draft 状态保持
+- [x] backlog 提醒：user 层积压注入本人；agent 层积压仅 operator 可见；互不越层；scope 独立节流（P2）
 - [ ] promote：owner/operator 可发起；去标识化检查提示；晋升后 agent 层可写语义
 - [ ] skill_manage：user 层本人五操作可写；其他用户对 user 层得到 not-found（不可见性）
 - [ ] fork：edit/patch/write_file 对 agent 层目标自动建副本后写入、原始版逐字节不变；delete 对非 user 层拒绝；`.fork-origin` 生成；副本遮蔽生效

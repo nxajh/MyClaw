@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::identity::{KnownUsersRegistry, UserResolver};
-use crate::ids::{bare_dir_name, Fqid, TYPE_USER};
+use crate::ids::{Fqid, TYPE_USER, bare_dir_name};
 
 // ── 常量与规则 ───────────────────────────────────────────────────────────────
 
@@ -53,6 +53,77 @@ pub fn user_id(namespace: &str, uid: &str) -> String {
         uid.to_string()
     } else {
         format!("{namespace}/u/{uid}")
+    }
+}
+
+/// 归一化 `[system] operator` / CLI `--user` 身份引用为裸 uuid（#101 P2）。
+///
+/// 接受三种形态：
+/// - FQID `<ns>/u/<uuid>`（type 段必须是 `u`）→ 取 uuid 段；
+/// - 裸 uuid（任意版本）→ 原样返回；
+/// - username → 静态反查 `{base_dir}/users/*/meta.json` 的 `username` 字段。
+///
+/// 与 `UserResolver` 的职责边界：resolver 管 routing key → FQID 的运行时
+/// 绑定；本函数只做一次性的静态解析（daemon 启动 / CLI exec 装配时），
+/// 不读 resolver 的 override 表。反查多命中（理论不应发生——username 唯
+/// 一性由注册表维护，但磁盘数据可能被手工编辑）→ Err 列出候选；零命中
+/// → Err。
+pub fn normalize_operator_id(
+    namespace: &str,
+    base_dir: &Path,
+    operator: &str,
+) -> Result<String, String> {
+    let op = operator.trim();
+    if op.is_empty() {
+        return Err("empty operator id".to_string());
+    }
+    // FQID form — only user-type refs make sense for an operator identity.
+    if let Some(f) = Fqid::parse(op, namespace) {
+        if f.type_seg() != TYPE_USER {
+            return Err(format!(
+                "'{}' is an FQID of type '{}' (expected '{}')",
+                op,
+                f.type_seg(),
+                TYPE_USER
+            ));
+        }
+        return Ok(f.uuid_str());
+    }
+    // Bare uuid — accepted as-is (uuid 段即目录名)。
+    if uuid::Uuid::parse_str(op).is_ok() {
+        return Ok(op.to_string());
+    }
+    // Username — static reverse lookup over users/*/meta.json.
+    let root = crate::config::users_root(base_dir);
+    let mut hits: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(entry.path().join(USER_META_FILE)) else {
+                continue;
+            };
+            let Ok(user) = serde_json::from_str::<User>(&contents) else {
+                continue;
+            };
+            if user.username == op {
+                hits.push(bare_dir_name(&user.uid));
+            }
+        }
+    }
+    match hits.len() {
+        0 => Err(format!(
+            "no user with username '{}' under {}",
+            op,
+            root.display()
+        )),
+        1 => Ok(hits.pop().expect("length checked above")),
+        _ => Err(format!(
+            "username '{}' matched multiple users: {}",
+            op,
+            hits.join(", ")
+        )),
     }
 }
 
@@ -191,8 +262,7 @@ impl UserRegistry {
 
     /// 判断一个字符串是否为本实例的合法 user.id（`<ns>/u/<uid>` 形态）。
     pub fn is_user_id(&self, s: &str) -> bool {
-        s.starts_with(&format!("{}/u/", self.namespace))
-            && s.len() > self.namespace.len() + 3
+        s.starts_with(&format!("{}/u/", self.namespace)) && s.len() > self.namespace.len() + 3
     }
 
     /// 从 user.id 提取规范 uid 内部键（= 完整 FQID `<ns>/u/<uuid>`，users.json
@@ -717,7 +787,10 @@ mod tests {
         assert_eq!(r.uid_of(&fqid), Some(fqid.as_str()));
         let double = format!("myclaw/u/{fqid}");
         assert_eq!(r.uid_of(&double), Some(fqid.as_str()));
-        assert_eq!(r.uid_of("brand/u/019fe342-6a03-7561-86de-0c2327a8c3de"), None);
+        assert_eq!(
+            r.uid_of("brand/u/019fe342-6a03-7561-86de-0c2327a8c3de"),
+            None
+        );
     }
 
     /// username_of() 用 FQID 直接命中 map（旧 bug：裸 uuid 落空）。
@@ -726,7 +799,10 @@ mod tests {
         let r = reg();
         let u = r.register("alice@example.com", "alice").unwrap();
         assert_eq!(r.username_of(&u.uid), Some("alice".to_string()));
-        assert_eq!(r.username_of("myclaw/u/019fe342-6a03-7561-86de-0c2327a8c3de"), None);
+        assert_eq!(
+            r.username_of("myclaw/u/019fe342-6a03-7561-86de-0c2327a8c3de"),
+            None
+        );
     }
 
     /// find_by_uid() 双形态可查：FQID / 裸 uuid / `u/<uuid>`（parse_target 形态）。
@@ -739,7 +815,10 @@ mod tests {
         assert_eq!(r.find_by_uid(&fqid).unwrap().uid, fqid);
         assert_eq!(r.find_by_uid(bare).unwrap().uid, fqid);
         assert_eq!(r.find_by_uid(&format!("u/{bare}")).unwrap().uid, fqid);
-        assert!(r.find_by_uid("deadbeef-0000-0000-0000-000000000000").is_none());
+        assert!(
+            r.find_by_uid("deadbeef-0000-0000-0000-000000000000")
+                .is_none()
+        );
     }
 
     /// set_email / set_username 用 FQID 命中（current_uid() 经 uid_of 返回规范
@@ -839,8 +918,7 @@ mod tests {
         let bare = u.uid.strip_prefix("myclaw/u/").unwrap();
         let meta = data.join("users").join(bare).join("meta.json");
         assert!(meta.is_file());
-        let on_disk: User =
-            serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
+        let on_disk: User = serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
         assert_eq!(on_disk.email.as_deref(), Some("new@example.com"));
 
         // users.json 保持原样（不再被全量重写）。
@@ -865,7 +943,11 @@ mod tests {
         let b = reg.register("b@example.com", "bob").unwrap();
 
         // 每个用户都有自己的 meta.json。
-        for (uid, username) in [(root.uid.as_str(), "root"), (&a.uid, "alice"), (&b.uid, "bob")] {
+        for (uid, username) in [
+            (root.uid.as_str(), "root"),
+            (&a.uid, "alice"),
+            (&b.uid, "bob"),
+        ] {
             let bare = uid.strip_prefix("myclaw/u/").unwrap();
             let meta = data.join("users").join(bare).join("meta.json");
             assert!(meta.is_file(), "missing meta.json for {username}");
@@ -902,7 +984,10 @@ mod tests {
         let user = reg.register("alice@example.com", "alice").unwrap();
         let alice_id = user.user_id(reg.namespace());
         // u/uid 形态（大小写宽容）——uid 为系统分配 uuidv7 内部键。
-        assert_eq!(parse_target(&reg, &format!("u/{}", user.uid)).unwrap(), alice_id);
+        assert_eq!(
+            parse_target(&reg, &format!("u/{}", user.uid)).unwrap(),
+            alice_id
+        );
         assert_eq!(
             parse_target(&reg, &format!("U/{}", user.uid.to_uppercase())).unwrap(),
             alice_id
@@ -910,23 +995,99 @@ mod tests {
         // 完整 FQID。
         assert_eq!(parse_target(&reg, &alice_id).unwrap(), alice_id);
         // email（大小写不敏感）。
-        assert_eq!(
-            parse_target(&reg, "Alice@Example.com").unwrap(),
-            alice_id
-        );
+        assert_eq!(parse_target(&reg, "Alice@Example.com").unwrap(), alice_id);
     }
 
     #[test]
     fn parse_target_rejects_unknown_and_second_wave_forms() {
         let reg = UserRegistry::in_memory();
         reg.register("alice@example.com", "alice").unwrap();
-        assert!(parse_target(&reg, "u/nobody").unwrap_err().contains("未找到"));
-        assert!(parse_target(&reg, "bob@example.com")
-            .unwrap_err()
-            .contains("未找到"));
+        assert!(
+            parse_target(&reg, "u/nobody")
+                .unwrap_err()
+                .contains("未找到")
+        );
+        assert!(
+            parse_target(&reg, "bob@example.com")
+                .unwrap_err()
+                .contains("未找到")
+        );
         // @昵称 = 命令/工具层禁用（昵称不唯一，仅聊天自由文本支持），明确报错。
-        assert!(parse_target(&reg, "@alice").unwrap_err().contains("不支持 @昵称"));
+        assert!(
+            parse_target(&reg, "@alice")
+                .unwrap_err()
+                .contains("不支持 @昵称")
+        );
         assert!(parse_target(&reg, "bob").unwrap_err().contains("无法识别"));
         assert!(parse_target(&reg, "").unwrap_err().contains("不能为空"));
+    }
+}
+
+/// #101 P2：`normalize_operator_id` 三形态归一化 + username 反查。
+#[cfg(test)]
+mod operator_id_tests {
+    use super::*;
+
+    fn write_user_meta(base: &Path, uuid: &str, username: &str) {
+        let dir = base.join("users").join(uuid);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(USER_META_FILE),
+            serde_json::json!({
+                "uid": format!("myclaw/u/{uuid}"),
+                "username": username,
+                "active": true,
+                "created_ms": 0u64,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fqid_and_bare_uuid_forms_pass_through() {
+        let base = tempfile::tempdir().unwrap();
+        let uuid = "01923f0e-8a5a-7b3c-9d4e-5f6a7b8c9d0e";
+        assert_eq!(
+            normalize_operator_id("myclaw", base.path(), &format!("myclaw/u/{uuid}")).unwrap(),
+            uuid
+        );
+        assert_eq!(
+            normalize_operator_id("myclaw", base.path(), uuid).unwrap(),
+            uuid
+        );
+        // 非 user 类型的 FQID 拒绝。
+        assert!(normalize_operator_id("myclaw", base.path(), &format!("myclaw/s/{uuid}")).is_err());
+    }
+
+    #[test]
+    fn username_reverse_lookup_hits() {
+        let base = tempfile::tempdir().unwrap();
+        let uuid = "01923f0e-8a5a-7b3c-9d4e-5f6a7b8c9d0e";
+        write_user_meta(base.path(), uuid, "nxajh");
+        // 干扰项：不同 username。
+        write_user_meta(
+            base.path(),
+            "01923f0e-8a5a-7b3c-9d4e-5f6a7b8c9d0f",
+            "someone-else",
+        );
+        assert_eq!(
+            normalize_operator_id("myclaw", base.path(), "nxajh").unwrap(),
+            uuid
+        );
+    }
+
+    #[test]
+    fn username_reverse_lookup_zero_and_multi_hits() {
+        let base = tempfile::tempdir().unwrap();
+        // 零命中。
+        let err = normalize_operator_id("myclaw", base.path(), "ghost").unwrap_err();
+        assert!(err.contains("ghost"), "error names the username: {err}");
+        // 多命中（手工编辑磁盘可造成）→ 列出候选。
+        write_user_meta(base.path(), "01923f0e-8a5a-7b3c-9d4e-5f6a7b8c9d0e", "dup");
+        write_user_meta(base.path(), "01923f0e-8a5a-7b3c-9d4e-5f6a7b8c9d0f", "dup");
+        let err = normalize_operator_id("myclaw", base.path(), "dup").unwrap_err();
+        assert!(err.contains("multiple"), "error lists candidates: {err}");
+        assert!(err.contains("01923f0e-8a5a-7b3c-9d4e-5f6a7b8c9d0e"));
     }
 }

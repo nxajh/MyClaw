@@ -11,13 +11,15 @@ pub async fn run(
     agent: Option<&str>,
     model: Option<&str>,
     format: &str,
+    user: Option<&str>,
 ) -> Result<()> {
     let cfg = super::load_config(cli)?;
     super::init_tracing(&cfg);
     myclaw::tools::shell_env::init(cfg.shell.clone());
 
-    let registry = myclaw::providers::registry::Registry::from_config(cfg.providers.clone(), &cfg.routing)
-        .map_err(|e| anyhow::anyhow!("failed to build registry: {}", e))?;
+    let registry =
+        myclaw::providers::registry::Registry::from_config(cfg.providers.clone(), &cfg.routing)
+            .map_err(|e| anyhow::anyhow!("failed to build registry: {}", e))?;
     let registry_arc: Arc<dyn myclaw::ProviderRegistry> = Arc::new(registry);
 
     let mut tools = myclaw::ToolRegistry::new();
@@ -122,6 +124,48 @@ pub async fn run(
     let session_key = agent.unwrap_or("cli");
     let mut session = myclaw::Session::new(session_key.to_string());
     let model_owned = model.map(|s| s.to_string());
+
+    // #101 P2: CLI identity. `--user` (username / bare uuid / FQID) wins;
+    // otherwise fall back to the configured [system] operator. Without
+    // either, the run stays unattributed (as before) but is warned about
+    // — memory/skill writes then have no owner user layer to land in.
+    // The resolved FQID shape matches daemon-side load_session, which
+    // fills `owner_fqid` via UserResolver as `<ns>/u/<uuid>`.
+    let owner_fqid = {
+        let raw = user
+            .map(str::to_string)
+            .or_else(|| cfg.system.operator.clone());
+        match raw {
+            Some(raw) => {
+                match myclaw::identity::user_registry::normalize_operator_id(
+                    &cfg.system.namespace,
+                    &cfg.base_dir,
+                    &raw,
+                ) {
+                    Ok(uuid) => Some(format!("{}/u/{}", cfg.system.namespace, uuid)),
+                    Err(e) => {
+                        if user.is_some() {
+                            return Err(anyhow::anyhow!("--user '{}' did not resolve: {}", raw, e));
+                        }
+                        tracing::warn!(
+                            err = %e,
+                            "exec: [system] operator did not resolve — running without identity"
+                        );
+                        None
+                    }
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "exec: no identity (--user / [system] operator) — memory/skill writes will not be attributed"
+                );
+                None
+            }
+        }
+    };
+    if let Some(fqid) = owner_fqid {
+        session.owner_fqid = fqid;
+    }
 
     session.add_user(prompt.to_string());
     let turn_ctx = myclaw::TurnContext {

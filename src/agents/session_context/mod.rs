@@ -7,8 +7,8 @@
 //! (already-resolved decisions); SessionContext is what the Orchestrator
 //! holds in its session table and what `process_turn` operates on per turn.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::Mutex;
 
@@ -18,13 +18,13 @@ pub(crate) mod helpers;
 pub(crate) mod suspension;
 pub(crate) mod tts;
 
-pub(crate) use helpers::{age_session_media, history_looks_incomplete, is_bare_continue};
-pub(crate) use suspension::{decide_silenced, semantic_stop_reason};
-pub use suspension::TerminalRecord;
-pub(crate) use tts::prepare_text_for_tts;
 use crate::agents::turn::{PreviewState, SubResult, SubStatus, TurnResult, TurnSuspension};
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
 use crate::api::message::{Channel, ChannelInboundMessage};
+pub(crate) use helpers::{age_session_media, history_looks_incomplete, is_bare_continue};
+pub use suspension::TerminalRecord;
+pub(crate) use suspension::{decide_silenced, semantic_stop_reason};
+pub(crate) use tts::prepare_text_for_tts;
 
 /// Per-session bundle held by the SessionManager's session-context table.
 ///
@@ -94,8 +94,7 @@ pub struct SessionContext {
     /// idle (wake sees `try_lock` succeed) or turn-end (dispatch_turn tail).
     /// FIFO; deduped by notice id within a drain pass. Runtime-only: NOT
     /// persisted (P2 adds the persistent delivery queue).
-    pub delegation_notice_queue:
-        std::sync::Mutex<std::collections::VecDeque<DelegationNotice>>,
+    pub delegation_notice_queue: std::sync::Mutex<std::collections::VecDeque<DelegationNotice>>,
     /// Per-turn cancel token. Recreated each turn by `process_turn`.
     /// `/stop` fires this to cancel the in-flight turn without locking `session`.
     pub turn_cancel: std::sync::Mutex<tokio_util::sync::CancellationToken>,
@@ -221,7 +220,10 @@ impl SessionContext {
         match serde_json::from_str::<TurnSuspension>(&json) {
             Ok(s) => {
                 let pending = s.pending.len();
-                *self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
+                *self
+                    .turn_suspension
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(s);
                 tracing::info!(
                     session = %self.session_id,
                     pending = pending,
@@ -291,7 +293,10 @@ impl SessionContext {
     /// background work too, without either caller knowing about the other.
     pub fn add_pending_task(&self, sub_session_id: String) {
         {
-            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self
+                .turn_suspension
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             match guard.as_mut() {
                 Some(s) => s.add_pending(sub_session_id),
                 None => *guard = Some(TurnSuspension::new(sub_session_id)),
@@ -326,11 +331,11 @@ impl SessionContext {
     /// Saturating — a notice that reached `process_turn` without a matching
     /// dispatch-time bump (e.g. a direct test call) must not underflow.
     pub fn finish_notice_turn(&self) {
-        let _ = self.notice_turns_in_flight.fetch_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |v| Some(v.saturating_sub(1)),
-        );
+        let _ = self
+            .notice_turns_in_flight
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                Some(v.saturating_sub(1))
+            });
     }
 
     /// 单 preview (2026-08-12): true while any delegation-notice turn is
@@ -393,7 +398,10 @@ impl SessionContext {
     /// session is not suspended.
     pub fn add_progress(&self, sub_session_id: &str, text: &str) {
         {
-            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self
+                .turn_suspension
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(s) = guard.as_mut() {
                 s.progress_by_sub_session
                     .entry(sub_session_id.to_string())
@@ -419,7 +427,10 @@ impl SessionContext {
         sent_message_count: u64,
     ) -> TerminalRecord {
         let snapshot = {
-            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self
+                .turn_suspension
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let s = match guard.as_mut() {
                 Some(s) => s,
                 None => return TerminalRecord::NoSuspension,
@@ -464,7 +475,10 @@ impl SessionContext {
     /// next turn is loud again.
     pub fn clear_suspension_if_collected(&self) {
         {
-            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self
+                .turn_suspension
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(s) = guard.as_ref() {
                 // 单 preview (2026-08-12): `pending` empty alone is NOT the end
                 // of the suspension sequence — the wake burst may have collected
@@ -490,7 +504,10 @@ impl SessionContext {
     /// 行追加). No-op when the session is not suspended.
     pub fn set_preview(&self, reply_target: String, fold: crate::api::turn_stream::FoldCandidate) {
         {
-            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self
+                .turn_suspension
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(s) = guard.as_mut() {
                 s.preview = Some(PreviewState {
                     reply_target,
@@ -647,10 +664,7 @@ impl SessionContext {
         // derived from the inbound message (never from a session-level
         // override — Inject crons must not poison the user's session).
         // Cleared at turn end like `turn_silenced`.
-        session.turn_headless = matches!(
-            turn_run_mode,
-            crate::config::agent::RunMode::Background
-        );
+        session.turn_headless = matches!(turn_run_mode, crate::config::agent::RunMode::Background);
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
         // Channels that don't support streaming return None; the
         // fallback send block below covers them (delivery == Pending always
@@ -667,9 +681,8 @@ impl SessionContext {
         // collapses the preview into a summary (boundary ②, user-confirmed
         // 2026-08-12).
         let fold = if silenced_intent.is_some() {
-            self.suspension_snapshot()
-                .and_then(|s| s.preview)
-                .map(|p| crate::api::turn_stream::FoldCandidate {
+            self.suspension_snapshot().and_then(|s| s.preview).map(|p| {
+                crate::api::turn_stream::FoldCandidate {
                     msg_id: p.msg_id,
                     text: p.text,
                     // 单 preview (2026-08-12): cumulative counters + wall-clock
@@ -679,7 +692,8 @@ impl SessionContext {
                     tool_count: p.tool_count,
                     commentary_notes: p.commentary_notes,
                     started_at_unix_secs: p.started_at_unix_secs,
-                })
+                }
+            })
         } else {
             None
         };
@@ -742,7 +756,9 @@ impl SessionContext {
             let history_clone = session.history.clone();
             // RFC #101 P1: pass the FQID (users/{uuid}), not the routing key.
             let owner = session.owner_fqid.clone();
-            session.attachments.diff_skills(&skills_snap, &history_clone, Some(owner.as_str()));
+            session
+                .attachments
+                .diff_skills(&skills_snap, &history_clone, Some(owner.as_str()));
             let agent_list: Vec<(String, String)> = runtime
                 .agents
                 .values_cloned()
@@ -757,15 +773,34 @@ impl SessionContext {
             session.attachments.diff_agents(&agent_list, &history_clone);
             // Date injection respects the configured [prompt] timezone_offset
             // (sourced from the shared ResourceProvider via CompactionEngine).
-            session.attachments.diff_date(runtime.context_engine.timezone_offset(), &history_clone);
-            session.attachments.diff_autonomy(&prompt_config.permission_mode, &history_clone);
+            session
+                .attachments
+                .diff_date(runtime.context_engine.timezone_offset(), &history_clone);
+            session
+                .attachments
+                .diff_autonomy(&prompt_config.permission_mode, &history_clone);
             // Daily throttled draft-skill backlog reminder (issue #89,
             // layer ②) — best-effort, never blocks the turn.
-            if let Some(names) = crate::agents::skill_draft_reminder::check_and_arm(
+            // #101 P2: per-layer accounting — the user-layer backlog
+            // belongs to this session's owner; the agent-layer backlog
+            // surfaces only in the operator's sessions
+            // (runtime.defaults.operator = [system] operator
+            // normalized to a bare uuid at daemon assembly).
+            let is_operator = !session.owner_fqid.is_empty()
+                && runtime
+                    .defaults
+                    .operator
+                    .as_deref()
+                    .is_some_and(|op| crate::ids::bare_dir_name(&session.owner_fqid) == op);
+            if let Some(backlog) = crate::agents::skill_draft_reminder::check_and_arm(
                 std::path::Path::new(&runtime.defaults.prompt.base_dir),
                 runtime.context_engine.timezone_offset(),
+                &session.owner_fqid,
+                is_operator,
             ) {
-                session.attachments.push_skill_draft_reminder(names);
+                session
+                    .attachments
+                    .push_skill_draft_reminder(backlog.user_layer, backlog.agent_layer);
             }
             // Inject user/feedback memory index as system-reminder.
             let memory_root = &runtime.defaults.prompt.memory_root;
@@ -776,7 +811,9 @@ impl SessionContext {
             } else {
                 Vec::new()
             };
-            session.attachments.diff_memory(&memory_entries, &history_clone);
+            session
+                .attachments
+                .diff_memory(&memory_entries, &history_clone);
             let text = session.attachments.build_text(&skills_snap);
             session.attachments.clear_pending();
 
@@ -800,8 +837,7 @@ impl SessionContext {
                 }
                 if let Some(ch) = channel_for_send {
                     let receiver = {
-                        let mut r =
-                            crate::api::message::MessageReceiver::new(reply_target.clone());
+                        let mut r = crate::api::message::MessageReceiver::new(reply_target.clone());
                         if let Some(ref last_msg) = session.last_message {
                             r.reply_to_message_id = Some(
                                 last_msg
@@ -916,8 +952,11 @@ impl SessionContext {
                 // continues — rewrite the last assistant message's
                 // usage.stop_reason to "Continue" so the observable record
                 // matches the semantics.
-                let semantic =
-                    semantic_stop_reason(silenced, turn_result.has_pending, turn_result.stop_reason);
+                let semantic = semantic_stop_reason(
+                    silenced,
+                    turn_result.has_pending,
+                    turn_result.stop_reason,
+                );
                 if semantic != turn_result.stop_reason {
                     turn_result.stop_reason = semantic;
                     // Take the backend ID before borrowing `history` mutably.
@@ -1016,7 +1055,8 @@ impl SessionContext {
                     }
                 }
                 if delivery != crate::api::turn_stream::StreamDelivery::FinalDelivered
-                    && (delivery == crate::api::turn_stream::StreamDelivery::Pending || !suspended_turn)
+                    && (delivery == crate::api::turn_stream::StreamDelivery::Pending
+                        || !suspended_turn)
                 {
                     if let Some(ref ch) = channel_for_send {
                         if !turn_result.text.trim().is_empty() {
@@ -1067,8 +1107,7 @@ impl SessionContext {
                     && !turn_result.text.trim().is_empty()
                 {
                     if let Some(ref ch) = channel_for_send {
-                        if let Ok((tts_provider, tts_model)) =
-                            runtime.providers.get_tts_provider()
+                        if let Ok((tts_provider, tts_model)) = runtime.providers.get_tts_provider()
                         {
                             let text_for_tts = prepare_text_for_tts(turn_result.text.trim());
                             // Skip very long texts or texts that became empty after stripping.
@@ -1090,9 +1129,10 @@ impl SessionContext {
                                             .is_ok()
                                         {
                                             let receiver = {
-                                                let mut r = crate::api::message::MessageReceiver::new(
-                                                    reply_target.clone(),
-                                                );
+                                                let mut r =
+                                                    crate::api::message::MessageReceiver::new(
+                                                        reply_target.clone(),
+                                                    );
                                                 if let Some(ref last_msg) = session.last_message {
                                                     r.reply_to_message_id = Some(
                                                         last_msg
@@ -1116,7 +1156,7 @@ impl SessionContext {
                                                         audio_resp.audio.mime_type.clone(),
                                                     ),
                                                     size_bytes: Some(
-                                                        audio_resp.audio.bytes.len() as u64,
+                                                        audio_resp.audio.bytes.len() as u64
                                                     ),
                                                     source_url: None,
                                                 },
@@ -1129,11 +1169,12 @@ impl SessionContext {
                                             let message =
                                                 crate::api::message::ChannelOutboundMessage {
                                                     receiver,
-                                                    content: crate::api::message::ChannelMessageContent {
-                                                        text: String::new(),
-                                                        files: vec![voice_file],
-                                                        buttons: vec![],
-                                                    },
+                                                    content:
+                                                        crate::api::message::ChannelMessageContent {
+                                                            text: String::new(),
+                                                            files: vec![voice_file],
+                                                            buttons: vec![],
+                                                        },
                                                     options: Default::default(),
                                                 };
                                             if let Err(e) = ch.send_message(&message).await {
@@ -1190,8 +1231,6 @@ impl SessionContext {
         }
     }
 }
-
-
 
 // ── #151 Phase 8+ PendingWorkSession facade ──────────────────────────────────
 impl crate::api::session_store::PendingWorkSession for SessionContext {

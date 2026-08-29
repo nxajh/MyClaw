@@ -28,7 +28,6 @@ pub(crate) mod lifecycle;
 pub(crate) use builder::*;
 pub(crate) use lifecycle::*;
 
-
 /// File descriptor of the SO_REUSEPORT webhook listen socket, stored so the
 /// hot-switch child can inherit it.  `-1` means no socket has been bound yet.
 pub static LISTEN_SOCKET_FD: AtomicI32 = AtomicI32::new(-1);
@@ -348,7 +347,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             );
         }
     }
-    if let Err(e) = crate::migration::run_auto(&config.workspace_dir, &base_dir, &config.system.namespace)
+    if let Err(e) =
+        crate::migration::run_auto(&config.workspace_dir, &base_dir, &config.system.namespace)
     {
         tracing::warn!(err = %e, "migration: 自动迁移失败（继续以原数据启动）");
     }
@@ -398,7 +398,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     // Migrate from old markdown files if the jobs store is empty.
     if !jobs_root.join("jobs.json").exists()
-        && std::fs::read_dir(&jobs_root).map(|mut rd| rd.next().is_none()).unwrap_or(true)
+        && std::fs::read_dir(&jobs_root)
+            .map(|mut rd| rd.next().is_none())
+            .unwrap_or(true)
     {
         let (dummy_tx, _) = tokio::sync::mpsc::channel(1);
         let migrator = crate::scheduling_runtime::scheduler::Scheduler::new(
@@ -453,8 +455,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Orchestrator records every inbound message; slash commands query.
     // P3: with_resolver folds contacts/mailbox keys for linked identities.
     let known_users = Arc::new(
-        crate::agents::KnownUsersRegistry::new(&base_dir)
-            .with_resolver(Arc::clone(&user_resolver)),
+        crate::agents::KnownUsersRegistry::new(&base_dir).with_resolver(Arc::clone(&user_resolver)),
     );
     known_users.migrate_legacy(&base_dir);
 
@@ -484,21 +485,22 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tokio::sync::mpsc::channel::<crate::tools::shell::ShellCompletion>(100);
 
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
-    let (mut tools, task_boards, send_message_tool, friend_ctx, shell_registry, shell_tool) = build_tools(
-        &mcp_manager,
-        &skills_arc,
-        &shared_scheduler,
-        &config,
-        config.memory_root().to_str().unwrap_or("."),
-        &user_resolver,
-        Arc::clone(&ask_router),
-        &known_users,
-        &user_registry,
-        &config.system.namespace,
-        Arc::clone(&session_backend),
-        shell_notice_tx,
-    )
-    .await;
+    let (mut tools, task_boards, send_message_tool, friend_ctx, shell_registry, shell_tool) =
+        build_tools(
+            &mcp_manager,
+            &skills_arc,
+            &shared_scheduler,
+            &config,
+            config.memory_root().to_str().unwrap_or("."),
+            &user_resolver,
+            Arc::clone(&ask_router),
+            &known_users,
+            &user_registry,
+            &config.system.namespace,
+            Arc::clone(&session_backend),
+            shell_notice_tx,
+        )
+        .await;
     // P1 cross-user delivery (RFC §3.5): give send_message access to the
     // known-users registry so `recipient=@nick` can resolve contacts and
     // deliver to the peer's user-level mailbox.
@@ -636,7 +638,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         parent_tools.register(Arc::new(crate::tools::AgentResumeTool::new(Arc::clone(
             &delegator_arc,
         ))));
-        tracing::debug!("agent_list / agent_kill / agent_resume tools registered (multi-agent mode)");
+        tracing::debug!(
+            "agent_list / agent_kill / agent_resume tools registered (multi-agent mode)"
+        );
 
         // sessions_yield (RFC delegation-notice-queue §3): deterministic turn
         // hand-off for the parent agent after spawning async sub-agents.
@@ -657,7 +661,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // exists as a separate type.
     let delegation_rx = if let Some(ref delegator) = sub_agent_delegator_arc {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agents::DelegationEvent>(100);
-            delegator.set_event_sender(tx.clone());
+        delegator.set_event_sender(tx.clone());
         Some(rx)
     } else {
         None
@@ -687,7 +691,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     if !checkpoints.is_empty() {
         tracing::info!(
             count = checkpoints.len(),
-            checkpointed = checkpoints.iter().filter(|c| c.status == "checkpointed").count(),
+            checkpointed = checkpoints
+                .iter()
+                .filter(|c| c.status == "checkpointed")
+                .count(),
             running = checkpoints.iter().filter(|c| c.status == "running").count(),
             "loaded delegation checkpoints from previous run"
         );
@@ -699,8 +706,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Checkpoints carrying a terminal status (方案 A tombstone) are neither:
     // the task already finished and `run_startup` skips it. Both sides key on
     // the sub-session id (the checkpoint primary key).
-    let checkpoint_sub_session_ids: std::collections::HashSet<&str> =
-        checkpoints.iter().map(|c| c.sub_session_id.as_str()).collect();
+    let checkpoint_sub_session_ids: std::collections::HashSet<&str> = checkpoints
+        .iter()
+        .map(|c| c.sub_session_id.as_str())
+        .collect();
     let terminal_sub_session_ids: std::collections::HashSet<&str> = checkpoints
         .iter()
         .filter(|c| {
@@ -835,10 +844,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Arc::clone(&tools_arc),
         ));
         let tool_executor = Arc::new(
-            crate::agents::tool_executor::ToolExecutor::new(
-                config.tool_executor.timeout_secs,
-            )
-            .with_ask_router(Arc::clone(&ask_router)),
+            crate::agents::tool_executor::ToolExecutor::new(config.tool_executor.timeout_secs)
+                .with_ask_router(Arc::clone(&ask_router)),
         );
         let loop_breaker = Arc::new(crate::agents::loop_breaker::LoopBreaker::new(
             crate::api::loop_breaker::LoopBreakerConfig {
@@ -851,6 +858,26 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             permission_mode: config.agent.permission_mode,
             prompt: prompt_config,
             auto_tts: config.agent.auto_tts,
+            // #101 P2: [system] operator → bare uuid, once at assembly.
+            // Username refs are resolved by scanning users/*/meta.json;
+            // a failed resolution only disables agent-layer draft
+            // reminders (warned), never startup.
+            operator: config.system.operator.as_deref().and_then(|op| {
+                match crate::identity::user_registry::normalize_operator_id(
+                    &config.system.namespace,
+                    &config.base_dir,
+                    op,
+                ) {
+                    Ok(uuid) => Some(uuid),
+                    Err(e) => {
+                        tracing::warn!(
+                            err = %e,
+                            "daemon: [system] operator did not resolve — agent-layer draft reminders stay off"
+                        );
+                        None
+                    }
+                }
+            }),
         };
 
         crate::agents::AgentRuntime::new(
@@ -916,9 +943,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // materialized BEFORE this point have no registry wired; every
     // SessionContext created from here on resolves channels via
     // `Session::resolve_channel()`.
-    orchestrator.ctx().sessions.set_channel_registry(
-        orchestrator.ctx().channels.clone().into(),
-    );
+    orchestrator
+        .ctx()
+        .sessions
+        .set_channel_registry(orchestrator.ctx().channels.clone().into());
 
     // H57: AgentLoop is gone; the WebSocketChannel's previous loop_registry +
     // evict_loop dance to flush stale per-session AgentLoop instances on

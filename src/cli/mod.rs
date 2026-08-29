@@ -88,6 +88,11 @@ pub enum Commands {
         /// Output format: text (default) or json.
         #[arg(long, default_value = "text")]
         format: String,
+
+        /// Act as this user: username or uuid (#101 P2). Defaults to the
+        /// configured [system] operator when omitted.
+        #[arg(long)]
+        user: Option<String>,
     },
 
     /// Diagnose environment, configuration, and connectivity.

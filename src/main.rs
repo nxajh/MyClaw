@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
             ref agent,
             ref model,
             ref format,
+            ref user,
         }) => {
             cli::cmd_exec::run(
                 &cli_args,
@@ -47,6 +48,7 @@ async fn main() -> Result<()> {
                 agent.as_deref(),
                 model.as_deref(),
                 format,
+                user.as_deref(),
             )
             .await?;
         }
