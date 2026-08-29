@@ -210,8 +210,11 @@ fn is_active(skill_md: &Path) -> bool {
 pub fn scan_personal_identifiers(text: &str, users_dir: &Path) -> Vec<String> {
     let mut hits: Vec<String> = Vec::new();
 
-    // Regex families (structural patterns).
-    let families = [
+    // Regex families (structural patterns). Review feedback (PR #206): the
+    // gate's stated intent is "code-level, not just the LLM", so common PII
+    // families must not rely on LLM backstop. rust regex has no lookahead —
+    // universal IPv4 constants are filtered after matching instead.
+    let families: &[(&str, &str)] = &[
         (r"/home/[A-Za-z0-9_.-]+", "home path"),
         (
             r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
@@ -222,11 +225,30 @@ pub fn scan_personal_identifiers(text: &str, users_dir: &Path) -> Vec<String> {
             "routing key",
         ),
         (r"instance-[0-9]{4,}", "cloud instance name"),
+        (r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "email"),
+        (r"\b(?:\+?86[-\s]?)?1[3-9]\d{9}\b", "mobile number"),
+        (r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "ipv4 address"),
+        (r"\bSHA256:[A-Za-z0-9+/]{43}\b", "ssh fingerprint"),
+        (r"\b(?:[0-9a-f]{2}:){15}[0-9a-f]{2}\b", "ssh fingerprint"),
+        (
+            r"\b(?:sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xoxb-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16})\b",
+            "api token",
+        ),
     ];
     for (pat, label) in families {
         if let Ok(re) = regex::Regex::new(pat) {
             for m in re.find_iter(text) {
-                hits.push(format!("{}: {}", label, m.as_str()));
+                let hit = m.as_str();
+                // Structurally IPv4 but universal constants (loopback,
+                // wildcard, broadcast, public DNS resolvers): examples in
+                // generic ops skills, not personal identifiers.
+                if matches!(
+                    hit,
+                    "127.0.0.1" | "0.0.0.0" | "255.255.255.255" | "8.8.8.8" | "1.1.1.1"
+                ) {
+                    continue;
+                }
+                hits.push(format!("{}: {}", label, hit));
             }
         }
     }
@@ -394,7 +416,10 @@ fn parse_classification(output: &str) -> Vec<(String, char, String)> {
     out
 }
 
-/// Write the round's proposal file ({proposals_dir}/{date}.md).
+/// Append the round's section to the proposal file
+/// ({proposals_dir}/{date}.md). Review feedback (PR #206): multiple passes
+/// can fire on the same day, so each pass appends a `## pass HH:MM` section
+/// instead of overwriting — earlier rounds stay auditable.
 fn write_proposal_file(
     proposals_dir: &Path,
     promoted: &[(String, String)], // (name, owner)
@@ -402,30 +427,57 @@ fn write_proposal_file(
     tier_c: &[(String, String)],
 ) -> std::path::PathBuf {
     let _ = std::fs::create_dir_all(proposals_dir);
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let now = chrono::Local::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    let time = now.format("%H:%M").to_string();
     let path = proposals_dir.join(format!("{}.md", date));
+
     let mut body = String::new();
-    body.push_str(&format!(
-        "# 内化提议 {}\n\n由 skill_proposer 自动生成。A 档已直接晋升（无损搬移，可 mv 回滚）；\
-         B 档待 operator 签名：确认去标识化 diff 后在会话内执行（改写入 agent 层 + 实例参数\
-         写入 user 层记忆 + 删除 user 层原始版）。\n\n",
-        date
-    ));
-    body.push_str(&format!("## A 档（已晋升，{} 个）\n", promoted.len()));
-    for (name, owner) in promoted {
-        body.push_str(&format!("- `{}` ← users/{}/skills（mv 搬移，回滚：mv 回去）\n", name, owner));
+    if !path.exists() {
+        body.push_str(&format!(
+            "# 内化提议 {}\n\n由 skill_proposer 自动生成。A 档已直接晋升（无损搬移，可 mv 回滚）；\
+             B 档待 operator 签名：确认去标识化 diff 后在会话内执行（改写入 agent 层 + 实例参数\
+             写入 user 层记忆 + 删除 user 层原始版）。\n",
+            date
+        ));
     }
-    body.push_str(&format!("\n## B 档（待签名，{} 个）\n", tier_b.len()));
+    body.push_str(&format!(
+        "\n## pass {}（A {} / B {} / C {}）\n",
+        time,
+        promoted.len(),
+        tier_b.len(),
+        tier_c.len()
+    ));
+    body.push_str(&format!("### A 档（已晋升，{} 个）\n", promoted.len()));
+    for (name, owner) in promoted {
+        body.push_str(&format!(
+            "- `{}` ← users/{}/skills（mv 搬移，回滚：mv 回去）\n",
+            name, owner
+        ));
+    }
+    body.push_str(&format!("### B 档（待签名，{} 个）\n", tier_b.len()));
     for (name, note) in tier_b {
         body.push_str(&format!("- `{}`：{}\n", name, note));
     }
-    body.push_str(&format!("\n## C 档（留层，{} 个）\n", tier_c.len()));
+    body.push_str(&format!("### C 档（留层，{} 个）\n", tier_c.len()));
     for (name, note) in tier_c {
         body.push_str(&format!("- `{}`：{}\n", name, note));
     }
-    body.push_str("\n## 签名\n回复本文件相关会话，如\"同意 B 档全部\"或逐个点名。\n");
-    if let Err(e) = std::fs::write(&path, body) {
-        tracing::warn!(err = %e, path = %path.display(), "skill_proposer: failed to write proposal file");
+
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(body.as_bytes()) {
+                tracing::warn!(err = %e, path = %path.display(), "skill_proposer: failed to append proposal section");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(err = %e, path = %path.display(), "skill_proposer: failed to open proposal file");
+        }
     }
     path
 }
@@ -639,6 +691,67 @@ mod tests {
         assert!(hits.iter().any(|h| h.contains("instance-")));
         assert!(scan_personal_identifiers("plain methodology text", &users).is_empty());
         let _ = std::fs::remove_dir_all(&users);
+    }
+
+    #[test]
+    fn hard_gate_finds_pii_families() {
+        let users = tmp_dir("pii");
+        let hits = scan_personal_identifiers(
+            "contact ops@corp.example for AKIAIOSFODNN7EXAMPLE and ghp_AAAA1111BBBB2222CCCC3333 \
+             at ssh root@10.2.34.56, mobile 13800138000, mail alice@corp.example",
+            &users,
+        );
+        assert!(hits.iter().any(|h| h.starts_with("email:")));
+        assert!(hits.iter().any(|h| h.starts_with("mobile number: 13800138000")));
+        assert!(hits.iter().any(|h| h.starts_with("ipv4 address: 10.2.34.56")));
+        assert!(hits.iter().any(|h| h.contains("AKIA")));
+        assert!(hits.iter().any(|h| h.contains("ghp_")));
+        let _ = std::fs::remove_dir_all(&users);
+    }
+
+    #[test]
+    fn hard_gate_ignores_universal_constants_and_long_digit_runs() {
+        let users = tmp_dir("consts");
+        let hits = scan_personal_identifiers(
+            "curl http://127.0.0.1:8080 and 0.0.0.0, dns 8.8.8.8, ts 1726000000000 ms",
+            &users,
+        );
+        assert!(
+            !hits.iter().any(|h| h.contains("ipv4")),
+            "loopback/wildcard/DNS IPs must not count: {:?}",
+            hits
+        );
+        assert!(
+            !hits.iter().any(|h| h.starts_with("mobile")),
+            "13-digit ms timestamps must not count as mobile numbers: {:?}",
+            hits
+        );
+        let _ = std::fs::remove_dir_all(&users);
+    }
+
+    #[test]
+    fn proposal_file_appends_per_pass() {
+        let dir = tmp_dir("proposal");
+        let p1 = write_proposal_file(
+            &dir,
+            &[("skill-a".to_string(), "u1".to_string())],
+            &[],
+            &[],
+        );
+        let content1 = std::fs::read_to_string(&p1).unwrap();
+        assert_eq!(content1.matches("# 内化提议").count(), 1);
+        assert!(content1.contains("skill-a"));
+        let _ = write_proposal_file(
+            &dir,
+            &[],
+            &[("skill-b".to_string(), "needs rewrite".to_string())],
+            &[],
+        );
+        let content2 = std::fs::read_to_string(&p1).unwrap();
+        assert_eq!(content2.matches("# 内化提议").count(), 1, "header must not duplicate");
+        assert_eq!(content2.matches("## pass").count(), 2, "one section per pass");
+        assert!(content2.contains("skill-a") && content2.contains("skill-b"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
