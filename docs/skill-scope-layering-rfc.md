@@ -23,7 +23,7 @@
 | 分层模型 | 两层：user 层 + agent 层（对齐 memory 两层与 `load_skills_layered` 惯例） |
 | 存量迁移 | **全部 21 个（4 draft + 17 active）归 user 层**，agent 层从空开始，此后仅经「提升」进入 |
 | agent 层写权限 | **fork 模型**（2026-08-29 修订）：原始技能经 `skill_manage` 只读；修改自动 fork 到本人 user 层副本（遮蔽生效）。更新原始版走 operator 的文件系统/git 或 P3 `promote`（`~/.agents/skills` 共享库 #99 保护不变，同为 fork 源） |
-| extract 默认落点 | user 层（从谁的会话提取落谁的层）。无主会话**不提取**（owner 缺失视为 bug，warn + skip，不写任何层，2026-08-29 P2 修订）；headless 身份经 CLI `--user` / `[system] operator`、cron 经 `JobEntry.creator` 补齐 |
+| extract 默认落点 | user 层（从谁的会话提取落谁的层）。无主会话**不提取**（owner 缺失视为 bug，warn + skip，不写任何层，2026-08-29 P2 修订）；CLI 身份经必填 `--user`（exec/chat 一致，不允许无身份运行——`[system] operator` 不作 CLI 隐式身份，只服务 P3 promote 授权与 agent 层 backlog 路由）、cron 经 `JobEntry.creator` 补齐 |
 
 ## 2. 设计
 
@@ -59,9 +59,12 @@ user 层 ∪ agent 层 ∪ 共享库
   （同名 user 层优先），与写入视角一致。
 - headless / cron / 无 owner 会话：**不再落 agent 层**（P2 修订）。owner 缺失 =
   调用方 bug，fork 直接 warn + 返回（不写任何层）。身份补齐路径：
-  - CLI：`myclaw exec --user <username|uuid>`，未给时取 `[system] operator`
-    （`[system]` 新增 `operator` 配置，支持 FQID/裸 uuid/username，username 经
-    `users/*/meta.json` 静态反查归一化为 uuid）；
+  - CLI：`myclaw exec|chat --user <username|uuid>` **必填**（不接受省略——
+    无主 CLI 写入正是 `users/skill_extract` 脏目录的成因；CLI 是唯一可安全
+    假定"键盘后面是本人"的入口）。`[system] operator` 配置仍新增（支持
+    FQID/裸 uuid/username，username 经 `users/*/meta.json` 静态反查归一化），
+    但职责限于 P3 promote 授权与 agent 层 backlog 路由，**不是** CLI 隐式
+    身份（2026-08-29 终审修订）；
   - cron：`JobEntry` 新增 `creator` 字段（创建时经 UserResolver 归一化记录），
     scheduler 触发时经 `CronTrigger.creator` 带出，Isolated `_job_*` 会话（owner
     未归属）据此设置 `session.owner_fqid`；Inject 模式注入用户会话，owner 已由

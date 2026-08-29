@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
                 agent.as_deref(),
                 model.as_deref(),
                 print,
-                user.as_deref(),
+                user,
             )
             .await?;
         }
@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
                 agent.as_deref(),
                 model.as_deref(),
                 format,
-                user.as_deref(),
+                user,
             )
             .await?;
         }

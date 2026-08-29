@@ -11,7 +11,7 @@ pub async fn run(
     agent: Option<&str>,
     model: Option<&str>,
     format: &str,
-    user: Option<&str>,
+    user: &str,
 ) -> Result<()> {
     let cfg = super::load_config(cli)?;
     super::init_tracing(&cfg);
@@ -125,12 +125,10 @@ pub async fn run(
     let mut session = myclaw::Session::new(session_key.to_string());
     let model_owned = model.map(|s| s.to_string());
 
-    // #101 P2: CLI identity — `--user` / `[system] operator` (shared
-    // helper, see `cli::resolve_cli_identity`). Same FQID shape as
+    // #101 P2: CLI identity — required `--user` (shared helper with
+    // `chat`, see `cli::resolve_cli_identity`). Same FQID shape as
     // daemon-side load_session.
-    if let Some(fqid) = super::resolve_cli_identity(&cfg, user, "exec")? {
-        session.owner_fqid = fqid;
-    }
+    session.owner_fqid = super::resolve_cli_identity(&cfg, user)?;
 
     session.add_user(prompt.to_string());
     let turn_ctx = myclaw::TurnContext {

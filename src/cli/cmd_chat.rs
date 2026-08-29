@@ -11,7 +11,7 @@ pub async fn run(
     agent: Option<&str>,
     model: Option<&str>,
     print: bool,
-    user: Option<&str>,
+    user: &str,
 ) -> Result<()> {
     let cfg = super::load_config(cli)?;
     super::init_tracing(&cfg);
@@ -125,12 +125,10 @@ pub async fn run(
     let session_key = agent.unwrap_or("cli");
     let mut session = myclaw::Session::new(session_key.to_string());
 
-    // #101 P2: CLI identity — `--user` / `[system] operator` (shared
-    // helper with `exec`, see `cli::resolve_cli_identity`). Same FQID
-    // shape as daemon-side load_session.
-    if let Some(fqid) = super::resolve_cli_identity(&cfg, user, "chat")? {
-        session.owner_fqid = fqid;
-    }
+    // #101 P2: CLI identity — required `--user` (shared helper with
+    // `exec`, see `cli::resolve_cli_identity`). Same FQID shape as
+    // daemon-side load_session.
+    session.owner_fqid = super::resolve_cli_identity(&cfg, user)?;
     let model_owned = model.map(|s| s.to_string());
 
     // Non-interactive (--print) or single prompt mode.

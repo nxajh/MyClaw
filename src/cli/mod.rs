@@ -70,9 +70,9 @@ pub enum Commands {
         #[arg(short, long)]
         print: bool,
 
-        /// Act as this user: username, bare uuid, or FQID (#101 P2).
+        /// Act as this user (required): username, bare uuid, or FQID (#101 P2).
         #[arg(long)]
-        user: Option<String>,
+        user: String,
     },
 
     /// Run a single prompt non-interactively (alias: chat --print).
@@ -93,10 +93,9 @@ pub enum Commands {
         #[arg(long, default_value = "text")]
         format: String,
 
-        /// Act as this user: username or uuid (#101 P2). Defaults to the
-        /// configured [system] operator when omitted.
+        /// Act as this user (required): username, bare uuid, or FQID (#101 P2).
         #[arg(long)]
-        user: Option<String>,
+        user: String,
     },
 
     /// Diagnose environment, configuration, and connectivity.
@@ -226,47 +225,26 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
 }
 
 /// Resolve the CLI session identity (#101 P2, shared by `exec`/`chat`):
-/// `--user` (username / bare uuid / FQID) wins; otherwise fall back to the
-/// configured `[system] operator`. Returns the owner FQID
-/// (`<ns>/u/<uuid>` — same shape daemon-side load_session fills via
-/// UserResolver). `Ok(None)` = no identity (warned by the caller's
-/// context); explicit `--user` that fails to resolve is a hard error,
-/// an unresolvable operator config only warns (a broken config must not
-/// block the run).
+/// `--user` is **required** — the CLI is the one entry that may safely
+/// assume a human at the keyboard, so it never runs unattributed (an
+/// unattributed CLI write is how the `users/skill_extract` orphan dirs
+/// happened). Accepts username / bare uuid / FQID; returns the owner
+/// FQID (`<ns>/u/<uuid>` — same shape daemon-side load_session fills
+/// via UserResolver). A value that fails to resolve is a hard error.
+/// Note: `[system] operator` deliberately plays no role here — it is a
+/// system role (P3 promote authorization, agent-layer backlog routing),
+/// not an implicit CLI identity.
 pub(crate) fn resolve_cli_identity(
     cfg: &myclaw::config::AppConfig,
-    user: Option<&str>,
-    cmd: &str,
-) -> Result<Option<String>> {
-    let raw = user.map(str::to_string).or_else(|| cfg.system.operator.clone());
-    match raw {
-        Some(raw) => {
-            match myclaw::identity::user_registry::normalize_operator_id(
-                &cfg.system.namespace,
-                &cfg.base_dir,
-                &raw,
-            ) {
-                Ok(uuid) => Ok(Some(format!("{}/u/{}", cfg.system.namespace, uuid))),
-                Err(e) => {
-                    if user.is_some() {
-                        Err(anyhow::anyhow!("--user '{}' did not resolve: {}", raw, e))
-                    } else {
-                        tracing::warn!(
-                            err = %e,
-                            "{cmd}: [system] operator did not resolve — running without identity"
-                        );
-                        Ok(None)
-                    }
-                }
-            }
-        }
-        None => {
-            tracing::warn!(
-                "{cmd}: no identity (--user / [system] operator) — memory/skill writes will not be attributed"
-            );
-            Ok(None)
-        }
-    }
+    user: &str,
+) -> Result<String> {
+    myclaw::identity::user_registry::normalize_operator_id(
+        &cfg.system.namespace,
+        &cfg.base_dir,
+        user,
+    )
+    .map(|uuid| format!("{}/u/{}", cfg.system.namespace, uuid))
+    .map_err(|e| anyhow::anyhow!("--user '{}' did not resolve: {}", user, e))
 }
 
 /// Initialize tracing/logging based on config.
