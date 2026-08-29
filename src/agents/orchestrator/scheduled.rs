@@ -466,7 +466,7 @@ pub(crate) async fn run_proposer_task(orch: Arc<OrchestratorCtx>) {
         model_id,
         provider,
         users_dir,
-        skills_root: crate::config::skills_root(base),
+        skills_root: base.join("skills"), // same as AppConfig::skills_root()
         proposals_dir: crate::config::skill_proposals_dir(base),
         state_dir: state_dir.clone(),
     };

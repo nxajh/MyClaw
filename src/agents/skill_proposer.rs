@@ -512,6 +512,7 @@ async fn run_skill_proposer_inner(input: ProposerInput) -> Result<(usize, usize)
             max_tokens: None,
             thinking: None,
             stop: None,
+            seed: None,
             tools: None,
             stream: true,
         };
