@@ -416,3 +416,74 @@ pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
         );
     }
 }
+
+/// Execute an idle-time skill internalization proposer pass (RFC #101 §2.4)
+/// as an independent spawned task. Pre-flight checks (pending user-layer
+/// skills, backoff) run inline; the LLM classification pass itself runs
+/// inside `run_skill_proposer`.
+pub(crate) async fn run_proposer_task(orch: Arc<OrchestratorCtx>) {
+    use crate::agents::skill_proposer::{
+        ProposerState, has_pending_user_skills, run_skill_proposer,
+    };
+
+    let base_dir = &orch.runtime.defaults.prompt.base_dir;
+    if base_dir.is_empty() {
+        tracing::warn!("skill_proposer: base_dir not configured, skipped");
+        return;
+    }
+    let base = std::path::Path::new(base_dir);
+    let users_dir = crate::config::users_root(base);
+    let state_dir = crate::config::skill_proposer_state_dir(base);
+
+    let mut state = ProposerState::load(&state_dir);
+    if state.in_backoff() {
+        tracing::warn!(
+            failures = state.consecutive_failures,
+            "skill_proposer: in backoff, skipped"
+        );
+        return;
+    }
+
+    if !has_pending_user_skills(&users_dir, state.last_propose_ts.as_deref()) {
+        tracing::debug!("skill_proposer: no changed user-layer skills, skipped");
+        return;
+    }
+
+    // Resolve the chat provider + default model (same routing as agent turns).
+    let (provider, model_id) = match orch
+        .runtime
+        .providers
+        .get_chat_provider(crate::providers::Capability::Chat)
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(err = %e, "skill_proposer: no chat provider available");
+            return;
+        }
+    };
+
+    let input = crate::agents::skill_proposer::ProposerInput {
+        model_id,
+        provider,
+        users_dir,
+        skills_root: crate::config::skills_root(base),
+        proposals_dir: crate::config::skill_proposals_dir(base),
+        state_dir: state_dir.clone(),
+    };
+
+    let result = run_skill_proposer(input).await;
+    let success = result.is_ok();
+    state.record_attempt(success, &state_dir);
+    if success {
+        tracing::info!(
+            promoted = result.as_ref().map(|c| c.0).unwrap_or(0),
+            tier_b = result.as_ref().map(|c| c.1).unwrap_or(0),
+            "skill_proposer: pass recorded"
+        );
+    } else {
+        tracing::warn!(
+            failures = state.consecutive_failures,
+            "skill_proposer: pass failed"
+        );
+    }
+}

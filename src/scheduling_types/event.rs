@@ -40,4 +40,7 @@ pub enum SchedulerEvent {
     /// Idle-time memory distillation check (system idle + maybe new
     /// user memories — the orchestrator verifies before running).
     Distill,
+    /// Idle-time skill internalization proposer check (system idle + maybe
+    /// changed user-layer skills — the orchestrator verifies before running).
+    ProposeSkills,
 }

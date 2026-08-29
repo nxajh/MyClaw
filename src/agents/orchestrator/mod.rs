@@ -29,7 +29,7 @@ pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;
 pub use completion_queue::{CompletionNoticeEntry, CompletionNoticeStore, DeliveryState};
 pub use inbound_spool::InboundSpool;
-pub(crate) use scheduled::{run_cron_task, run_distill_task};
+pub(crate) use scheduled::{run_cron_task, run_distill_task, run_proposer_task};
 
 use crate::agents::DelegationCoordinator;
 use crate::agents::delegation::DelegationEvent;
@@ -684,6 +684,15 @@ impl Orchestrator {
                 tokio::spawn(async move {
                     let _guard = turn_tracker.track();
                     run_distill_task(self_ctx).await;
+                });
+            }
+            SchedulerEvent::ProposeSkills => {
+                tracing::debug!("skill_proposer: check triggered (from scheduler)");
+                let self_ctx = self.ctx.clone();
+                let turn_tracker = self.ctx.turn_tracker.clone();
+                tokio::spawn(async move {
+                    let _guard = turn_tracker.track();
+                    run_proposer_task(self_ctx).await;
                 });
             }
         }

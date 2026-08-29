@@ -9,6 +9,7 @@ pub(crate) fn test_scheduler(dir: &std::path::Path) -> SharedScheduler {
         "test",
         "UTC".to_string(),
         None,
+        None,
         tx,
         dir.join("last_channel"),
         dir.join("last_recipient"),
@@ -217,6 +218,7 @@ fn jobs_store_directory_load_wins_over_legacy_file() {
         "test",
         "UTC".to_string(),
         None,
+        None,
         tx,
         dir.path().join("lc"),
         dir.path().join("lr"),
@@ -250,6 +252,7 @@ fn jobs_store_legacy_file_fallback_when_dir_empty() {
         jobs_root,
         "test",
         "UTC".to_string(),
+        None,
         None,
         tx,
         dir.path().join("lc"),
@@ -388,7 +391,7 @@ fn legacy_string_schedule_folds_to_cron_object() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let sched = Scheduler::new(
-        jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+        jobs_root.clone(), "test", "UTC".to_string(), None, None, tx,
         dir.path().join("lc"), dir.path().join("lr"),
     );
     let jobs = sched.jobs();
@@ -456,7 +459,7 @@ fn legacy_target_and_delivery_fold_into_unified_delivery() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let sched = Scheduler::new(
-        jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+        jobs_root.clone(), "test", "UTC".to_string(), None, None, tx,
         dir.path().join("lc"), dir.path().join("lr"),
     );
     let jobs = sched.jobs();
@@ -485,7 +488,7 @@ fn already_migrated_delivery_is_left_untouched() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let sched = Scheduler::new(
-        jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+        jobs_root.clone(), "test", "UTC".to_string(), None, None, tx,
         dir.path().join("lc"), dir.path().join("lr"),
     );
     let jobs = sched.jobs();
@@ -511,7 +514,7 @@ fn missing_target_and_delivery_defaults_to_last() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let sched = Scheduler::new(
-        jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+        jobs_root.clone(), "test", "UTC".to_string(), None, None, tx,
         dir.path().join("lc"), dir.path().join("lr"),
     );
     assert_eq!(sched.jobs()[0].delivery.mode, DeliveryMode::Last);
@@ -607,7 +610,7 @@ fn legacy_schedule_kind_discriminator_is_authoritative() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let sched = Scheduler::new(
-        jobs_root.clone(), "test", "UTC".to_string(), None, tx,
+        jobs_root.clone(), "test", "UTC".to_string(), None, None, tx,
         dir.path().join("lc"), dir.path().join("lr"),
     );
     let jobs = sched.jobs();
@@ -650,7 +653,7 @@ fn legacy_jobs_json_single_file_folds_discriminators() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let sched = Scheduler::new(
-        jobs_root, "test", "UTC".to_string(), None, tx,
+        jobs_root, "test", "UTC".to_string(), None, None, tx,
         dir.path().join("lc"), dir.path().join("lr"),
     );
     let jobs = sched.jobs();
