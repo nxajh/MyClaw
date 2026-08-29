@@ -11,11 +11,15 @@ use crate::providers::{Tool, ToolResult};
 
 pub struct SkillsListTool {
     skills: Arc<dyn SkillRegistry>,
+    resolver: Arc<crate::identity::user_profile::UserResolver>,
 }
 
 impl SkillsListTool {
-    pub fn new<R: SkillRegistry + 'static>(skills: Arc<R>) -> Self {
-        Self { skills }
+    pub fn new<R: SkillRegistry + 'static>(
+        skills: Arc<R>,
+        resolver: Arc<crate::identity::user_profile::UserResolver>,
+    ) -> Self {
+        Self { skills, resolver }
     }
 }
 
@@ -45,7 +49,7 @@ impl Tool for SkillsListTool {
     ) -> anyhow::Result<ToolResult> {
         let mut entries: Vec<serde_json::Value> = self
             .skills
-            .list(Some(&ctx.owner))
+            .list(Some(&self.resolver.resolve(&ctx.owner)))
             .into_iter()
             .map(|skill| {
                 let mut entry = json!({
@@ -160,7 +164,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_skills() {
-        let tool = SkillsListTool::new(registry());
+        let tool = SkillsListTool::new(
+            registry(),
+            Arc::new(crate::identity::user_profile::UserResolver::new()),
+        );
         let result = tool
             .execute(
                 json!({}),
@@ -179,7 +186,10 @@ mod tests {
         let reg = registry();
         reg.upsert(make_skill("beta", "Beta skill"));
         reg.upsert(make_skill("alpha", "Alpha skill"));
-        let tool = SkillsListTool::new(reg);
+        let tool = SkillsListTool::new(
+            reg,
+            Arc::new(crate::identity::user_profile::UserResolver::new()),
+        );
 
         let result = tool
             .execute(
@@ -210,7 +220,10 @@ mod tests {
             skill_dir: None,
             source_layer: "agent".to_string(),
         });
-        let tool = SkillsListTool::new(reg);
+        let tool = SkillsListTool::new(
+            reg,
+            Arc::new(crate::identity::user_profile::UserResolver::new()),
+        );
 
         let result = tool
             .execute(

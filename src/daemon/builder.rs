@@ -385,13 +385,18 @@ pub(crate) async fn build_tools(
         tools.register(tool);
     }
 
-    // SkillTool — loads skill body on demand.
-    tools.register(Arc::new(crate::tools::SkillTool::new(Arc::clone(skills))));
+    // SkillTool — loads skill body on demand. Owner normalization via the
+    // shared UserResolver (routing key → FQID) for user-layer shadowing.
+    tools.register(Arc::new(crate::tools::SkillTool::new(
+        Arc::clone(skills),
+        Arc::clone(user_resolver),
+    )));
 
     // SkillsListTool — lists skill metadata.
-    tools.register(Arc::new(crate::tools::SkillsListTool::new(Arc::clone(
-        skills,
-    ))));
+    tools.register(Arc::new(crate::tools::SkillsListTool::new(
+        Arc::clone(skills),
+        Arc::clone(user_resolver),
+    )));
 
     // SkillManageTool — CRUD for skills. Writes only ever go to the owner's
     // user layer. `ctx.owner` arrives as the session routing key in daemon

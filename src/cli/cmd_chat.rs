@@ -31,18 +31,20 @@ pub async fn run(
     // P1-B2: memory pool is {base_dir}/memory; audit log lives under data.
     let memory_root = cfg.memory_root();
     let base_dir = cfg.base_dir.clone();
-    tools.register(Arc::new(myclaw::tools::SkillTool::new(Arc::clone(
-        &skills_arc,
-    ))));
-    tools.register(Arc::new(myclaw::tools::SkillsListTool::new(Arc::clone(
-        &skills_arc,
-    ))));
-    // Owner normalization for skill_manage user-layer writes (issue #101):
-    // CLI has no bound identity, so a fresh in-memory resolver is used —
-    // `resolve` falls through to the input unchanged (behavior identical
-    // to before the injection). Declared here so skill_manage and the
-    // memory tools share one instance.
+    // Owner normalization for skill user-layer lookups and writes (issue
+    // #101): CLI has no bound identity, so a fresh in-memory resolver is
+    // used — `resolve` falls through to the input unchanged (behavior
+    // identical to before the injection). Shared by skill_* and memory
+    // tools. Declared before the skill tool registrations that use it.
     let resolver = Arc::new(myclaw::UserResolver::new());
+    tools.register(Arc::new(myclaw::tools::SkillTool::new(
+        Arc::clone(&skills_arc),
+        Arc::clone(&resolver),
+    )));
+    tools.register(Arc::new(myclaw::tools::SkillsListTool::new(
+        Arc::clone(&skills_arc),
+        Arc::clone(&resolver),
+    )));
     tools.register(Arc::new(myclaw::tools::SkillManageTool::new(
         Arc::clone(&skills_arc),
         Arc::clone(&resolver),

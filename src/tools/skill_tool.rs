@@ -11,11 +11,21 @@ use crate::providers::{Tool, ToolResult};
 
 pub struct SkillTool {
     skills: Arc<dyn SkillRegistry>,
+    resolver: Arc<crate::identity::user_profile::UserResolver>,
 }
 
 impl SkillTool {
-    pub fn new<R: SkillRegistry + 'static>(skills: Arc<R>) -> Self {
-        Self { skills }
+    pub fn new<R: SkillRegistry + 'static>(
+        skills: Arc<R>,
+        resolver: Arc<crate::identity::user_profile::UserResolver>,
+    ) -> Self {
+        Self { skills, resolver }
+    }
+
+    /// Resolve the session owner (routing key) to the owner id used for
+    /// user-layer lookups (FQID), same chain as memory tools.
+    fn owner_id(&self, ctx: &crate::api::tool::ToolContext) -> String {
+        self.resolver.resolve(&ctx.owner)
     }
 }
 
@@ -62,10 +72,11 @@ impl Tool for SkillTool {
             .ok_or_else(|| anyhow::anyhow!("'name' is required"))?;
         let file_path = args["file_path"].as_str();
 
-        let skill = match self.skills.find(name, Some(&ctx.owner)) {
+        let owner_id = self.owner_id(ctx);
+        let skill = match self.skills.find(name, Some(&owner_id)) {
             Some(s) => s,
             None => {
-                let available = self.skills.skill_names(Some(&ctx.owner));
+                let available = self.skills.skill_names(Some(&owner_id));
                 return Ok(ToolResult {
                     success: false,
                     output: json!({
@@ -330,7 +341,10 @@ mod tests {
 
     #[test]
     fn test_skill_tool_spec() {
-        let tool = SkillTool::new(empty_registry());
+        let tool = SkillTool::new(
+            empty_registry(),
+            Arc::new(crate::identity::user_profile::UserResolver::new()),
+        );
         assert_eq!(tool.name(), "skill_view");
         let schema = tool.parameters_schema();
         assert_eq!(schema["required"][0], "name");
@@ -338,7 +352,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_known_skill() {
-        let tool = SkillTool::new(registry_with(make_skill("test", true)));
+        let tool = SkillTool::new(
+            registry_with(make_skill("test", true)),
+            Arc::new(crate::identity::user_profile::UserResolver::new()),
+        );
 
         let result = tool
             .execute(
@@ -355,7 +372,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_unknown_skill() {
-        let tool = SkillTool::new(empty_registry());
+        let tool = SkillTool::new(
+            empty_registry(),
+            Arc::new(crate::identity::user_profile::UserResolver::new()),
+        );
         let result = tool
             .execute(
                 json!({"name": "nonexistent"}),
@@ -370,7 +390,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_non_agent_invocable() {
-        let tool = SkillTool::new(registry_with(make_skill("private", false)));
+        let tool = SkillTool::new(
+            registry_with(make_skill("private", false)),
+            Arc::new(crate::identity::user_profile::UserResolver::new()),
+        );
 
         let result = tool
             .execute(
@@ -386,7 +409,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_traversal_rejected() {
-        let tool = SkillTool::new(registry_with(make_skill("test", true)));
+        let tool = SkillTool::new(
+            registry_with(make_skill("test", true)),
+            Arc::new(crate::identity::user_profile::UserResolver::new()),
+        );
 
         let result = tool
             .execute(
