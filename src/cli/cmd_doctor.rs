@@ -95,7 +95,17 @@ pub async fn run(_cli: &Cli, fix: bool) -> Result<()> {
         // {base_dir}/skills), not workspace_dir/skills (issue #102) — this
         // used to always read an empty/nonexistent directory.
         let skills_dir = cfg.skills_root();
-        let drafts = myclaw::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
+        let mut drafts =
+            myclaw::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
+        // #101 P2: drafts are owner-attributed — aggregate every user
+        // layer alongside the agent layer.
+        if let Ok(entries) = std::fs::read_dir(cfg.users_root()) {
+            for e in entries.filter_map(|e| e.ok()) {
+                drafts.extend(
+                    myclaw::agents::workspace::skill_loader::list_draft_skill_names(&e.path().join("skills")),
+                );
+            }
+        }
         if drafts.is_empty() {
             println!("✅ Draft skills: none pending");
             ok_count += 1;
