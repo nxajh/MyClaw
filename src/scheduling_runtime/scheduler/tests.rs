@@ -43,6 +43,7 @@ pub(crate) fn test_entry(schedule: &str) -> JobEntry {
         provider: None,
         last_failure_alert_at: None,
         context_policy: crate::config::scheduler::ContextPolicy::Inject,
+        creator: None,
     }
 }
 

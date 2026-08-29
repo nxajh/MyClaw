@@ -69,6 +69,10 @@ pub enum Commands {
         /// Non-interactive mode: print response and exit.
         #[arg(short, long)]
         print: bool,
+
+        /// Act as this user (required): username, bare uuid, or FQID (#101 P2).
+        #[arg(long)]
+        user: String,
     },
 
     /// Run a single prompt non-interactively (alias: chat --print).
@@ -88,6 +92,10 @@ pub enum Commands {
         /// Output format: text (default) or json.
         #[arg(long, default_value = "text")]
         format: String,
+
+        /// Act as this user (required): username, bare uuid, or FQID (#101 P2).
+        #[arg(long)]
+        user: String,
     },
 
     /// Diagnose environment, configuration, and connectivity.
@@ -214,6 +222,29 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
     }
 
     None
+}
+
+/// Resolve the CLI session identity (#101 P2, shared by `exec`/`chat`):
+/// `--user` is **required** — the CLI is the one entry that may safely
+/// assume a human at the keyboard, so it never runs unattributed (an
+/// unattributed CLI write is how the `users/skill_extract` orphan dirs
+/// happened). Accepts username / bare uuid / FQID; returns the owner
+/// FQID (`<ns>/u/<uuid>` — same shape daemon-side load_session fills
+/// via UserResolver). A value that fails to resolve is a hard error.
+/// Note: `[system] operator` deliberately plays no role here — it is a
+/// system role (P3 promote authorization, agent-layer backlog routing),
+/// not an implicit CLI identity.
+pub(crate) fn resolve_cli_identity(
+    cfg: &myclaw::config::AppConfig,
+    user: &str,
+) -> Result<String> {
+    myclaw::identity::user_registry::normalize_operator_id(
+        &cfg.system.namespace,
+        &cfg.base_dir,
+        user,
+    )
+    .map(|uuid| format!("{}/u/{}", cfg.system.namespace, uuid))
+    .map_err(|e| anyhow::anyhow!("--user '{}' did not resolve: {}", user, e))
 }
 
 /// Initialize tracing/logging based on config.

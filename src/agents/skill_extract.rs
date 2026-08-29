@@ -16,7 +16,6 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use tokio::sync::{Mutex, Semaphore};
 
-
 use crate::agents::tool_registry::ToolRegistry;
 use crate::api::message::{Channel, ChannelOutboundMessage};
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ToolSpec};
@@ -44,6 +43,12 @@ pub struct SkillExtractInput {
     /// `workspace_dir`, so the dedup index below was always built from a
     /// directory nothing writes to).
     pub base_dir: String,
+    /// Session owner FQID (`myclaw/u/{uuid}`, RFC #101 P2). Drafts are
+    /// attributed: `ToolContext.owner` below carries it so `skill_manage
+    /// create` writes the owner's user layer (`users/{uuid}/skills/`).
+    /// Empty = no identity resolved — the fork refuses to write anything
+    /// (see `run_skill_extract_inner`).
+    pub owner_fqid: String,
     /// Channel to notify on the session that just hosted this turn, so a
     /// newly-written draft doesn't accumulate silently (issue #89). `None`
     /// for headless/cron sessions or when no channel is wired.
@@ -106,8 +111,7 @@ pub async fn run_skill_extract(input: SkillExtractInput) {
     let channel = input.channel.clone();
     let reply_target = input.reply_target.clone();
 
-    let result =
-        tokio::time::timeout(OVERALL_TIMEOUT, run_skill_extract_inner(input)).await;
+    let result = tokio::time::timeout(OVERALL_TIMEOUT, run_skill_extract_inner(input)).await;
     drop(permit);
 
     match result {
@@ -166,16 +170,32 @@ async fn notify_drafts_written(
 }
 
 async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<Vec<String>> {
-    // Build a minimal ToolContext for tool execution.
+    // RFC #101 P2: drafts are owner-attributed — `skill_manage create`
+    // writes to `users/{uuid}/skills/` keyed on `ToolContext.owner`. An
+    // empty owner means the fork was spawned without a resolved identity
+    // (bug in the caller — e.g. a headless session that skipped the
+    // CLI/cron identity plumbing). Refuse to run rather than silently
+    // attributing the write to a bogus "skill_extract" user.
+    if input.owner_fqid.is_empty() {
+        tracing::warn!(
+            session_id = %input.session_id,
+            "skill_extract: no owner_fqid on input — skipping (drafts must be owner-attributed)"
+        );
+        return Ok(Vec::new());
+    }
+
+    // Build a minimal ToolContext for tool execution. `owner` = the
+    // session's FQID so every skill_manage write lands in the owner's
+    // user layer (RFC #101 P2).
     let session_shell = crate::api::tool::ToolContext {
-        owner: "skill_extract".to_string(),
+        owner: input.owner_fqid.clone(),
         session_id: input.session_id.clone(),
         agent_name: "main".to_string(),
         ..Default::default()
     };
 
     // Build existing skills index for dedup.
-    let existing_index = build_existing_skills_index(&input.base_dir);
+    let existing_index = build_existing_skills_index(&input.base_dir, &input.owner_fqid);
 
     // Assemble messages: conversation context + extraction prompt.
     let mut messages = input.messages;
@@ -227,10 +247,7 @@ async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<Vec<String>
                 tracing::warn!(tool = %call.name, "skill_extract: tool not allowed, blocking");
                 let mut tool_msg = ChatMessage::text(
                     "tool",
-                    format!(
-                        "tool '{}' not available during skill extraction",
-                        call.name
-                    ),
+                    format!("tool '{}' not available during skill extraction", call.name),
                 );
                 tool_msg.tool_call_id = Some(call.id.clone());
                 tool_msg.is_error = Some(true);
@@ -260,8 +277,7 @@ async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<Vec<String>
             };
 
             // Block non-create actions on skill_manage.
-            if call.name == "skill_manage"
-                && args["action"].as_str().is_some_and(|a| a != "create")
+            if call.name == "skill_manage" && args["action"].as_str().is_some_and(|a| a != "create")
             {
                 tracing::warn!(
                     action = ?args["action"],
@@ -308,11 +324,37 @@ async fn run_skill_extract_inner(input: SkillExtractInput) -> Result<Vec<String>
     Ok(skills_written)
 }
 
-/// Build a compact index of existing skills for the prompt.
-fn build_existing_skills_index(base_dir: &str) -> String {
-    let skills_dir = std::path::Path::new(base_dir).join("skills");
-    let definitions =
-        crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
+/// Build a compact index of existing skills for the prompt (RFC #101 P2).
+///
+/// Mirrors the fork's three-layer write/read view: the owner's user layer
+/// (`users/{bare_uuid}/skills/`, where `skill_manage create` actually
+/// writes via `ToolContext.owner`) plus the agent layer
+/// (`{base_dir}/skills`). Same-name entries dedupe with user-layer
+/// priority (matching `load_skills_layered` shadow semantics), so the
+/// extraction LLM never sees a forked user skill and its agent-layer
+/// original as two creatable skills. A missing user-layer directory is
+/// skipped (fresh owner). `owner_fqid` empty → agent layer only
+/// (defensive; the caller already refuses to run without an owner).
+fn build_existing_skills_index(base_dir: &str, owner_fqid: &str) -> String {
+    let base = std::path::Path::new(base_dir);
+    let mut definitions = crate::agents::skill_loader::load_skills_from_dir(&base.join("skills"));
+    if !owner_fqid.is_empty() {
+        let user_skills_dir = base
+            .join("users")
+            .join(crate::ids::bare_dir_name(owner_fqid))
+            .join("skills");
+        let user_definitions = crate::agents::skill_loader::load_skills_from_dir(&user_skills_dir);
+        // User layer first, agent-layer duplicates dropped by name.
+        let mut seen: HashSet<String> = user_definitions.iter().map(|d| d.name.clone()).collect();
+        definitions = user_definitions
+            .into_iter()
+            .chain(
+                definitions
+                    .into_iter()
+                    .filter(|d| seen.insert(d.name.clone())),
+            )
+            .collect();
+    }
     if definitions.is_empty() {
         return "(empty — no skills yet)".to_string();
     }
@@ -520,6 +562,93 @@ mod tests {
         // Headless/cron session: no channel wired, no reply target. Must not
         // panic and must not attempt to send anything.
         notify_drafts_written(None, None, &["my-skill".to_string()]).await;
+    }
+
+    /// Write one loadable skill into a skills dir (mirrors the loader's
+    /// expected layout).
+    fn write_skill(skills_dir: &std::path::Path, name: &str, description: &str) {
+        let dir = skills_dir.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: \"{description}\"\n---\nbody"),
+        )
+        .unwrap();
+    }
+
+    const TEST_UUID: &str = "01923f0e-8a5a-7b3c-9d4e-5f6a7b8c9d0e";
+
+    #[test]
+    fn existing_skills_index_covers_user_and_agent_layers() {
+        let base = tempfile::tempdir().unwrap();
+        write_skill(&base.path().join("skills"), "agent-skill", "agent layer");
+        write_skill(
+            &base.path().join("users").join(TEST_UUID).join("skills"),
+            "user-skill",
+            "user layer",
+        );
+
+        let index = build_existing_skills_index(
+            base.path().to_str().unwrap(),
+            &format!("myclaw/u/{TEST_UUID}"),
+        );
+        assert!(index.contains("agent-skill"), "agent layer must be indexed");
+        assert!(index.contains("user-skill"), "user layer must be indexed");
+    }
+
+    #[test]
+    fn existing_skills_index_empty_owner_is_agent_layer_only() {
+        let base = tempfile::tempdir().unwrap();
+        write_skill(&base.path().join("skills"), "agent-skill", "agent layer");
+        write_skill(
+            &base.path().join("users").join(TEST_UUID).join("skills"),
+            "user-skill",
+            "user layer",
+        );
+
+        // Defensive path: no owner → only the agent layer is indexed.
+        let index = build_existing_skills_index(base.path().to_str().unwrap(), "");
+        assert!(index.contains("agent-skill"));
+        assert!(!index.contains("user-skill"));
+    }
+
+    #[test]
+    fn existing_skills_index_dedupes_user_over_agent_by_name() {
+        let base = tempfile::tempdir().unwrap();
+        write_skill(&base.path().join("skills"), "shared-name", "agent version");
+        write_skill(
+            &base.path().join("users").join(TEST_UUID).join("skills"),
+            "shared-name",
+            "user forked version",
+        );
+
+        let index = build_existing_skills_index(
+            base.path().to_str().unwrap(),
+            &format!("myclaw/u/{TEST_UUID}"),
+        );
+        assert!(
+            index.contains("user forked version"),
+            "user layer wins the name collision"
+        );
+        assert_eq!(
+            index.matches("shared-name").count(),
+            1,
+            "the name must appear exactly once"
+        );
+    }
+
+    #[test]
+    fn existing_skills_index_missing_user_dir_is_skipped() {
+        let base = tempfile::tempdir().unwrap();
+        write_skill(&base.path().join("skills"), "agent-skill", "agent layer");
+
+        // No users/ tree at all — must not error, must not miss the agent
+        // layer.
+        let index = build_existing_skills_index(
+            base.path().to_str().unwrap(),
+            &format!("myclaw/u/{TEST_UUID}"),
+        );
+        assert!(index.contains("agent-skill"));
     }
 
     #[tokio::test]

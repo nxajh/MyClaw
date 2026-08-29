@@ -11,7 +11,9 @@
 use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 
-use super::cron_types::{DeliveryConfig, DeliveryMode, FailureAlertConfig, RetryConfig, RunRecord, ScheduleSpec};
+use super::cron_types::{
+    DeliveryConfig, DeliveryMode, FailureAlertConfig, RetryConfig, RunRecord, ScheduleSpec,
+};
 
 // ── JobEntry ────────────────────────────────────────────────────────────────
 
@@ -108,6 +110,14 @@ pub struct JobEntry {
     /// `POST /hooks/{name}` for this job; `name` is the URL-safe route slug.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook: Option<WebhookDef>,
+    /// Creator identity (user FQID `myclaw/u/{uuid}`, #101 P2) — the user
+    /// on whose behalf this job runs. The scheduler propagates it into the
+    /// turn's session so Isolated-path skill/memory writes are attributed
+    /// instead of landing in an orphan `_job_*` user dir. Legacy meta.json
+    /// files without the field load as `None` (unattributed, same as
+    /// before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
 }
 
 /// Webhook trigger channel on a JobEntry (design doc §3.4 orthogonal model:
@@ -156,7 +166,6 @@ pub struct WebhookFilter {
 fn default_webhook_auth() -> String {
     "hmac".to_string()
 }
-
 
 fn default_context_policy() -> crate::config::scheduler::ContextPolicy {
     crate::config::scheduler::ContextPolicy::Inject
@@ -236,7 +245,6 @@ impl JobRemovalAudit {
         );
     }
 }
-
 
 // ── Prompt injection scanner ────────────────────────────────────────────────
 
@@ -460,7 +468,8 @@ pub(crate) fn parse_hhmm(s: &str) -> Option<u32> {
 pub fn is_route_slug(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
-        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Parse the legacy `target` string grammar ("last" | "none" |
@@ -519,7 +528,13 @@ pub fn cron_delivery_fields(
             delivery.thread_id.clone(),
             false,
         ),
-        DeliveryMode::Last => (None, None, delivery.to.clone(), delivery.thread_id.clone(), false),
+        DeliveryMode::Last => (
+            None,
+            None,
+            delivery.to.clone(),
+            delivery.thread_id.clone(),
+            false,
+        ),
     }
 }
 
@@ -548,4 +563,55 @@ pub trait SchedulerApi: Send + Sync {
     fn remove_job(&self, id: &str) -> anyhow::Result<Option<JobRemovalAudit>>;
     /// 读取持久化运行日志（JSONL）。
     fn read_run_log(&self, job_id: &str, limit: usize) -> Vec<RunRecord>;
+}
+
+#[cfg(test)]
+mod creator_tests {
+    use super::*;
+
+    /// #101 P2：`creator` 字段序列化 round-trip。
+    #[test]
+    fn creator_round_trips_through_serde() {
+        let entry = JobEntry {
+            id: "myclaw/job/01923f0e-8a5a-7b3c-9d4e-5f6a7b8c9d0e".to_string(),
+            schedule: None,
+            prompt: "p".to_string(),
+            name: None,
+            tz: None,
+            active_hours: None,
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            created_at: None,
+            delivery: DeliveryConfig::default(),
+            last_runs: Vec::new(),
+            enabled_tools: None,
+            disabled_tools: None,
+            retry: None,
+            failure_alert: None,
+            consecutive_errors: 0,
+            consecutive_skipped: 0,
+            max_runs: None,
+            completed_runs: 0,
+            delete_after_run: false,
+            model: None,
+            provider: None,
+            last_failure_alert_at: None,
+            context_policy: crate::config::scheduler::ContextPolicy::Inject,
+            webhook: None,
+            creator: Some("myclaw/u/01923f0e-8a5a-7b3c-9d4e-5f6a7b8c9d0f".to_string()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"creator\""));
+        let back: JobEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.creator.as_deref(),
+            Some("myclaw/u/01923f0e-8a5a-7b3c-9d4e-5f6a7b8c9d0f")
+        );
+
+        // 旧 meta.json（无 creator 字段）能加载为 None（serde default 兼容）。
+        let legacy_json = r#"{"id":"x","prompt":"p","enabled":true,"delivery":{}}"#.to_string();
+        let legacy_entry: JobEntry = serde_json::from_str(&legacy_json).unwrap();
+        assert_eq!(legacy_entry.creator, None);
+    }
 }

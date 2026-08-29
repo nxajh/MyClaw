@@ -25,6 +25,10 @@ pub struct CronTrigger {
     pub model: Option<String>,
     /// Context policy: inject into user session or run isolated.
     pub context_policy: crate::config::scheduler::ContextPolicy,
+    /// Creator identity (user FQID) carried from `JobEntry.creator`
+    /// (#101 P2) — the scheduled turn's session adopts it when its owner
+    /// is unattributed (Isolated `_job_*` sessions).
+    pub creator: Option<String>,
 }
 
 /// Events from the Scheduler (cron triggers, distill checks).

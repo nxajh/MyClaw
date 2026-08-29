@@ -74,7 +74,9 @@ impl super::Agent {
                 let history_clone = session.history.clone();
                 // RFC #101 P1: pass the FQID (users/{uuid}), not the routing key.
                 let owner = session.owner_fqid.clone();
-                session.attachments.diff_skills(&skills_snap, &history_clone, Some(owner.as_str()));
+                session
+                    .attachments
+                    .diff_skills(&skills_snap, &history_clone, Some(owner.as_str()));
                 let agent_list: Vec<(String, String)> = runtime
                     .agents
                     .values_cloned()
@@ -87,29 +89,46 @@ impl super::Agent {
                     })
                     .collect();
                 session.attachments.diff_agents(&agent_list, &history_clone);
-                session.attachments.diff_date(
-                    runtime.context_engine.timezone_offset(),
-                    &history_clone,
-                );
-                session.attachments.diff_autonomy(&permission_mode, &history_clone);
+                session
+                    .attachments
+                    .diff_date(runtime.context_engine.timezone_offset(), &history_clone);
+                session
+                    .attachments
+                    .diff_autonomy(&permission_mode, &history_clone);
                 // Daily throttled draft-skill backlog reminder (issue #89,
                 // layer ②) — best-effort, never blocks the turn.
-                if let Some(names) = crate::agents::skill_draft_reminder::check_and_arm(
+                // #101 P2: per-layer accounting — the user-layer backlog
+                // belongs to this session's owner; the agent-layer backlog
+                // surfaces only in the operator's sessions
+                // (runtime.defaults.operator = [system] operator
+                // normalized to a bare uuid at daemon assembly).
+                let is_operator = !session.owner_fqid.is_empty()
+                    && runtime
+                        .defaults
+                        .operator
+                        .as_deref()
+                        .is_some_and(|op| crate::ids::bare_dir_name(&session.owner_fqid) == op);
+                if let Some(backlog) = crate::agents::skill_draft_reminder::check_and_arm(
                     std::path::Path::new(&runtime.defaults.prompt.base_dir),
                     runtime.context_engine.timezone_offset(),
+                    &session.owner_fqid,
+                    is_operator,
                 ) {
-                    session.attachments.push_skill_draft_reminder(names);
+                    session
+                        .attachments
+                        .push_skill_draft_reminder(backlog.user_layer, backlog.agent_layer);
                 }
                 let memory_root = &runtime.defaults.prompt.memory_root;
-                let memory_entries: Vec<crate::memory::IndexEntry> =
-                    if !memory_root.is_empty() {
-                        let memory_dir = std::path::Path::new(memory_root);
-                        let files = crate::memory::scan_memory_files(memory_dir);
-                        files.iter().map(crate::memory::IndexEntry::from).collect()
-                    } else {
-                        Vec::new()
-                    };
-                session.attachments.diff_memory(&memory_entries, &history_clone);
+                let memory_entries: Vec<crate::memory::IndexEntry> = if !memory_root.is_empty() {
+                    let memory_dir = std::path::Path::new(memory_root);
+                    let files = crate::memory::scan_memory_files(memory_dir);
+                    files.iter().map(crate::memory::IndexEntry::from).collect()
+                } else {
+                    Vec::new()
+                };
+                session
+                    .attachments
+                    .diff_memory(&memory_entries, &history_clone);
                 let text = session.attachments.build_text(&skills_snap);
                 session.attachments.clear_pending();
                 text

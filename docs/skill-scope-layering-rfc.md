@@ -21,11 +21,30 @@
 | 决策点 | 结论 |
 |---|---|
 | 分层模型 | 两层：user 层 + agent 层（对齐 memory 两层与 `load_skills_layered` 惯例） |
-| 存量迁移 | **全部 21 个（4 draft + 17 active）归 user 层**，agent 层从空开始，此后仅经「提升」进入 |
+| 存量迁移 | **全部 21 个（4 draft + 17 active）归 user 层**，agent 层从空开始，此后仅经「提升」进入。2026-08-29 定位注记：这是定位确立前的保守起点——按 §2.0 定性复查，operator 存量中属去上下文普适能力者（github/行情/机票/发邮件类）应在 P3 promote 落地后首轮 triage 归位 agent 层，否则生命体「阅历共享（记忆全局注入）而能力私有（技能困于 owner user 层）」，人格行为面不一致 |
 | agent 层写权限 | **fork 模型**（2026-08-29 修订）：原始技能经 `skill_manage` 只读；修改自动 fork 到本人 user 层副本（遮蔽生效）。更新原始版走 operator 的文件系统/git 或 P3 `promote`（`~/.agents/skills` 共享库 #99 保护不变，同为 fork 源） |
-| extract 默认落点 | user 层（从谁的会话提取落谁的层），除 headless/无主会话外，普通用户交互不允许直接产 agent 层 draft |
+| extract 默认落点 | user 层（从谁的会话提取落谁的层）。无主会话**不提取**（owner 缺失视为 bug，warn + skip，不写任何层，2026-08-29 P2 修订）；CLI 身份经必填 `--user`（exec/chat 一致，不允许无身份运行——`[system] operator` 不作 CLI 隐式身份，只服务 P3 promote 授权与 agent 层 backlog 路由）、cron 经 `JobEntry.creator` 补齐 |
 
 ## 2. 设计
+
+### 2.0 层语义定性（2026-08-29 增补，定位讨论产物）
+
+分层结构自 P1 起不变，本节澄清两层的**定性**——消除"生命体对 Alice 会骑车、
+对 Bob 不会"的命名误读：
+
+- **agent 层 = 能力（capabilities）**：去上下文的普适程序性知识，构成生命体
+  对所有人一致的行为面。"查机票"、"读写 PR"属于这里。
+- **user 层 = 关系流程知识（relationship procedures）+ 提纯暂存**，三种形态：
+  extract draft（含用户上下文的经验——路径、项目、习惯）、fork 副本（为这段
+  关系定制的版本，改坏只影响这段关系）、用户私有流程。它不是"因人而异的
+  能力"，而是**关系记忆的流程化形态**——与 §6.0 多段人际关系模型同构
+  （memory user 层 : agent 层 :: skill user 层 : agent 层）。
+
+由此显性化**两段式成长模型**：经验先属于关系（user 层）→ 去标识化提纯 →
+内化为能力（agent 层）。与记忆侧对照，两条内化路径的信任门槛刻意不对称：
+认知内化（`memory_distill` 蒸馏）自主进行；能力内化（`promote`）需监护人
+（operator）签名——技能携带可执行工具行为，风险面大于注入文本。目录布局
+与工具参数名（user layer）不因本节定性改变。
 
 ### 2.1 存储布局
 
@@ -51,13 +70,31 @@ user 层 ∪ agent 层 ∪ 共享库
   视角 = agent 层 ∪ 共享库。
 - `WorkspaceWatcher` 增加 user 层目录监听（热载同现有机制）。
 
-### 2.3 skill_extract 落点（源头关闭泄露）
+### 2.3 skill_extract 落点（源头关闭泄露；2026-08-29 P2 修订）
 
-- `SkillExtractInput` 已有 session 归属（#100 加了 channel/reply_target，同处取
-  owner user id）→ 写入 `users/{uuid}/skills/`。
-- headless / cron / 无 owner 会话：落 agent 层（operator 上下文），draft 状态不变。
-- #100 层② backlog 提醒按层分账：user 层积压只注入该用户会话；agent 层积压注入
-  operator（收编 PR #100 评审备注 issue）。
+- `SkillExtractInput` 携带 session owner（#100 加了 channel/reply_target，P2 同处加
+  `owner_fqid`）→ `ToolContext.owner` 一律落 owner 的 user 层
+  （`users/{uuid}/skills/`）；extract 的去重索引同时覆盖 owner user 层 + agent 层
+  （同名 user 层优先），与写入视角一致。
+- headless / cron / 无 owner 会话：**不再落 agent 层**（P2 修订）。owner 缺失 =
+  调用方 bug，fork 直接 warn + 返回（不写任何层）。身份补齐路径：
+  - CLI：`myclaw exec|chat --user <username|uuid>` **必填**（不接受省略——
+    无主 CLI 写入正是 `users/skill_extract` 脏目录的成因；CLI 是唯一可安全
+    假定"键盘后面是本人"的入口）。`[system] operator` 配置仍新增（支持
+    FQID/裸 uuid/username，username 经 `users/*/meta.json` 静态反查归一化），
+    但职责限于 P3 promote 授权与 agent 层 backlog 路由，**不是** CLI 隐式
+    身份（2026-08-29 终审修订）；
+  - cron：`JobEntry` 新增 `creator` 字段（创建时经 UserResolver 归一化记录），
+    scheduler 触发时经 `CronTrigger.creator` 带出，Isolated `_job_*` 会话（owner
+    未归属）据此设置 `session.owner_fqid`；Inject 模式注入用户会话，owner 已由
+    load_session 正确解析，不覆盖。
+  - draft 状态不变。
+- #100 层② backlog 提醒按层分账（P2 实施）：user 层积压只注入该 owner 会话
+  （`users/{uuid}/skill_draft_reminder_state.json` 独立按日节流，满 5 触发）；
+  agent 层积压（`{base_dir}/skill_draft_reminder_state.json`，兼容原位置）仅注入
+  监护人（operator）会话（`[system] operator` 归一化比对 `session.owner_fqid`），
+  文案注明 "agent layer drafts"（收编 PR #100 评审备注 issue）。语义：agent 层
+  是生命体的能力池，其积压的 triage 是监护责任而非运维杂务（§2.0）。
 
 ### 2.4 审核动词与晋升
 
@@ -67,6 +104,12 @@ triage 词表（保留/合并/删除）增加「**提升**」：
   技能 owner 可发起；晋升后原始版仍只读，其他用户的改进同样经 fork→再 promote 循环，信任模型一致）。
 - 晋升时去标识化检查（同 memory agent-scope 规则）：提示词正文不得含 user_id、
   个人路径、会话专属引用；由执行者（agent）自查 + 提示确认。
+- **内化提议器**（2026-08-29 增补，P3 范围）：生命体主动发现"已普适的关系
+  技能"并提议内化——复用 `memory_distill` 已有的跨用户泛化判别力（同一判据：
+  是否仍绑定单一用户上下文），对 user 层技能生成 promote 提议（附去标识化
+  diff 预览），仍需 operator 签名执行。提议器不绕过签名，只把 triage 从
+  operator 被动巡检变为生命体主动发起——对应 §2.0 的成长模型（能力内化
+  需监护人签名，但发现权在生命体）。
 
 ### 2.5 写权限矩阵
 
@@ -92,6 +135,19 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 - 动机：零摩擦改进循环 + 破坏半径收敛到副本 + 原始版即恢复基线（副本改坏 → 删副本
   重新 fork）。与 §6.2 记忆写语义（默认落 owner 层）对齐。
 
+### 2.7 修订记录
+
+- 2026-08-29（定位讨论）：增补 §2.0 层语义定性（user 层 = 关系流程知识 +
+  提纯暂存，agent 层 = 生命体能力；两段式成长模型：认知内化自主、能力
+  内化需监护人签名）；§2.4 增补内化提议器并纳入 P3 范围。结构不变。
+
+- 2026-08-29 P2（本 PR）：§1 决策表 + §2.3 修订——extract 一律落 owner user 层，
+  无主会话不提取；headless 身份补齐（CLI `--user` / `[system] operator` /
+  `JobEntry.creator`）；backlog 提醒按层分账（scope 独立节流，agent 层仅 operator
+  可见）。§5 对应项勾选。
+- 2026-08-29 P1.1：§2.6 fork 模型增补（skill_manage 写路径惰性 fork）。
+- 2026-08-21 初稿；2026-08-28 §6 记忆分拆定稿。
+
 ## 3. 存量迁移
 
 - 范围：实测 21 个（4 draft + 17 active；PR #100 声称 36/31 与实测不符，按实测计，
@@ -111,14 +167,14 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 |---|---|---|
 | P1 | 存储布局 + loader 三层合成 + 迁移脚本 | #100 合并（backlog 分账基于其提醒机制） |
 | P2 | extract 落 user 层 + backlog 按层分账 | P1 |
-| P3 | `promote` action + 去标识化检查 + watcher user 层监听 | P1 |
+| P3 | `promote` action + 去标识化检查 + 内化提议器（§2.4）+ watcher user 层监听 | P1 |
 | P4 | 记忆存储分拆（§6）+ 迁移脚本 | P1（复用 `users/{uuid}/` 布局与迁移脚本模式，可与 P2/P3 并行） |
 
 ## 5. 测试清单
 
 - [ ] loader：三层合成、同名优先级（user>agent>共享库）、无 user 上下文（子代理）视角
-- [ ] extract：user 会话落 user 层；headless 落 agent 层；draft 状态保持
-- [ ] backlog 提醒：user 层积压注入本人；agent 层积压注入 operator；互不越层
+- [x] extract：user 会话落 user 层；headless 无主不提取（warn+skip，P2 修订）；draft 状态保持
+- [x] backlog 提醒：user 层积压注入本人；agent 层积压仅 operator 可见；互不越层；scope 独立节流（P2）
 - [ ] promote：owner/operator 可发起；去标识化检查提示；晋升后 agent 层可写语义
 - [ ] skill_manage：user 层本人五操作可写；其他用户对 user 层得到 not-found（不可见性）
 - [ ] fork：edit/patch/write_file 对 agent 层目标自动建副本后写入、原始版逐字节不变；delete 对非 user 层拒绝；`.fork-origin` 生成；副本遮蔽生效
@@ -128,7 +184,13 @@ triage 词表（保留/合并/删除）增加「**提升**」：
 ## 6. 记忆存储分拆（同构延伸，已定稿）
 
 记忆两层目前仅靠 frontmatter 判定（`scope`+`user_id`），物理仍是单池
-`{base_dir}/memory/`。技能层定型后，记忆存储同构分拆为目录分层。本节规则与
+`{base_dir}/memory/`。技能层定型后，记忆存储同构分拆为目录分层。
+
+> ⚠️ **P4 迁移预注（2026-08-29）**：现存约 500 条记忆的 `scope` 标注全部早于
+> 定位讨论（§2.0/§6.0），存在系统性错标——实证：`agent_as_person_multi_tenant_model`
+> 标 `scope: user` 却物理躺在 agent 层根目录且内容是全局架构认知。P4 分拆
+> **不得按旧标注机械搬运**，必须逐条按"生命体认知 vs 关系记忆"重审（可用
+> 蒸馏判别力辅助 + 监护人抽检）。本节规则与
 §2 惯例对齐；uuid 与条目身份问题经三轮讨论定稿（2026-08-21，决策人 nxajh）。
 
 ### 6.0 设计哲学：多段人际关系模型（2026-08-28 确立）

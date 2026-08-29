@@ -93,9 +93,10 @@ fn test_tool(dir: &std::path::Path) -> CronJobTool {
         provider: None,
         last_failure_alert_at: None,
         context_policy: crate::config::scheduler::ContextPolicy::Inject,
+        creator: None,
     };
     sched.add_job(entry).unwrap();
-    CronJobTool::new(sched)
+    CronJobTool::new(sched, std::sync::Arc::new(crate::identity::user_profile::UserResolver::new()))
 }
 
 fn job_id(tool: &CronJobTool) -> String {
@@ -262,9 +263,10 @@ fn test_tool(dir: &std::path::Path) -> CronJobTool {
         provider: None,
         last_failure_alert_at: None,
         context_policy: crate::config::scheduler::ContextPolicy::Inject,
+        creator: None,
     };
     sched.add_job(entry).unwrap();
-    CronJobTool::new(sched)
+    CronJobTool::new(sched, std::sync::Arc::new(crate::identity::user_profile::UserResolver::new()))
 }
 
 #[test]
@@ -360,6 +362,7 @@ fn newest_first_and_capped() {
             provider: None,
             last_failure_alert_at: None,
             context_policy: crate::config::scheduler::ContextPolicy::Inject,
+            creator: None,
         })
         .collect();
     let listing = format_unknown_job_listing(jobs);

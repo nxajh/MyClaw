@@ -54,18 +54,10 @@ pub type SharedScheduler = Arc<Scheduler>;
 #[async_trait::async_trait]
 pub trait OrchestratorHook: Send + Sync {
     /// Run one scheduled turn (`agents::orchestrator::run_scheduled_turn`).
-    async fn run_scheduled_turn(
-        &self,
-        session_key: &str,
-        prompt: &str,
-    ) -> anyhow::Result<String>;
+    async fn run_scheduled_turn(&self, session_key: &str, prompt: &str) -> anyhow::Result<String>;
 
     /// Look up a live outbound channel by `(channel_type, account_id)`.
-    fn outbound_channel(
-        &self,
-        channel_type: &str,
-        account_id: &str,
-    ) -> Option<Arc<dyn Channel>>;
+    fn outbound_channel(&self, channel_type: &str, account_id: &str) -> Option<Arc<dyn Channel>>;
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -337,6 +329,7 @@ impl Scheduler {
                             job_id: j.id.clone(),
                             model: j.model.clone(),
                             context_policy: j.context_policy,
+                            creator: j.creator.clone(),
                         })).await;
                         due_job_ids.push(j.id.clone());
                     }
@@ -380,7 +373,13 @@ impl Scheduler {
     pub fn add_job(&self, mut entry: JobEntry) -> anyhow::Result<String> {
         // §3.4: name is required — user-facing identity and (for webhook
         // channels) the route segment.
-        if entry.name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        if entry
+            .name
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
             anyhow::bail!("job name is required (design §3.4)");
         }
         if entry.id.is_empty() {
@@ -505,7 +504,11 @@ impl Scheduler {
         let audit = {
             let data = self.jobs.read();
             data.jobs.iter().find(|j| j.id == id).map(|j| {
-                JobRemovalAudit::capture(j.id.clone(), j.name.clone(), self.read_run_log(id, usize::MAX))
+                JobRemovalAudit::capture(
+                    j.id.clone(),
+                    j.name.clone(),
+                    self.read_run_log(id, usize::MAX),
+                )
             })
         };
         let Some(audit) = audit else {
@@ -662,7 +665,13 @@ impl Scheduler {
         // line below is the only record.
         let audits: Vec<JobRemovalAudit> = to_delete
             .iter()
-            .map(|(id, name)| JobRemovalAudit::capture(id.clone(), name.clone(), self.read_run_log(id, usize::MAX)))
+            .map(|(id, name)| {
+                JobRemovalAudit::capture(
+                    id.clone(),
+                    name.clone(),
+                    self.read_run_log(id, usize::MAX),
+                )
+            })
             .collect();
         let ids: Vec<String> = to_delete.into_iter().map(|(id, _)| id).collect();
         data.jobs.retain(|j| !ids.contains(&j.id));
@@ -748,7 +757,9 @@ impl Scheduler {
         let mut out: Vec<WebhookJobDef> = Vec::new();
         let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
         for j in self.jobs.read().jobs.iter() {
-            let Some(wh) = j.webhook.as_ref() else { continue };
+            let Some(wh) = j.webhook.as_ref() else {
+                continue;
+            };
             let route = match j.name.as_deref() {
                 Some(n) if !n.is_empty() => n.to_string(),
                 _ => {
@@ -911,7 +922,10 @@ impl Scheduler {
         let mut data = self.jobs.write();
         *data = JobsFile { jobs };
         *last = mtime;
-        tracing::info!(count = data.jobs.len(), "hot-reloaded cron jobs from jobs store");
+        tracing::info!(
+            count = data.jobs.len(),
+            "hot-reloaded cron jobs from jobs store"
+        );
     }
 
     /// Migrate jobs from old markdown files in the cron directory.
@@ -956,7 +970,8 @@ impl Scheduler {
             let active_hours = crate::str_utils::extract_yaml_string(&front_matter, "active_hours");
 
             let already_exists = data.jobs.iter().any(|j| {
-                j.schedule.as_ref().map(ScheduleSpec::describe).as_deref() == Some(schedule.as_str())
+                j.schedule.as_ref().map(ScheduleSpec::describe).as_deref()
+                    == Some(schedule.as_str())
                     && j.prompt == prompt
             });
             if already_exists {
@@ -990,6 +1005,7 @@ impl Scheduler {
                 provider: None,
                 last_failure_alert_at: None,
                 context_policy: crate::config::scheduler::ContextPolicy::Inject,
+                creator: None,
             };
 
             data.jobs.push(entry);
@@ -1002,4 +1018,3 @@ impl Scheduler {
         migrated
     }
 }
-

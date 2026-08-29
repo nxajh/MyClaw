@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use crate::channels::Channel;
 
-pub(crate) fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::providers::registry::Registry> {
+pub(crate) fn build_registry(
+    config: &crate::config::AppConfig,
+) -> anyhow::Result<crate::providers::registry::Registry> {
     use crate::providers::{
         BuildChatProviderRequest, BuildEmbeddingProviderRequest, BuildImageProviderRequest,
         BuildSearchProviderRequest, BuildSttProviderRequest, BuildTtsProviderRequest,
@@ -16,9 +18,11 @@ pub(crate) fn build_registry(config: &crate::config::AppConfig) -> anyhow::Resul
     use crate::providers::{ProviderId, detect_from_url, well_known};
 
     let factory = ProviderFactory::new();
-    let mut registry =
-        crate::providers::registry::Registry::from_config(config.providers.clone(), &config.routing)
-            .context("failed to build registry")?;
+    let mut registry = crate::providers::registry::Registry::from_config(
+        config.providers.clone(),
+        &config.routing,
+    )
+    .context("failed to build registry")?;
 
     for (provider_key, provider_cfg) in &config.providers {
         // Resolve provider identity: explicit override > base_url inference > generic
@@ -336,10 +340,8 @@ pub(crate) async fn build_tools(
     Arc<crate::tools::shell::ShellTool>,
 ) {
     let mut tools = ToolRegistry::new();
-    let (builtin, shell_registry, shell_tool) = crate::tools::builtin_tools(
-        Some(config.sessions_root()),
-        Some(shell_notice_tx.clone()),
-    );
+    let (builtin, shell_registry, shell_tool) =
+        crate::tools::builtin_tools(Some(config.sessions_root()), Some(shell_notice_tx.clone()));
     for tool in builtin {
         tools.register(tool);
     }
@@ -369,9 +371,7 @@ pub(crate) async fn build_tools(
     // Register additional built-in tools.
     // Keep the Arc to SendMessageTool: the daemon later wires the
     // agent-to-agent bus into it (multi-agent mode) via `set_messenger`.
-    let send_message_tool = Arc::new(crate::tools::SendMessageTool::with_namespace(
-        namespace,
-    ));
+    let send_message_tool = Arc::new(crate::tools::SendMessageTool::with_namespace(namespace));
     tools.register(Arc::clone(&send_message_tool) as Arc<dyn crate::providers::Tool>);
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
     // Task tools — P1-B1: per-session boards at
@@ -414,10 +414,13 @@ pub(crate) async fn build_tools(
         config.agents_skills_dir_opt(),
     )));
 
-    // CronJobTool — manage scheduled cron jobs.
-    tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(
-        shared_scheduler,
-    ))));
+    // CronJobTool — manage scheduled cron jobs. #101 P2: the shared
+    // UserResolver is injected so `create` can attribute the job to its
+    // creator (routing key → FQID, same normalization as skill_manage).
+    tools.register(Arc::new(crate::tools::CronJobTool::new(
+        Arc::clone(shared_scheduler),
+        Arc::clone(user_resolver),
+    )));
 
     // Memory tools — P1-B2: single flat memory root ({base_dir}/memory),
     // ownership expressed via frontmatter `scope`/`user_id` (not by path).
@@ -481,7 +484,14 @@ pub(crate) async fn build_tools(
     }
 
     tracing::info!(tool_count = tools.tool_count(), "tool registry built");
-    (tools, task_boards, send_message_tool, friend_ctx, shell_registry, shell_tool)
+    (
+        tools,
+        task_boards,
+        send_message_tool,
+        friend_ctx,
+        shell_registry,
+        shell_tool,
+    )
 }
 
 /// Build SkillManager from SKILL.md files in the base dir (P1: `{base_dir}/skills`)
@@ -491,10 +501,10 @@ pub(crate) fn build_skill_manager(config: &crate::config::AppConfig) -> SkillMan
     let mut manager = SkillManager::new();
     let skills_dir = config.skills_root();
     let agents_dir = config.agents_skills_dir_opt();
-    
+
     let base_dir = config.base_dir.clone();
     let users_dir = base_dir.join("users");
-    
+
     let user_skills_map = crate::agents::skill_loader::load_all_users_skills(&users_dir);
     let agent_defs = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
     let shared_defs = if let Some(d) = &agents_dir {
@@ -502,7 +512,7 @@ pub(crate) fn build_skill_manager(config: &crate::config::AppConfig) -> SkillMan
     } else {
         Vec::new()
     };
-    
+
     manager.reload_from_definitions(user_skills_map, agent_defs, shared_defs);
     tracing::info!(skill_count = manager.skill_count(), "skill manager built");
     manager
@@ -598,8 +608,7 @@ pub(crate) fn find_legacy_session_dirs(sessions_dir: &std::path::Path) -> Vec<St
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if KNOWN_ARCHIVE_DIRS.contains(&name.as_str()) || uuid::Uuid::parse_str(&name).is_ok()
-            {
+            if KNOWN_ARCHIVE_DIRS.contains(&name.as_str()) || uuid::Uuid::parse_str(&name).is_ok() {
                 None
             } else {
                 Some(name)
@@ -620,7 +629,10 @@ pub(crate) fn build_session_backend(
         Ok(backend) => {
             tracing::info!(path = %sessions_dir.display(), "session storage opened");
             match backend.migrate_global_message_ids() {
-                Ok(n) if n > 0 => tracing::info!(migrated = n, "session storage migrated to global message IDs"),
+                Ok(n) if n > 0 => tracing::info!(
+                    migrated = n,
+                    "session storage migrated to global message IDs"
+                ),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "session storage migration failed"),
             }

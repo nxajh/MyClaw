@@ -217,7 +217,8 @@ fn default_protected_paths() -> Vec<String> {
 
 impl SafetyConfig {
     /// Check if a path matches any protected pattern.
-    pub fn is_protected(&self, path: &Path) -> bool {        let path_str = path.to_string_lossy();
+    pub fn is_protected(&self, path: &Path) -> bool {
+        let path_str = path.to_string_lossy();
         let expanded_path = shellexpand::tilde(&path_str).to_string();
         let expanded_path = Path::new(&expanded_path);
 
@@ -241,6 +242,12 @@ pub struct SystemConfig {
     /// persisted `users.json` / resolver bindings (see RFC §2.2).
     #[serde(default = "default_system_namespace")]
     pub namespace: String,
+    /// Operator identity (FQID `myclaw/u/{uuid}` or bare uuid) — the human
+    /// who runs this daemon. Used for: CLI default identity (`myclaw exec`
+    /// without `--user`), draft-backlog agent-layer routing, and (P3)
+    /// promote authorization.
+    #[serde(default)]
+    pub operator: Option<String>,
 }
 
 impl Default for SystemConfig {
@@ -249,6 +256,7 @@ impl Default for SystemConfig {
             // 无 `[system]` 段时 serde 走 Default —— namespace 必须落
             // 默认 "myclaw"（空串会让 `<ref id="/u/…"/>` 无效）。
             namespace: "myclaw".to_string(),
+            operator: None,
         }
     }
 }
@@ -917,7 +925,10 @@ models = ["gpt-4o"]
     fn explicit_base_dir_still_bases_workspace_and_memory_on_it() {
         let toml_str = r#"base_dir = "/tmp/myclaw-explicit-base-dir""#;
         let config = ConfigLoader::from_toml(toml_str).unwrap();
-        assert_eq!(config.base_dir, PathBuf::from("/tmp/myclaw-explicit-base-dir"));
+        assert_eq!(
+            config.base_dir,
+            PathBuf::from("/tmp/myclaw-explicit-base-dir")
+        );
         assert_eq!(config.workspace_dir, config.base_dir.join("workspace"));
         assert_eq!(config.memory_root(), config.base_dir.join("memory"));
     }
@@ -998,10 +1009,7 @@ level = "INFO"
         assert!(chat.models.contains_key("gpt-4o"));
 
         // Routing
-        let chat_route = config
-            .routing
-            .get(Capability::Chat)
-            .unwrap();
+        let chat_route = config.routing.get(Capability::Chat).unwrap();
         assert_eq!(chat_route.models, vec!["gpt-4o"]);
 
         // Channels
@@ -1069,15 +1077,27 @@ output = ["text"]
         // SSH key path should be protected
         assert!(safety.is_protected(std::path::Path::new(&format!("{}/.ssh/id_rsa", home))));
         // Regular workspace file should not be protected
-        assert!(!safety.is_protected(std::path::Path::new(&format!("{}/.myclaw/workspace/test.rs", home))));
+        assert!(!safety.is_protected(std::path::Path::new(&format!(
+            "{}/.myclaw/workspace/test.rs",
+            home
+        ))));
     }
 
     #[test]
     fn test_glob_match() {
-        assert!(glob_match("/home/user/.ssh/id_rsa", "/home/user/.ssh/id_rsa"));
+        assert!(glob_match(
+            "/home/user/.ssh/id_rsa",
+            "/home/user/.ssh/id_rsa"
+        ));
         assert!(glob_match("/home/user/.ssh/*", "/home/user/.ssh/id_rsa"));
-        assert!(!glob_match("/home/user/.ssh/*", "/home/user/.ssh/sub/id_rsa"));
-        assert!(glob_match("/home/user/.ssh/**", "/home/user/.ssh/sub/id_rsa"));
+        assert!(!glob_match(
+            "/home/user/.ssh/*",
+            "/home/user/.ssh/sub/id_rsa"
+        ));
+        assert!(glob_match(
+            "/home/user/.ssh/**",
+            "/home/user/.ssh/sub/id_rsa"
+        ));
         assert!(glob_match("**/.env", "/any/path/.env"));
         assert!(glob_match("**/.env", "/home/user/project/.env"));
         assert!(!glob_match("**/.env", "/home/user/project/.env.local"));
@@ -1148,10 +1168,7 @@ from = "noreply@example.com"
     fn test_skills_config_defaults_to_including_agents_dir() {
         let config = ConfigLoader::from_toml("").unwrap();
         assert!(config.skills.include_agents_dir);
-        assert_eq!(
-            config.agents_skills_dir_opt(),
-            Some(agents_skills_dir())
-        );
+        assert_eq!(config.agents_skills_dir_opt(), Some(agents_skills_dir()));
     }
 
     #[test]

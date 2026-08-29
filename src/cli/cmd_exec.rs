@@ -11,13 +11,15 @@ pub async fn run(
     agent: Option<&str>,
     model: Option<&str>,
     format: &str,
+    user: &str,
 ) -> Result<()> {
     let cfg = super::load_config(cli)?;
     super::init_tracing(&cfg);
     myclaw::tools::shell_env::init(cfg.shell.clone());
 
-    let registry = myclaw::providers::registry::Registry::from_config(cfg.providers.clone(), &cfg.routing)
-        .map_err(|e| anyhow::anyhow!("failed to build registry: {}", e))?;
+    let registry =
+        myclaw::providers::registry::Registry::from_config(cfg.providers.clone(), &cfg.routing)
+            .map_err(|e| anyhow::anyhow!("failed to build registry: {}", e))?;
     let registry_arc: Arc<dyn myclaw::ProviderRegistry> = Arc::new(registry);
 
     let mut tools = myclaw::ToolRegistry::new();
@@ -122,6 +124,11 @@ pub async fn run(
     let session_key = agent.unwrap_or("cli");
     let mut session = myclaw::Session::new(session_key.to_string());
     let model_owned = model.map(|s| s.to_string());
+
+    // #101 P2: CLI identity — required `--user` (shared helper with
+    // `chat`, see `cli::resolve_cli_identity`). Same FQID shape as
+    // daemon-side load_session.
+    session.owner_fqid = super::resolve_cli_identity(&cfg, user)?;
 
     session.add_user(prompt.to_string());
     let turn_ctx = myclaw::TurnContext {
