@@ -198,7 +198,7 @@ fn is_active(skill_md: &Path) -> bool {
     match std::fs::read_to_string(skill_md) {
         Ok(content) => {
             let fm_end = content.find("\n---").unwrap_or(content.len());
-            !content[..fm_end].lines().any(|l| l.trim_end() == "status: draft")
+            !content[..fm_end].lines().any(|l| l.trim() == "status: draft")
         }
         Err(_) => false,
     }
