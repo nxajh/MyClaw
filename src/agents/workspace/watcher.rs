@@ -121,6 +121,15 @@ impl WorkspaceWatcher {
         if memory_dir.exists() {
             watcher.watch(&memory_dir, RecursiveMode::Recursive)?;
         }
+        // users dir: P2 moved user-layer skills under `users/{uuid}/skills/`.
+        // The event callback already classifies those paths into
+        // `skills_changed`, but without this registration notify never
+        // delivers events from this subtree, leaving user-layer skill
+        // edits invisible to hot-reload (draft promote/delete stalled the
+        // live index until a manual /reload or restart).
+        if users_dir.exists() {
+            watcher.watch(&users_dir, RecursiveMode::Recursive)?;
+        }
 
         Ok(Self {
             rx,
