@@ -69,6 +69,10 @@ pub enum Commands {
         /// Non-interactive mode: print response and exit.
         #[arg(short, long)]
         print: bool,
+
+        /// Act as this user: username, bare uuid, or FQID (#101 P2).
+        #[arg(long)]
+        user: Option<String>,
     },
 
     /// Run a single prompt non-interactively (alias: chat --print).
@@ -219,6 +223,50 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
     }
 
     None
+}
+
+/// Resolve the CLI session identity (#101 P2, shared by `exec`/`chat`):
+/// `--user` (username / bare uuid / FQID) wins; otherwise fall back to the
+/// configured `[system] operator`. Returns the owner FQID
+/// (`<ns>/u/<uuid>` — same shape daemon-side load_session fills via
+/// UserResolver). `Ok(None)` = no identity (warned by the caller's
+/// context); explicit `--user` that fails to resolve is a hard error,
+/// an unresolvable operator config only warns (a broken config must not
+/// block the run).
+pub(crate) fn resolve_cli_identity(
+    cfg: &myclaw::config::AppConfig,
+    user: Option<&str>,
+    cmd: &str,
+) -> Result<Option<String>> {
+    let raw = user.map(str::to_string).or_else(|| cfg.system.operator.clone());
+    match raw {
+        Some(raw) => {
+            match myclaw::identity::user_registry::normalize_operator_id(
+                &cfg.system.namespace,
+                &cfg.base_dir,
+                &raw,
+            ) {
+                Ok(uuid) => Ok(Some(format!("{}/u/{}", cfg.system.namespace, uuid))),
+                Err(e) => {
+                    if user.is_some() {
+                        Err(anyhow::anyhow!("--user '{}' did not resolve: {}", raw, e))
+                    } else {
+                        tracing::warn!(
+                            err = %e,
+                            "{cmd}: [system] operator did not resolve — running without identity"
+                        );
+                        Ok(None)
+                    }
+                }
+            }
+        }
+        None => {
+            tracing::warn!(
+                "{cmd}: no identity (--user / [system] operator) — memory/skill writes will not be attributed"
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Initialize tracing/logging based on config.
