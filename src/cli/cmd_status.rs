@@ -103,11 +103,28 @@ fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
             .len();
             let drafts =
                 myclaw::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
+            // #101 P2: drafts are owner-attributed now — count the user
+            // layers too, not just the agent layer (which is empty until
+            // P3 promote lands).
+            let user_drafts: usize = std::fs::read_dir(cfg.users_root())
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| {
+                            e.path().join("skills")
+                        })
+                        .map(|d| myclaw::agents::workspace::skill_loader::list_draft_skill_names(&d).len())
+                        .sum()
+                })
+                .unwrap_or(0);
+            let total = drafts.len() + user_drafts;
             println!(
-                "  Skills: {} loaded / {} draft{} pending",
+                "  Skills: {} loaded / {} draft{} pending (user: {}, agent: {})",
                 loaded,
-                drafts.len(),
-                if drafts.len() == 1 { "" } else { "s" }
+                total,
+                if total == 1 { "" } else { "s" },
+                user_drafts,
+                drafts.len()
             );
         }
         None => {
@@ -154,10 +171,22 @@ fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
         )
         .len();
         let drafts = myclaw::agents::workspace::skill_loader::list_draft_skill_names(&skills_dir);
+        // #101 P2: per-layer aggregation (see print_text_status).
+        let mut user_draft_names = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(c.users_root()) {
+            for e in entries.filter_map(|e| e.ok()) {
+                let d = e.path().join("skills");
+                user_draft_names.extend(
+                    myclaw::agents::workspace::skill_loader::list_draft_skill_names(&d),
+                );
+            }
+        }
+        let total = drafts.len() + user_draft_names.len();
         status["skills"] = serde_json::json!({
             "loaded": loaded,
-            "drafts_pending": drafts.len(),
+            "drafts_pending": total,
             "draft_names": drafts,
+            "user_draft_names": user_draft_names,
         });
     }
     if let Ok(Some(u)) = myclaw::update_state::UpdateState::load() {
