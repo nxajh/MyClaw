@@ -37,14 +37,20 @@ pub async fn run(
     tools.register(Arc::new(myclaw::tools::SkillsListTool::new(Arc::clone(
         &skills_arc,
     ))));
+    // Owner normalization for skill_manage user-layer writes (issue #101):
+    // CLI has no bound identity, so a fresh in-memory resolver is used —
+    // `resolve` falls through to the input unchanged (behavior identical
+    // to before the injection). Declared here so skill_manage and the
+    // memory tools share one instance.
+    let resolver = Arc::new(myclaw::UserResolver::new());
     tools.register(Arc::new(myclaw::tools::SkillManageTool::new(
         Arc::clone(&skills_arc),
+        Arc::clone(&resolver),
         cfg.base_dir.join("users"),
         cfg.skills_root(),
         cfg.agents_skills_dir_opt(),
     )));
     // Memory tools — P1-B2 flat memory root, ownership via frontmatter.
-    let resolver = Arc::new(myclaw::UserResolver::new());
     tools.register(Arc::new(myclaw::tools::MemoryListTool::new(
         memory_root.clone(),
         Arc::clone(&resolver),

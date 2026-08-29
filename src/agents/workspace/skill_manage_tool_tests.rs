@@ -16,6 +16,7 @@ use serde_json::json;
 
 use crate::agents::workspace::skill_loader;
 use crate::agents::workspace::skills::SkillManager;
+use crate::identity::user_profile::UserResolver;
 use crate::providers::Tool;
 use crate::tools::SkillManageTool;
 
@@ -95,6 +96,7 @@ async fn test_create_and_refresh() {
     let mgr = Arc::new(RwLock::new(SkillManager::new()));
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().to_path_buf(),
         None,
@@ -124,6 +126,7 @@ async fn test_create_reserved_name() {
     let dir = tempfile::tempdir().unwrap();
     let tool = SkillManageTool::new(
         Arc::new(RwLock::new(SkillManager::new())),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().to_path_buf(),
         None,
@@ -146,6 +149,7 @@ async fn test_create_duplicate() {
     let mgr = setup_user(dir.path(), "test", "existing");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -162,6 +166,7 @@ async fn test_name_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let tool = SkillManageTool::new(
         Arc::new(RwLock::new(SkillManager::new())),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().to_path_buf(),
         None,
@@ -185,6 +190,7 @@ async fn test_patch_success() {
     let mgr = setup_user(dir.path(), "test", "myskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -210,6 +216,7 @@ async fn test_patch_not_found() {
     let mgr = setup_user(dir.path(), "test", "myskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -233,6 +240,7 @@ async fn test_delete() {
     let mgr = setup_user(dir.path(), "test", "myskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -287,6 +295,7 @@ async fn test_delete_rejects_shared_library_skill() {
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         local.path().join("users"),
         local.path().join("skills"),
         Some(shared_skills_dir),
@@ -320,6 +329,7 @@ async fn test_patch_forks_shared_library_skill() {
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         local.path().join("users"),
         local.path().join("skills"),
         Some(shared_skills_dir),
@@ -361,6 +371,7 @@ async fn test_write_file_forks_shared_library_skill() {
     let (mgr, shared_skills_dir) = setup_shared_only(local.path(), shared.path(), "sharedskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         local.path().join("users"),
         local.path().join("skills"),
         Some(shared_skills_dir),
@@ -401,6 +412,7 @@ async fn test_delete_self_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let tool = SkillManageTool::new(
         Arc::new(RwLock::new(SkillManager::new())),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().to_path_buf(),
         None,
@@ -417,6 +429,7 @@ async fn test_write_and_remove_file() {
     let mgr = setup_user(dir.path(), "test", "myskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -459,6 +472,7 @@ async fn test_path_traversal_rejected() {
     let mgr = setup_user(dir.path(), "test", "myskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -489,6 +503,7 @@ async fn test_edit_forks_agent_layer_skill() {
     let mgr = setup_agent(dir.path(), "agentskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -524,6 +539,7 @@ async fn test_patch_forks_agent_layer_skill() {
     let mgr = setup_agent(dir.path(), "agentskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -574,6 +590,7 @@ async fn test_write_file_forks_agent_layer_skill() {
     let mgr = setup_agent(dir.path(), "agentskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -617,6 +634,7 @@ async fn test_remove_file_forks_agent_layer_skill() {
     .unwrap();
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -654,6 +672,7 @@ async fn test_delete_rejects_agent_layer_skill() {
     let mgr = setup_agent(dir.path(), "agentskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -682,6 +701,7 @@ async fn test_delete_user_fork_copy_succeeds() {
     let mgr = setup_agent(dir.path(), "agentskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -724,6 +744,7 @@ async fn test_create_agent_layer_duplicate_points_to_fork() {
     let mgr = setup_agent(dir.path(), "agentskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -762,6 +783,7 @@ async fn test_edit_targets_user_copy_when_shadowing_agent_skill() {
 
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -792,6 +814,7 @@ async fn test_write_actions_reject_path_like_skill_names() {
     let mgr = setup_user(dir.path(), "test", "myskill");
     let tool = SkillManageTool::new(
         Arc::clone(&mgr),
+        Arc::new(UserResolver::new()),
         dir.path().join("users"),
         dir.path().join("skills"),
         None,
@@ -814,4 +837,68 @@ async fn test_write_actions_reject_path_like_skill_names() {
             .join("users/test/skills/myskill/SKILL.md")
             .exists()
     );
+}
+
+/// Issue #101 hotfix (fork model): daemon tool execution passes
+/// `ctx.owner` = the session's routing key (e.g.
+/// `client:default:web-user:default`), NOT the owner FQID. The injected
+/// UserResolver must normalize it before any user-layer path or registry
+/// query — a patch on an agent-layer skill forks into the owner's real
+/// `users/{uuid}/skills` tree, never into a routing-key-named directory,
+/// and the registry must afterwards resolve the fork for that owner
+/// (instead of re-resolving the agent original → re-fork).
+#[tokio::test]
+async fn test_fork_normalizes_routing_key_owner_to_uuid_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = setup_agent(dir.path(), "agentskill");
+    let routing_key = "client:default:web-user:default";
+    let fqid = "myclaw/u/01234567-89ab-cdef-0123-456789abcdef";
+    let resolver = UserResolver::new();
+    resolver.set(routing_key, fqid);
+    let tool = SkillManageTool::new(
+        Arc::clone(&mgr),
+        Arc::new(resolver),
+        dir.path().join("users"),
+        dir.path().join("skills"),
+        None,
+    );
+
+    let result = tool
+        .execute(
+            json!({
+                "action": "patch", "name": "agentskill",
+                "old_string": "Do stuff.", "new_string": "Do it right."
+            }),
+            &ctx(routing_key),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.success, "{}", result.output);
+    assert!(result.output.contains("\"forked\":true"), "{}", result.output);
+
+    // The fork landed in the resolved owner's uuid directory…
+    let uuid_copy = dir
+        .path()
+        .join("users")
+        .join("01234567-89ab-cdef-0123-456789abcdef")
+        .join("skills")
+        .join("agentskill");
+    assert!(uuid_copy.join("SKILL.md").is_file());
+    let patched = std::fs::read_to_string(uuid_copy.join("SKILL.md")).unwrap();
+    assert!(patched.contains("Do it right."));
+    assert_eq!(fork_origin_source_layer(&uuid_copy), "agent");
+    // …and no routing-key-named garbage directory was ever created.
+    assert!(
+        !dir.path().join("users").join(routing_key).exists(),
+        "fork must not create a directory named after the raw routing key"
+    );
+
+    // The refreshed registry resolves the user copy for the resolved
+    // owner (no second fork on the next write).
+    let resolved = mgr
+        .read()
+        .skill_dir("agentskill", Some(fqid))
+        .expect("registry must resolve the forked copy for the owner");
+    assert!(resolved.starts_with(&uuid_copy));
 }

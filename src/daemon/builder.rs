@@ -393,12 +393,17 @@ pub(crate) async fn build_tools(
         skills,
     ))));
 
-    // SkillManageTool — CRUD for skills. Writes always go to the local
-    // skills root only; `agents_skills_dir_opt()` (issue #83) is passed
-    // just so a post-write refresh doesn't drop the shared-library skills
-    // from the live SkillManager.
+    // SkillManageTool — CRUD for skills. Writes only ever go to the owner's
+    // user layer. `ctx.owner` arrives as the session routing key in daemon
+    // tool execution, so the shared UserResolver is injected to normalize it
+    // to the owner FQID before any user-layer path/registry lookup (issue
+    // #101, same injection as the memory tools).
+    // `agents_skills_dir_opt()` (issue #83) is passed just so a post-write
+    // refresh doesn't drop the shared-library skills from the live
+    // SkillManager.
     tools.register(Arc::new(crate::tools::SkillManageTool::new(
         Arc::clone(skills),
+        Arc::clone(user_resolver),
         config.base_dir.join("users"),
         config.skills_root(),
         config.agents_skills_dir_opt(),

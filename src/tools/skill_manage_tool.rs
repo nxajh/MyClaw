@@ -17,6 +17,12 @@ const ALLOWED_SUBDIRS: &[&str] = &["references", "scripts", "templates", "assets
 
 pub struct SkillManageTool {
     skills: Arc<dyn SkillRegistry>,
+    /// Owner normalization (issue #101, hotfix on top of the fork model):
+    /// daemon tool execution passes `ctx.owner` = the session's routing
+    /// key (e.g. `client:default:web-user:default`), not the owner FQID.
+    /// Same injection the memory tools use — resolve routing key → FQID
+    /// (`myclaw/u/{uuid}`) before any user-layer path or registry query.
+    resolver: Arc<crate::identity::user_profile::UserResolver>,
     users_root: PathBuf,
     skills_root: PathBuf,
     agents_skills_dir: Option<PathBuf>,
@@ -25,12 +31,14 @@ pub struct SkillManageTool {
 impl SkillManageTool {
     pub fn new<R: SkillRegistry + 'static>(
         skills: Arc<R>,
+        resolver: Arc<crate::identity::user_profile::UserResolver>,
         users_root: PathBuf,
         skills_root: PathBuf,
         agents_skills_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             skills,
+            resolver,
             users_root,
             skills_root,
             agents_skills_dir,
@@ -154,11 +162,15 @@ impl SkillManageTool {
         if name == "self" {
             return Err("Cannot create skill with reserved name 'self'".to_string());
         }
-        if let Some(existing) = self.skills.find(name, Some(&ctx.owner)) {
+        // Resolve the owner once (routing key → FQID) and use the resolved
+        // value for every registry query and user-layer path below, so the
+        // dedup check and the write target can't disagree.
+        let owner_id = self.owner_id(ctx);
+        if let Some(existing) = self.skills.find(name, Some(&owner_id)) {
             return Err(match existing
                 .skill_dir
                 .as_deref()
-                .and_then(|dir| self.layer_of(dir, &self.user_root(ctx)))
+                .and_then(|dir| self.layer_of(dir, &self.user_root(&owner_id)))
             {
                 // A read-only original with this name exists — steer the
                 // caller to the mutating actions, which auto-fork it into
@@ -175,12 +187,9 @@ impl SkillManageTool {
             });
         }
 
-        // Normalize FQID owner (`myclaw/u/{uuid}`) to the bare uuid directory
-        // name — the users/ tree layout is `users/{uuid}/skills`.
-        let user_skills_dir = self
-            .users_root
-            .join(crate::ids::bare_dir_name(&ctx.owner))
-            .join("skills");
+        // The user layer is `users/{uuid}/skills` — owner resolved to FQID
+        // above, normalized to the bare uuid directory name here.
+        let user_skills_dir = self.user_root(&owner_id).join("skills");
         let skill_dir = user_skills_dir.join(name);
         std::fs::create_dir_all(&skill_dir)
             .map_err(|e| format!("Failed to create skill directory: {}", e))?;
@@ -414,7 +423,8 @@ impl SkillManageTool {
     /// decided 2026-08-29):
     ///
     /// - target in the caller's own user layer (`users/{owner}/skills`,
-    ///   owner normalized via `bare_dir_name`) → returned as-is (written
+    ///   owner resolved routing key → FQID via the injected resolver, then
+    ///   normalized via `bare_dir_name`) → returned as-is (written
     ///   in place);
     /// - target in the agent layer (`skills_root`) or the shared library
     ///   (`agents_skills_dir`, `~/.agents/skills` — issue #83/#99) → those
@@ -439,11 +449,16 @@ impl SkillManageTool {
     ) -> Result<ResolvedSkillDir, String> {
         validate_name(name)?;
 
-        let user_root = self.user_root(ctx);
+        // Resolve the owner once (routing key → FQID) so the registry query
+        // and the user-layer classification below are guaranteed to use the
+        // same resolved value — a binding update racing the execute must
+        // not be able to split them.
+        let owner_id = self.owner_id(ctx);
+        let user_root = self.user_root(&owner_id);
 
         let dir = self
             .skills
-            .skill_dir(name, Some(&ctx.owner))
+            .skill_dir(name, Some(&owner_id))
             .ok_or_else(|| format!("Skill '{}' not found.", name))?;
 
         match self.layer_of(&dir, &user_root) {
@@ -467,7 +482,7 @@ impl SkillManageTool {
                         path = dir.display()
                     ));
                 }
-                let forked_dir = self.fork_to_user_layer(&dir, name, layer, ctx)?;
+                let forked_dir = self.fork_to_user_layer(&dir, name, layer, &owner_id)?;
                 // The copy takes over resolution (user > agent > shared):
                 // refresh so subsequent operations on the same name hit
                 // the user layer instead of trying to fork again.
@@ -488,11 +503,24 @@ impl SkillManageTool {
         }
     }
 
-    /// The caller's user-layer root (`users/{owner}`), with the FQID owner
-    /// (`myclaw/u/{uuid}`) normalized to the bare uuid directory name —
-    /// the users/ tree layout is `users/{uuid}/skills`.
-    fn user_root(&self, ctx: &crate::api::tool::ToolContext) -> PathBuf {
-        self.users_root.join(crate::ids::bare_dir_name(&ctx.owner))
+    /// The session owner as a canonical user id: daemon tool execution
+    /// passes `ctx.owner` = the session's routing key (e.g.
+    /// `client:default:web-user:default`), which the injected resolver maps
+    /// to the owner's FQID (`myclaw/u/{uuid}`) — the same normalization the
+    /// memory tools apply (`user_id_for(ctx, &resolver)`). Unbound keys
+    /// (CLI, tests) resolve to themselves, preserving the old behavior.
+    fn owner_id(&self, ctx: &crate::api::tool::ToolContext) -> String {
+        self.resolver.resolve(&ctx.owner)
+    }
+
+    /// The caller's user-layer root (`users/{owner}`), with the already
+    /// resolved owner id (routing key → FQID, see [`Self::owner_id`])
+    /// normalized to the bare uuid directory name — the users/ tree layout
+    /// is `users/{uuid}/skills`. Taking the resolved id (not the raw
+    /// `ctx.owner`) keeps every path in one execute consistent with the
+    /// registry queries, which normalize the same way.
+    fn user_root(&self, owner_id: &str) -> PathBuf {
+        self.users_root.join(crate::ids::bare_dir_name(owner_id))
     }
 
     /// Classify an on-disk skill directory by layer (RFC #101 §2.1/§2.5).
@@ -520,6 +548,8 @@ impl SkillManageTool {
     /// into the caller's user layer (RFC #101 §2.6): full recursive copy
     /// of the skill directory plus a `.fork-origin` provenance sidecar
     /// (kept out of SKILL.md — layering stays directory-authoritative).
+    /// The destination owner is the caller's resolved id (routing key →
+    /// FQID), so the copy lands in `users/{uuid}/skills`.
     ///
     /// Atomic on success: the copy is built under a dot-prefixed temporary
     /// sibling (with SKILL.md written last, so the loader — which requires
@@ -531,9 +561,9 @@ impl SkillManageTool {
         src: &Path,
         name: &str,
         source_layer: &str,
-        ctx: &crate::api::tool::ToolContext,
+        owner_id: &str,
     ) -> Result<PathBuf, String> {
-        let user_skills = self.user_root(ctx).join("skills");
+        let user_skills = self.user_root(owner_id).join("skills");
         let dest = user_skills.join(name);
         let tmp = user_skills.join(format!(".{}.fork-tmp", name));
 
