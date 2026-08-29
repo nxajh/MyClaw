@@ -35,7 +35,12 @@ use tokio::sync::Semaphore;
 
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest};
 
-const OVERALL_TIMEOUT: Duration = Duration::from_secs(300);
+// Runtime-verified on first production pass (35 backlog skills): one glm-5.2
+// batch call alone takes ~5min, so 3 serial batches ≈ 15min — the 300s
+// envelope inherited from memory_distill cut the pass mid-flight. This is an
+// idle background task guarded by a semaphore; give it generous room.
+// Subsequent passes are incremental (1-2 skills) and finish in one batch.
+const OVERALL_TIMEOUT: Duration = Duration::from_secs(1200);
 const MAX_INPUT_CHARS: usize = 60_000;
 const PER_SKILL_CHARS: usize = 4_000;
 
