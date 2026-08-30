@@ -60,10 +60,14 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from datetime import date
 
-OPERATOR_UUID = "01a0151d-997f-7980-9ad1-cd9caf893d87"
-OPERATOR_FQID = "myclaw/u/01a0151d-997f-7980-9ad1-cd9caf893d87"
+# Default operator (uuid derived from the FQID, mirroring src/ids Fqid::parse).
+DEFAULT_OPERATOR_FQID = "myclaw/u/01a0151d-997f-7980-9ad1-cd9caf893d87"
+DEFAULT_NAMESPACE = "myclaw"
+OPERATOR_FQID = DEFAULT_OPERATOR_FQID  # module-level default (pre-param compat)
+OPERATOR_UUID = DEFAULT_OPERATOR_FQID.rsplit("/", 1)[-1]
 
 DAEMON_NAME = "myclaw"
 DAEMON_STOP_HINT = "systemctl --user stop myclaw"
@@ -227,6 +231,36 @@ def parse_md_href(href):
 
 
 # --------------------------------------------------------------------------- #
+# operator FQID
+# --------------------------------------------------------------------------- #
+
+def parse_operator_fqid(value):
+    """Parse --operator-fqid, mirroring src/ids Fqid::parse semantics:
+    `<namespace>/<type>/<uuid>` where namespace must be `myclaw` (default
+    instance namespace) and the uuid is any form uuid.UUID accepts, returned
+    canonicalized to lowercase-hyphenated 36 chars (Rust uuid_str() form).
+    Tightened beyond Fqid::parse: the operator is a user, so the type segment
+    must be `u`. Returns (canonical_fqid, uuid_str); invalid shape aborts."""
+    parts = value.split("/")
+    if len(parts) != 3 or not all(parts):
+        fail(f"invalid --operator-fqid {value!r}: expected <namespace>/<u>/<uuid>, "
+             f"e.g. {DEFAULT_OPERATOR_FQID}")
+    ns, type_seg, uuid_str = parts
+    if ns != DEFAULT_NAMESPACE:
+        fail(f"invalid --operator-fqid {value!r}: namespace must be {DEFAULT_NAMESPACE!r}")
+    if type_seg != "u":
+        fail(f"invalid --operator-fqid {value!r}: type segment must be 'u' "
+             f"(operator is a user id), got {type_seg!r}")
+    try:
+        parsed = uuid.UUID(uuid_str)
+    except ValueError:
+        fail(f"invalid --operator-fqid {value!r}: uuid segment {uuid_str!r} "
+             f"is not a valid UUID")
+    canonical = f"{ns}/{type_seg}/{parsed}"
+    return canonical, str(parsed)
+
+
+# --------------------------------------------------------------------------- #
 # backup manifest
 # --------------------------------------------------------------------------- #
 
@@ -320,7 +354,7 @@ def validate_deleted_adjudication(final_by_name):
 # frontmatter normalization & link rewrite
 # --------------------------------------------------------------------------- #
 
-def normalize_frontmatter(text, final):
+def normalize_frontmatter(text, final, operator_fqid):
     """Normalize only scope / user_id lines (quote forms included); never
     reorder or touch other lines; preserve the file's newline style."""
     fm, opener, closer, body = split_frontmatter(text)
@@ -334,7 +368,7 @@ def normalize_frontmatter(text, final):
             scope_idx = len(out) - 1
         elif key == "user_id":
             if final == "user":
-                out.append(f'user_id: "{OPERATOR_FQID}"' + line_ending(line))
+                out.append(f'user_id: "{operator_fqid}"' + line_ending(line))
                 user_id_done = True
             # agent layer: drop the user_id line entirely
         else:
@@ -343,7 +377,7 @@ def normalize_frontmatter(text, final):
         out.insert(0, f"scope: {final}\n")
         scope_idx = 0
     if not user_id_done:
-        out.insert(scope_idx + 1, f'user_id: "{OPERATOR_FQID}"\n')
+        out.insert(scope_idx + 1, f'user_id: "{operator_fqid}"\n')
     return opener + "".join(out) + closer + body
 
 
@@ -473,7 +507,7 @@ def detect_state(final_by_name, agent_dir, user_dir, backup_dir, manifest=None, 
 # --------------------------------------------------------------------------- #
 
 def run_invariants(final_by_name, agent_dir, user_dir, backup_dir, pre_disk_count,
-                   manifest):
+                   manifest, operator_fqid):
     """All four Absolute Invariants. Returns (rows, ok) — rows for the report
     table, ok=False aborts with details on stdout/stderr. Owned state is judged
     against the TSV expectation; foreign files against the manifest baseline."""
@@ -528,7 +562,7 @@ def run_invariants(final_by_name, agent_dir, user_dir, backup_dir, pre_disk_coun
         fm, _, _, _ = split_frontmatter(read_file(os.path.join(user_dir, fname)))
         uid = next((line.split(":", 1)[1].strip().strip('"') for line in fm or []
                     if fm_key(line) == "user_id"), None)
-        if uid != OPERATOR_FQID:
+        if uid != operator_fqid:
             attr_errors.append(f"user dir: {fname} user_id={uid!r} != operator FQID")
 
     # 4. idempotency — the finished pool must re-detect as fully migrated
@@ -628,7 +662,8 @@ def do_rollback(agent_dir, user_dir, backup_dir):
 # forward migration
 # --------------------------------------------------------------------------- #
 
-def plan_and_execute(final_by_name, agent_dir, user_dir, backup_dir, dry_run):
+def plan_and_execute(final_by_name, agent_dir, user_dir, backup_dir, dry_run,
+                     operator_fqid, operator_uuid):
     deleted = {n for n, f in final_by_name.items() if f == "deleted"}
     surviving = {n: f for n, f in final_by_name.items() if f != "deleted"}
 
@@ -647,7 +682,7 @@ def plan_and_execute(final_by_name, agent_dir, user_dir, backup_dir, dry_run):
         src = os.path.join(agent_dir, name + ".md")
         text = read_file(src)
         if final == "agent":
-            new = normalize_frontmatter(text, "agent")
+            new = normalize_frontmatter(text, "agent", operator_fqid)
             if new != text:
                 counts["fm_normalized"] += 1
                 rewrite_list.append((name, "frontmatter", "scope/user_id normalized"))
@@ -656,9 +691,9 @@ def plan_and_execute(final_by_name, agent_dir, user_dir, backup_dir, dry_run):
             if not dry_run and new != text:
                 write_file(src, new)
         elif final == "user":
-            new = normalize_frontmatter(text, "user")
+            new = normalize_frontmatter(text, "user", operator_fqid)
             counts["fm_normalized"] += 1
-            rewrite_list.append((name, "move", f"memory/ -> users/{OPERATOR_UUID}/memory/"))
+            rewrite_list.append((name, "move", f"memory/ -> users/{operator_uuid}/memory/"))
             content[name] = new
             counts["user_move"] += 1
             if not dry_run:
@@ -714,13 +749,22 @@ def main(argv=None, runner=None):
                         help="adjudication TSV (default {base}/memory-migration/migration-final.tsv)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan, touch nothing")
     parser.add_argument("--rollback", action="store_true", help="restore the flat pool from the backup")
+    parser.add_argument("--operator-fqid", default=DEFAULT_OPERATOR_FQID,
+                        help=f"operator user FQID <ns>/u/<uuid> (default {DEFAULT_OPERATOR_FQID}); "
+                             f"its uuid segment selects the users/{{uuid}}/memory target dir")
     parser.add_argument("--force", action="store_true",
                         help="proceed even if the myclaw daemon appears to be running (risky)")
     args = parser.parse_args(argv)
 
+    try:
+        operator_fqid, operator_uuid = parse_operator_fqid(args.operator_fqid)
+    except MigrationError as e:
+        print(f"ABORT: {e}", file=sys.stderr)
+        return 1
+
     base = os.path.expanduser(args.base)
     agent_dir = os.path.join(base, "memory")
-    user_dir = os.path.join(base, "users", OPERATOR_UUID, "memory")
+    user_dir = os.path.join(base, "users", operator_uuid, "memory")
     backup_dir = os.path.join(base, "backups", BACKUP_DIRNAME)
     tsv_path = os.path.expanduser(args.tsv) if args.tsv else \
         os.path.join(base, "memory-migration", "migration-final.tsv")
@@ -749,7 +793,7 @@ def main(argv=None, runner=None):
                   "foreign baseline unchanged) — no-op; invariants only.")
             rows, ok, details = run_invariants(final_by_name, agent_dir, user_dir,
                                                backup_dir, pre_disk_count=len(final_by_name),
-                                               manifest=manifest)
+                                               manifest=manifest, operator_fqid=operator_fqid)
             for label, passed in rows:
                 print(f"  {'PASS' if passed else 'FAIL'}  {label}")
             for d in details:
@@ -781,7 +825,8 @@ def main(argv=None, runner=None):
 
         if args.dry_run:
             counts, dead_list, rewrite_list = plan_and_execute(
-                final_by_name, agent_dir, user_dir, backup_dir, dry_run=True)
+                final_by_name, agent_dir, user_dir, backup_dir, dry_run=True,
+                operator_fqid=operator_fqid, operator_uuid=operator_uuid)
             print(f"DRY RUN — nothing written. plan: {counts}")
             for name, t, detail in rewrite_list:
                 print(f"  would {t:11s} {name}: {detail}")
@@ -805,7 +850,8 @@ def main(argv=None, runner=None):
 
         # -- steps 2+3 ---------------------------------------------------------
         counts, dead_list, rewrite_list = plan_and_execute(
-            final_by_name, agent_dir, user_dir, backup_dir, dry_run=False)
+            final_by_name, agent_dir, user_dir, backup_dir, dry_run=False,
+            operator_fqid=operator_fqid, operator_uuid=operator_uuid)
         print(f"step 2 dispatch: agent_stay={counts['agent_stay']} user_move={counts['user_move']} "
               f"delete_plain={counts['delete_plain']} merge={counts['merge']} "
               f"(frontmatter normalized on {counts['fm_normalized']})")
@@ -820,7 +866,8 @@ def main(argv=None, runner=None):
 
         # -- step 4: Absolute Invariants ---------------------------------------
         rows, ok, details = run_invariants(final_by_name, agent_dir, user_dir,
-                                           backup_dir, pre_disk_count, manifest=manifest)
+                                           backup_dir, pre_disk_count, manifest=manifest,
+                                           operator_fqid=operator_fqid)
         print("step 4 invariants:")
         for label, passed in rows:
             print(f"  {'PASS' if passed else 'FAIL'}  {label}")

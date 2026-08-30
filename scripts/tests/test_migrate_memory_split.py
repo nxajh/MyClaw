@@ -476,6 +476,42 @@ class MigrateMemorySplitTest(unittest.TestCase):
         self.assertEqual(rc, 0, out + err)
         self.assertIn(f"restart the daemon when ready: {M.DAEMON_START_HINT}", out)
 
+    # ------------------------------------------------------- operator FQID parameter
+
+    def test_operator_fqid_selects_user_dir_and_user_id(self):
+        self.write_pool()
+        fqid = "myclaw/u/11111111-2222-3333-4444-555555555555"
+        rc, out, err = self.run_script("--operator-fqid", fqid)
+        self.assertEqual(rc, 0, out + err)
+        custom_dir = self.base / "users" / "11111111-2222-3333-4444-555555555555" / "memory"
+        beta = (custom_dir / "beta_user.md").read_text()
+        self.assertIn(f'user_id: "{fqid}"\n', beta)
+        self.assertFalse((self.base / USER_DIR_REL).exists())  # default dir untouched
+        rc, out, err = self.run_script("--operator-fqid", fqid)  # re-run: still no-op
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("no-op", out)
+
+    def test_operator_fqid_uuid_normalized_like_ids_layer(self):
+        # uppercase/compact uuid forms canonicalize like Rust Uuid/uuid_str
+        fqid, u = M.parse_operator_fqid(
+            "myclaw/u/01A0151D997F79809AD1CD9CAF893D87")
+        self.assertEqual(u, M.OPERATOR_UUID)
+        self.assertEqual(fqid, M.OPERATOR_FQID)
+
+    def test_operator_fqid_invalid_forms_abort(self):
+        self.write_pool()
+        for bad in ("01a0151d-997f-7980-9ad1-cd9caf893d87",  # bare uuid
+                    "myclaw/u/not-a-uuid",
+                    "other/u/01a0151d-997f-7980-9ad1-cd9caf893d87",  # wrong namespace
+                    "myclaw/t/01a0151d-997f-7980-9ad1-cd9caf893d87",  # wrong type segment
+                    "myclaw/u/", "myclaw/u"):
+            rc, out, err = self.run_script("--operator-fqid", bad)
+            self.assertEqual(rc, 1, bad)
+            self.assertIn("invalid --operator-fqid", err)
+        # nothing mutated
+        self.assertFalse((self.base / "backups").exists())
+        self.assertTrue((self.base / "memory" / "beta_user.md").exists())
+
     def test_pending_files_untouched(self):
         self.write_pool()
         pending = self.base / "memory" / "ghost.md.pending"
