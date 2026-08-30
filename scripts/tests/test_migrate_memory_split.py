@@ -579,5 +579,56 @@ class MigrateMemorySplitTest(unittest.TestCase):
         self.assertFalse((self.base / USER_DIR_REL / "ghost.md.pending").exists())
 
 
+    def test_migration_lock_excludes_second_concurrent_instance(self):
+        # r3 review: two migrations started concurrently -> exactly one may
+        # proceed. Second acquire must fail closed with the holder's pid.
+        self.write_pool()
+        first = M.MigrationLock(str(self.base / "memory-split-migration.lock"))
+        first.acquire()
+        try:
+            with self.assertRaises(M.MigrationError) as cm:
+                M.MigrationLock(str(self.base / "memory-split-migration.lock")).acquire()
+            self.assertIn("another migration appears to be running", str(cm.exception))
+            self.assertIn(str(os.getpid()), str(cm.exception))
+            # the blocked instance aborts before touching anything
+            rc, out, err = self.run_script()
+            self.assertEqual(rc, 1)
+            self.assertIn("another migration appears to be running", err)
+            self.assertFalse((self.base / "backups").exists())
+            self.assertIn("beta_user.md", os.listdir(self.base / "memory"))
+        finally:
+            first.release()
+        # lock released -> a fresh instance may proceed again (fresh state)
+        self.assertFalse((self.base / "memory-split-migration.lock").exists())
+        second = M.MigrationLock(str(self.base / "memory-split-migration.lock"))
+        second.acquire()
+        second.release()
+
+    def test_migration_lock_not_taken_for_dry_run(self):
+        self.write_pool()
+        rc, out, err = self.run_script("--dry-run")
+        self.assertEqual(rc, 0, out + err)
+        self.assertFalse((self.base / "memory-split-migration.lock").exists())
+
+
+    def test_cli_runner_none_uses_default_command_runner(self):
+        # r3 review follow-up: `main()` from a real CLI invocation passes
+        # runner=None; the guard used to crash with TypeError before any
+        # precheck. Patch the real runner with the inactive fake and the
+        # full mutating run must succeed.
+        self.write_pool()
+        orig = M.default_command_runner
+        M.default_command_runner = make_runner("inactive")
+        try:
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = M.main(["--base", str(self.base), "--operator-fqid", M.OPERATOR_FQID])
+        finally:
+            M.default_command_runner = orig
+        self.assertEqual(rc, 0, out.getvalue() + err.getvalue())
+        self.assertIn("migration complete", out.getvalue())
+        self.assertFalse((self.base / "memory-split-migration.lock").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

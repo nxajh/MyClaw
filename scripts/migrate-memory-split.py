@@ -338,6 +338,44 @@ def load_tsv(path):
     return final_by_name
 
 
+class MigrationLock:
+    """O_EXCL lock file (PR #212 review r3): at most one migration instance
+    may mutate the tree at a time — guards against two concurrent runs both
+    passing the fresh-state precheck and double-writing. Released via
+    atexit (process exit covers every abort/return path); a crashed holder
+    leaves a stale file whose message points at manual removal. --dry-run
+    is exempt (read-only)."""
+
+    def __init__(self, path):
+        self.path = path
+        self.fd = None
+
+    def acquire(self):
+        try:
+            self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.write(self.fd, f"{os.getpid()}\n".encode())
+        except FileExistsError:
+            holder = "?"
+            try:
+                with open(self.path) as fh:
+                    holder = fh.read().strip() or "?"
+            except OSError:
+                pass
+            raise MigrationError(
+                f"another migration appears to be running "
+                f"(lock {self.path}, holder pid {holder}). If that process no "
+                f"longer exists, delete the lock file and retry.")
+
+    def release(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+
+
 def validate_deleted_adjudication(final_by_name):
     deleted = {n for n, f in final_by_name.items() if f == "deleted"}
     known = set(DELETED_PLAIN) | {MERGE_SOURCE}
@@ -741,7 +779,9 @@ def plan_and_execute(final_by_name, agent_dir, user_dir, backup_dir, dry_run,
     return counts, dead_list, rewrite_list
 
 
-def main(argv=None, runner=None):
+def _build_parser():
+    parser = argparse.ArgumentParser(
+        description="P4 memory layer split: adjudicated flat pool -> agent/user layers")
     parser = argparse.ArgumentParser(
         description="Migrate the flat memory pool into agent/user layers per the P4 TSV")
     parser.add_argument("--base", default="~/.myclaw", help="myclaw base dir (default ~/.myclaw)")
@@ -754,6 +794,36 @@ def main(argv=None, runner=None):
                              f"its uuid segment selects the users/{{uuid}}/memory target dir")
     parser.add_argument("--force", action="store_true",
                         help="proceed even if the myclaw daemon appears to be running (risky)")
+    return parser
+
+
+def main(argv=None, runner=None):
+    """Single-process entry: take the migration lock (unless --dry-run) and
+    hold it across the whole run so a concurrent instance fails closed."""
+    gate = _build_parser().parse_args(argv)
+    base = os.path.expanduser(gate.base)
+    lock = None
+    if not gate.dry_run:
+        lock = MigrationLock(os.path.join(base, "memory-split-migration.lock"))
+        try:
+            lock.acquire()
+        except MigrationError as e:
+            print(f"ABORT: {e}", file=sys.stderr)
+            return 1
+    try:
+        return _main_impl(argv, runner=runner)
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def _main_impl(argv=None, runner=None):
+    # CLI entry passes runner=None meaning "really probe the system"; tests
+    # inject make_runner(...). daemon_active has no None guard, so resolve
+    # the default here (PR #212 review r3: CLI runs crashed in guard).
+    if runner is None:
+        runner = default_command_runner
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     try:
