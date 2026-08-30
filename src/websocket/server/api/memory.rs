@@ -496,20 +496,21 @@ mod tests {
 
     /// Minimal ApiContext with only the handles the memory write path uses
     /// (no resolver installed → memory_user_id falls back to the raw key).
+    /// Handles are leaked for the &'static context lifetime — test-only.
     fn make_ctx(user_id: &'static str, memory_root: std::path::PathBuf) -> ApiContext<'static> {
         use std::sync::{Arc, OnceLock};
-        let memory_root: Arc<OnceLock<std::path::PathBuf>> = Arc::new(OnceLock::new());
-        let _ = memory_root.set(memory_root);
+        let memory_root_handle: Arc<OnceLock<std::path::PathBuf>> = Arc::new(OnceLock::new());
+        let _ = memory_root_handle.set(memory_root);
         ApiContext {
             user_id,
-            session_manager: Arc::new(OnceLock::new()),
-            tool_specs: Arc::new(OnceLock::new()),
-            workspace_dir: Arc::new(OnceLock::new()),
-            memory_root,
-            config_path: Arc::new(OnceLock::new()),
-            skill_manager: Arc::new(OnceLock::new()),
-            provider_registry: Arc::new(OnceLock::new()),
-            user_resolver: Arc::new(OnceLock::new()),
+            session_manager: &*Box::leak(Arc::new(OnceLock::new())),
+            tool_specs: &*Box::leak(Arc::new(OnceLock::new())),
+            workspace_dir: &*Box::leak(Arc::new(OnceLock::new())),
+            memory_root: &*Box::leak(memory_root_handle),
+            config_path: &*Box::leak(Arc::new(OnceLock::new())),
+            skill_manager: &*Box::leak(Arc::new(OnceLock::new())),
+            provider_registry: &*Box::leak(Arc::new(OnceLock::new())),
+            user_resolver: &*Box::leak(Arc::new(OnceLock::new())),
         }
     }
 
