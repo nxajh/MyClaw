@@ -120,32 +120,71 @@ pub fn user_memory_dir(memory_root: &Path, user_id: &str) -> std::path::PathBuf 
         .join(MEMORY_DIR_NAME)
 }
 
-/// Normalize `scope`/`user_id` so the frontmatter fields alone determine the
-/// layer (the scan helpers guarantee their correctness, so downstream code
-/// never has to re-derive provenance from paths):
+/// Reconstruct the canonical FQID (`<ns>/u/<uuid>`) for a user-layer
+/// directory name. User dirs are named after the bare uuid of a registered
+/// identity (see [`user_memory_dir`]); the canonical `user_id` carried on
+/// scanned entries must be the full FQID, reconstructed via the identity
+/// module's [`crate::identity::user_registry::user_id`] constructor (never
+/// hand-assembled). Legacy escaped dir names that do not round-trip to a
+/// valid FQID are kept verbatim.
+fn dir_owner_fqid(dir_name: &str) -> String {
+    let candidate = crate::identity::user_registry::user_id(
+        crate::identity::DEFAULT_NAMESPACE,
+        dir_name,
+    );
+    if crate::ids::Fqid::parse(&candidate, crate::ids::DEFAULT_NAMESPACE).is_some() {
+        candidate
+    } else {
+        dir_name.to_string()
+    }
+}
+
+/// Phase 1 — normalize `scope`/`user_id` so the frontmatter fields alone
+/// determine the layer (downstream code never has to re-derive provenance
+/// from paths). Only rewrites ownership fields; filtering is a separate
+/// phase ([`filter_invalid_memory`]):
 /// - agent-dir file with `scope: user` → stays user-layer (transition
 ///   fallback; `user_id` must come from frontmatter);
 /// - agent-dir file otherwise → agent layer;
-/// - user-dir file → user layer, `user_id` falls back to the dir owner.
+/// - user-dir file → user layer, `user_id` set to the dir owner (the
+///   directory is authoritative — the canonical FQID reconstructed by the
+///   scan helper; frontmatter is redundant verification only).
 fn normalize_ownership(f: &mut MemoryFile, from_agent_dir: bool, dir_owner: Option<&str>) {
     if !from_agent_dir {
         f.scope = Some("user".to_string());
-        if f.user_id.as_deref().is_none_or(|u| u.is_empty()) {
-            f.user_id = Some(dir_owner.unwrap_or("unknown").to_string());
-        }
+        f.user_id = Some(dir_owner.unwrap_or("unknown").to_string());
     } else if f.scope.as_deref() != Some("user") {
         f.scope = Some("agent".to_string());
     }
 }
 
+/// Phase 2 — validity filter, run after [`normalize_ownership`]. Drops
+/// entries that cannot participate in the layer model:
+/// - empty `name` / `type` identity fields;
+/// - `scope` outside {agent, user} (cannot happen post-normalize; kept as
+///   a hard guard so callers can never index a bogus scope);
+/// - user-scope entries without a non-empty `user_id`.
+/// Returns `true` for entries to keep.
+fn filter_invalid_memory(f: &MemoryFile) -> bool {
+    if f.name.trim().is_empty() || f.mem_type.trim().is_empty() {
+        return false;
+    }
+    match f.scope.as_deref() {
+        Some("agent") => true,
+        Some("user") => f.user_id.as_deref().is_some_and(|u| !u.trim().is_empty()),
+        _ => false,
+    }
+}
+
 /// Scan the agent layer only (the memory root dir). Pre-migration user
 /// entries still living there are excluded — they belong to the user layer.
+/// Pipeline: normalize ownership → filter invalid entries → layer select.
 pub fn scan_agent_layer(memory_root: &Path) -> Vec<MemoryFile> {
     let mut files = scan_memory_files(memory_root);
-    files.retain_mut(|f| {
+    for f in &mut files {
         normalize_ownership(f, true, None);
-        f.scope.as_deref() != Some("user")
-    });
+    }
+    files.retain(|f| filter_invalid_memory(f) && f.scope.as_deref() != Some("user"));
     files
 }
 
@@ -157,11 +196,14 @@ pub fn scan_user_layer(memory_root: &Path, user_id: &str) -> Vec<MemoryFile> {
     for f in &mut files {
         normalize_ownership(f, false, Some(user_id));
     }
+    files.retain(filter_invalid_memory);
     // Transition fallback: single-pool entries not yet migrated.
     for mut f in scan_memory_files(memory_root) {
         if f.scope.as_deref() == Some("user") && f.user_id.as_deref() == Some(user_id) {
             normalize_ownership(&mut f, true, None);
-            files.push(f);
+            if filter_invalid_memory(&f) {
+                files.push(f);
+            }
         }
     }
     files
@@ -183,16 +225,20 @@ pub fn scan_merged_for_user(memory_root: &Path, user_id: &str) -> Vec<MemoryFile
 
 /// Every user-layer entry across all user dirs, plus agent-dir fallback
 /// entries — for cross-user maintenance jobs (distill). `user_id` is
-/// normalized on every entry so per-user grouping works.
+/// normalized on every entry to the canonical FQID (reconstructed from the
+/// user dir name) so per-user grouping works.
 pub fn scan_all_user_layers(memory_root: &Path) -> Vec<MemoryFile> {
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(users_root_of(memory_root)) {
         for entry in rd.flatten() {
-            let owner = entry.file_name().to_string_lossy().to_string();
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            let owner = dir_owner_fqid(&dir_name);
             let mem_dir = entry.path().join(MEMORY_DIR_NAME);
             for mut f in scan_memory_files(&mem_dir) {
                 normalize_ownership(&mut f, false, Some(&owner));
-                out.push(f);
+                if filter_invalid_memory(&f) {
+                    out.push(f);
+                }
             }
         }
     }
@@ -200,7 +246,9 @@ pub fn scan_all_user_layers(memory_root: &Path) -> Vec<MemoryFile> {
     for mut f in scan_memory_files(memory_root) {
         if f.scope.as_deref() == Some("user") {
             normalize_ownership(&mut f, true, None);
-            out.push(f);
+            if filter_invalid_memory(&f) {
+                out.push(f);
+            }
         }
     }
     out
@@ -1058,6 +1106,82 @@ mod tests {
         // user_id normalized (FQID from frontmatter where present).
         let alice_note = all.iter().find(|f| f.name == "alice-note").unwrap();
         assert_eq!(alice_note.user_id.as_deref(), Some(ALICE));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn scan_user_layers_user_ids_are_canonical_fqid() {
+        // Dir name is a bare uuid; the reconstructed owner must be the full
+        // FQID (via identity::user_registry::user_id), regardless of what
+        // the redundant frontmatter `user_id` claims.
+        let root = layered_layout("fqid");
+        let alice_dir = user_memory_dir(&root, ALICE);
+        // (a) frontmatter user_id missing;
+        write_file(&alice_dir, "no-uid", "scope: user");
+        // (b) frontmatter user_id is a bare uuid (legacy);
+        write_file(
+            &alice_dir,
+            "bare-uid",
+            &format!(
+                "scope: user\nuser_id: {}",
+                ALICE.rsplit('/').next().unwrap()
+            ),
+        );
+        // (c) frontmatter user_id claims another user — directory wins.
+        write_file(&alice_dir, "wrong-uid", &format!("scope: user\nuser_id: {}", BOB));
+
+        for f in scan_user_layer(&root, ALICE) {
+            let uid = f.user_id.as_deref().expect("user layer entry must carry user_id");
+            assert_eq!(uid, ALICE, "entry {} must be owned by the dir owner FQID", f.name);
+            assert!(
+                crate::ids::Fqid::parse(uid, crate::ids::DEFAULT_NAMESPACE).is_some(),
+                "scanned user_id must be canonical FQID form, got '{}'",
+                uid
+            );
+        }
+        for f in scan_all_user_layers(&root) {
+            let uid = f.user_id.as_deref().expect("user layer entry must carry user_id");
+            assert_eq!(uid, ALICE);
+            assert!(crate::ids::Fqid::parse(uid, crate::ids::DEFAULT_NAMESPACE).is_some());
+        }
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn filter_invalid_memory_drops_broken_entries() {
+        let base = |name: &str, scope: Option<&str>, user_id: Option<&str>| MemoryFile {
+            name: name.into(),
+            scope: scope.map(|s| s.to_string()),
+            user_id: user_id.map(|s| s.to_string()),
+            mem_type: "entity".into(),
+            inject: "search".into(),
+            description: String::new(),
+            tags: vec![],
+            created_at: String::new(),
+            updated_at: None,
+            links: vec![],
+            content: String::new(),
+            path: std::path::PathBuf::new(),
+        };
+        // Valid: agent + complete user entries survive.
+        assert!(filter_invalid_memory(&base("a", Some("agent"), None)));
+        assert!(filter_invalid_memory(&base("u", Some("user"), Some("myclaw/u/x"))));
+        // Invalid: empty identity fields, bogus scope, user scope without
+        // (or with blank) user_id.
+        assert!(!filter_invalid_memory(&base("", Some("agent"), None)));
+        assert!(!filter_invalid_memory(&base("n", None, None)));
+        assert!(!filter_invalid_memory(&base("n", Some("banana"), None)));
+        assert!(!filter_invalid_memory(&base("n", Some("user"), None)));
+        assert!(!filter_invalid_memory(&base("n", Some("user"), Some("  "))));
+
+        // End-to-end: an agent-dir user-scope entry without user_id cannot
+        // be attributed to any user layer → dropped everywhere instead of
+        // surfacing as an ownerless user entry.
+        let root = layered_layout("invalid");
+        write_file(&root, "orphan-user", "scope: user");
+        assert!(!scan_agent_layer(&root).iter().any(|f| f.name == "orphan-user"));
+        assert!(scan_user_layer(&root, ALICE).is_empty());
+        assert!(scan_all_user_layers(&root).is_empty());
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 
