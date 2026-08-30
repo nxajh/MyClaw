@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,24 @@ _spec.loader.exec_module(M)
 
 FQID = M.OPERATOR_FQID
 USER_DIR_REL = Path("users") / M.OPERATOR_UUID / "memory"
+
+
+def make_runner(mode):
+    """Fake command runner for the daemon probe (never shells out).
+    Modes: inactive | systemctl_active | pgrep_active | self_pgrep."""
+    def runner(cmd):
+        if cmd[:1] == ["systemctl"]:
+            if mode == "systemctl_active":
+                return 0, "active\n"
+            return 3, "inactive\n"  # systemctl present but daemon not active
+        if cmd[:1] == ["pgrep"]:
+            if mode == "pgrep_active":
+                return 0, "4242\n"
+            if mode == "self_pgrep":
+                return 0, f"{os.getpid()}\n"  # only ourselves match
+            return 1, ""
+        raise AssertionError(f"unexpected probe command: {cmd}")
+    return runner
 
 
 def md(name, scope="user", extra_fm=None, body="", quoted_scope=False):
@@ -92,10 +111,11 @@ class MigrateMemorySplitTest(unittest.TestCase):
         (self.base / "memory-migration" / "migration-final.tsv").write_text(
             "".join("\t".join(r) + "\n" for r in rows))
 
-    def run_script(self, *extra):
+    def run_script(self, *extra, runner="inactive"):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = M.main(["--base", str(self.base), *extra])
+            rc = M.main(["--base", str(self.base), *extra],
+                        runner=None if runner is None else make_runner(runner))
         return rc, out.getvalue(), err.getvalue()
 
     def snapshot(self):
@@ -391,6 +411,58 @@ class MigrateMemorySplitTest(unittest.TestCase):
         rc, out, err = self.run_script()
         self.assertEqual(rc, 1)
         self.assertIn("foreign baseline", err)
+
+    # ------------------------------------------------------- daemon runtime exclusion
+
+    def test_daemon_active_aborts_before_any_mutation(self):
+        self.write_pool()
+        rc, out, err = self.run_script(runner="systemctl_active")
+        self.assertEqual(rc, 1)
+        self.assertIn("daemon appears ACTIVE (systemctl --user is-active myclaw)", err)
+        self.assertIn(M.DAEMON_STOP_HINT, err)
+        # nothing mutated: no backup, no user layer, flat pool untouched
+        self.assertFalse((self.base / "backups").exists())
+        self.assertFalse((self.base / USER_DIR_REL).exists())
+        self.assertTrue((self.base / "memory" / "beta_user.md").exists())
+
+    def test_daemon_detected_via_pgrep_fallback(self):
+        self.write_pool()
+        rc, out, err = self.run_script(runner="pgrep_active")  # systemctl inactive, pgrep hits
+        self.assertEqual(rc, 1)
+        self.assertIn("daemon appears ACTIVE (pgrep -f myclaw)", err)
+
+    def test_pgrep_matching_only_ourselves_is_not_the_daemon(self):
+        self.write_pool()
+        rc, out, err = self.run_script(runner="self_pgrep")
+        self.assertEqual(rc, 0, out + err)  # our own pid must not count
+
+    def test_force_overrides_daemon_guard_with_warning(self):
+        self.write_pool()
+        rc, out, err = self.run_script("--force", runner="systemctl_active")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("WARNING: --force with daemon ACTIVE", out)
+        self.assertIn("migration complete", out)
+
+    def test_rollback_aborts_when_daemon_active(self):
+        self.write_pool()
+        rc, _, _ = self.run_script()
+        self.assertEqual(rc, 0)
+        rc, out, err = self.run_script("--rollback", runner="systemctl_active")
+        self.assertEqual(rc, 1)
+        self.assertIn("daemon appears ACTIVE", err)
+        self.assertTrue((self.base / "backups" / M.BACKUP_DIRNAME).exists())  # untouched
+
+    def test_dry_run_exempt_from_daemon_guard(self):
+        self.write_pool()
+        rc, out, err = self.run_script("--dry-run", runner="systemctl_active")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("DRY RUN", out)
+
+    def test_migration_done_prints_restart_hint(self):
+        self.write_pool()
+        rc, out, err = self.run_script()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(f"restart the daemon when ready: {M.DAEMON_START_HINT}", out)
 
     def test_pending_files_untouched(self):
         self.write_pool()

@@ -41,6 +41,14 @@ if a backup directory already exists with a missing/corrupt manifest.
 never created or consumed by this script.
 
 {base} is daemon data, not a git repo — plain filesystem operations only.
+
+Runtime exclusion (operational contract): mutating runs (forward migration
+without --dry-run, and --rollback) refuse to start while the myclaw daemon
+appears to be running. Probe order: `systemctl --user is-active myclaw`
+first, `pgrep -f myclaw` as fallback (own pid excluded); active -> abort with
+the stop command (`systemctl --user stop myclaw`). --force overrides with an
+explicit risk warning. --dry-run is read-only and exempt. On success the
+script prints the restart hint (`systemctl --user start myclaw`).
 """
 import argparse
 import hashlib
@@ -48,11 +56,16 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from datetime import date
 
 OPERATOR_UUID = "01a0151d-997f-7980-9ad1-cd9caf893d87"
 OPERATOR_FQID = "myclaw/u/01a0151d-997f-7980-9ad1-cd9caf893d87"
+
+DAEMON_NAME = "myclaw"
+DAEMON_STOP_HINT = "systemctl --user stop myclaw"
+DAEMON_START_HINT = "systemctl --user start myclaw"
 
 BACKUP_DIRNAME = "memory-split-pre-migration"
 MANIFEST_NAME = "manifest.json"
@@ -107,6 +120,57 @@ def sha256_file(path):
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# daemon runtime exclusion (operational contract)
+# --------------------------------------------------------------------------- #
+
+def default_command_runner(cmd):
+    """Run cmd, return (returncode, stdout). Missing binary -> (127, '')."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        return 127, ""
+    except subprocess.TimeoutExpired:
+        return 124, ""
+    return p.returncode, p.stdout or ""
+
+
+def daemon_active(runner=default_command_runner):
+    """Is the myclaw daemon running? Prefer `systemctl --user is-active myclaw`
+    (exit 0 == active); on any other systemctl outcome (inactive / failed /
+    no user systemd / binary missing) fall back to `pgrep -f myclaw`.
+    Returns (active, how) — `how` names the probe that decided, for the abort
+    message. Our own pid is never counted (the script path may contain
+    'myclaw', and pgrep matches full command lines)."""
+    rc, _ = runner(["systemctl", "--user", "is-active", DAEMON_NAME])
+    if rc == 0:
+        return True, "systemctl --user is-active myclaw"
+    rc, out = runner(["pgrep", "-f", DAEMON_NAME])
+    if rc == 0:
+        pids = {ln.strip() for ln in out.splitlines() if ln.strip().isdigit()}
+        pids.discard(str(os.getpid()))
+        if pids:
+            return True, "pgrep -f myclaw"
+    return False, None
+
+
+def guard_daemon_stopped(runner, force, dry_run=False):
+    """Mutating runs require a stopped daemon. --dry-run is read-only and
+    exempt; --force overrides with an explicit risk warning."""
+    if dry_run:
+        return
+    active, how = daemon_active(runner)
+    if not active:
+        return
+    if force:
+        print(f"WARNING: --force with daemon ACTIVE ({how}) — migrating a live "
+              f"memory pool risks watcher races and lost writes. Proceeding anyway.")
+        return
+    fail(f"daemon appears ACTIVE ({how}) — the memory pool must not be mutated "
+         f"under a running daemon. Stop it first: {DAEMON_STOP_HINT} "
+         f"(or rerun with --force to accept the risk)")
 
 
 def line_ending(line):
@@ -627,7 +691,7 @@ def plan_and_execute(final_by_name, agent_dir, user_dir, backup_dir, dry_run):
     return counts, dead_list, rewrite_list
 
 
-def main(argv=None):
+def main(argv=None, runner=None):
     parser = argparse.ArgumentParser(
         description="Migrate the flat memory pool into agent/user layers per the P4 TSV")
     parser.add_argument("--base", default="~/.myclaw", help="myclaw base dir (default ~/.myclaw)")
@@ -635,6 +699,8 @@ def main(argv=None):
                         help="adjudication TSV (default {base}/memory-migration/migration-final.tsv)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan, touch nothing")
     parser.add_argument("--rollback", action="store_true", help="restore the flat pool from the backup")
+    parser.add_argument("--force", action="store_true",
+                        help="proceed even if the myclaw daemon appears to be running (risky)")
     args = parser.parse_args(argv)
 
     base = os.path.expanduser(args.base)
@@ -646,6 +712,7 @@ def main(argv=None):
 
     if args.rollback:
         try:
+            guard_daemon_stopped(runner, args.force)
             return do_rollback(agent_dir, user_dir, backup_dir)
         except MigrationError as e:
             print(f"ABORT: {e}", file=sys.stderr)
@@ -705,6 +772,9 @@ def main(argv=None):
                 print(f"  would {t:11s} {name}: {detail}")
             return 0
 
+        # mutating run from here on: refuse to race a live daemon
+        guard_daemon_stopped(runner, args.force, dry_run=args.dry_run)
+
         # -- step 1: backup + manifest -----------------------------------------
         if os.path.exists(backup_dir):
             fail(f"backup dir already exists: {backup_dir} — run --rollback or remove it first")
@@ -747,6 +817,7 @@ def main(argv=None):
             print(f"note: {len(foreign)} pre-existing files in user layer were not in the TSV "
                   f"and were left untouched: {sorted(foreign)}")
         print("migration complete: all invariants pass.")
+        print(f"restart the daemon when ready: {DAEMON_START_HINT}")
         return 0
     except MigrationError as e:
         print(f"ABORT: {e}", file=sys.stderr)
