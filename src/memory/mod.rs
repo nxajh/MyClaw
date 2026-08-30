@@ -557,11 +557,22 @@ fn file_layer(f: &MemoryFile) -> &'static str {
     }
 }
 
-/// Build a reverse-link (backlink) index: for each entity name, which
-/// other entities link to it. Layer rules (RFC #101 §6.3):
+/// Layer-qualified entity name (`agent:x` / `user:x`) — the canonical key
+/// form for cross-layer reference: the backlink index is keyed by it, and
+/// backlink values use it so a same-named entry in the other layer is never
+/// confused with this one.
+pub fn layer_qualified_name(f: &MemoryFile) -> String {
+    format!("{}:{}", file_layer(f), f.name)
+}
+
+/// Build a reverse-link (backlink) index: for each layer-qualified entity
+/// name (`agent:x` / `user:x`), which other entities link to it (values are
+/// layer-qualified too). Layer rules (RFC #101 §6.3):
 /// - `agent:x` / `user:x` targets match the entry `x` in that layer;
 /// - a bare target only matches a same-layer entry — pointing at another
 ///   layer's same-named entry does NOT count (cross-layer must be explicit).
+/// Same-named entries in different layers never aggregate: their keys
+/// (`agent:foo` vs `user:foo`) are distinct.
 pub fn build_backlinks(files: &[MemoryFile]) -> HashMap<String, Vec<String>> {
     let mut backlinks: HashMap<String, Vec<String>> = HashMap::new();
     for f in files {
@@ -577,9 +588,9 @@ pub fn build_backlinks(files: &[MemoryFile]) -> HashMap<String, Vec<String>> {
                 .any(|g| g.name == target_name && file_layer(g) == target_layer);
             if hit {
                 backlinks
-                    .entry(target_name.to_string())
+                    .entry(format!("{}:{}", target_layer, target_name))
                     .or_default()
-                    .push(f.name.clone());
+                    .push(layer_qualified_name(f));
             }
         }
     }
@@ -954,12 +965,18 @@ mod tests {
         ];
 
         let backlinks = build_backlinks(&files);
-        assert_eq!(backlinks.get("beta"), Some(&vec!["alpha".to_string()]));
+        // Keys and values are layer-qualified (scope None → agent layer).
         assert_eq!(
-            backlinks.get("gamma"),
-            Some(&vec!["alpha".to_string(), "beta".to_string()])
+            backlinks.get("agent:beta"),
+            Some(&vec!["agent:alpha".to_string()])
         );
-        assert!(backlinks.get("alpha").is_none());
+        assert_eq!(
+            backlinks.get("agent:gamma"),
+            Some(&vec!["agent:alpha".to_string(), "agent:beta".to_string()])
+        );
+        assert!(backlinks.get("agent:alpha").is_none());
+        // Bare-name keys no longer exist.
+        assert!(backlinks.get("beta").is_none());
     }
 
     #[test]
@@ -1322,9 +1339,56 @@ mod tests {
         // Bare "x" from u → same layer → hits user x. agent:x from u →
         // explicit → hits agent x? No agent x exists → no hit.
         assert_eq!(
-            backlinks.get("x"),
-            Some(&vec!["a".to_string(), "u".to_string()])
+            backlinks.get("user:x"),
+            Some(&vec!["agent:a".to_string(), "user:u".to_string()])
         );
+        assert!(backlinks.get("x").is_none());
         let _ = fs::remove_dir_all(std::env::temp_dir().join("myclaw_test_layered_dir"));
+    }
+
+    #[test]
+    fn backlinks_same_name_across_layers_do_not_aggregate() {
+        // Regression (PR #211): `agent:foo` and `user:foo` are distinct
+        // entities — their backlink lists must stay separate under
+        // layer-qualified keys, never merged under a bare name.
+        let mf = |name: &str, scope: Option<&str>, targets: &[&str]| MemoryFile {
+            name: name.into(),
+            scope: scope.map(|s| s.to_string()),
+            user_id: None,
+            mem_type: "entity".into(),
+            inject: "search".into(),
+            description: String::new(),
+            tags: vec![],
+            created_at: String::new(),
+            updated_at: None,
+            links: targets
+                .iter()
+                .map(|t| LinkRef {
+                    target: t.to_string(),
+                    label: "rel".into(),
+                })
+                .collect(),
+            content: String::new(),
+            path: std::path::PathBuf::new(),
+        };
+        let files = vec![
+            mf("a", Some("agent"), &["foo", "user:foo"]),
+            mf("u", Some("user"), &["foo", "agent:foo"]),
+            mf("foo", Some("agent"), &[]),
+            mf("foo", Some("user"), &[]),
+        ];
+        let backlinks = build_backlinks(&files);
+        // Bare "foo" from a → same-layer agent:foo. Explicit user:foo from
+        // a → user:foo. Symmetrically for u.
+        assert_eq!(
+            backlinks.get("agent:foo"),
+            Some(&vec!["agent:a".to_string(), "user:u".to_string()])
+        );
+        assert_eq!(
+            backlinks.get("user:foo"),
+            Some(&vec!["agent:a".to_string(), "user:u".to_string()])
+        );
+        // No bare-name key aggregates the two layers.
+        assert!(!backlinks.contains_key("foo"));
     }
 }

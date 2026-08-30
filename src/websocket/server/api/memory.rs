@@ -121,7 +121,10 @@ pub(super) fn list(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>) -
                 rows.iter().map(|(_, f)| f.clone()).collect();
             let backlinks = crate::memory::build_backlinks(&all_files);
             let result: Vec<serde_json::Value> = rows.iter().map(|(scope_name, f)| {
-                let bl_count = backlinks.get(&f.name).map(|b| b.len()).unwrap_or(0);
+                let bl_count = backlinks
+                    .get(&crate::memory::layer_qualified_name(f))
+                    .map(|b| b.len())
+                    .unwrap_or(0);
                 serde_json::json!({
                     "name": f.path.file_name().and_then(|n| n.to_str()).unwrap_or(&f.name).to_string(),
                     "size": std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0),

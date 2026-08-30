@@ -117,17 +117,16 @@ impl Tool for MemoryListTool {
             Ok(files) => files,
             Err(e) => return Ok(scan_error_result("memory_list", e)),
         };
-        let entries: Vec<crate::memory::IndexEntry> = files
+        let filtered: Vec<&crate::memory::MemoryFile> = files
             .iter()
             .filter(|mf| {
                 type_filter
                     .as_ref()
                     .is_none_or(|wanted| mf.mem_type.to_lowercase() == *wanted)
             })
-            .map(crate::memory::IndexEntry::from)
             .collect();
 
-        if entries.is_empty() {
+        if filtered.is_empty() {
             return Ok(ToolResult {
                 success: true,
                 output: json!({
@@ -142,19 +141,22 @@ impl Tool for MemoryListTool {
         }
 
         let backlinks = build_backlinks(&files);
-        let json_entries: Vec<serde_json::Value> = entries
+        let json_entries: Vec<serde_json::Value> = filtered
             .iter()
-            .map(|e| {
-                let backlinks_count = backlinks.get(&e.name).map(|b| b.len()).unwrap_or(0);
+            .map(|mf| {
+                // Layer-qualified key: same-named entries in different
+                // layers keep separate backlink lists.
+                let bl_key = crate::memory::layer_qualified_name(mf);
+                let backlinks_count = backlinks.get(&bl_key).map(|b| b.len()).unwrap_or(0);
                 let mut obj = json!({
-                    "type": &e.mem_type,
-                    "name": &e.name,
-                    "description": &e.description,
-                    "link_count": e.link_count,
+                    "type": &mf.mem_type,
+                    "name": &mf.name,
+                    "description": &mf.description,
+                    "link_count": mf.links.len(),
                     "backlink_count": backlinks_count,
                 });
-                if !e.tags.is_empty() {
-                    obj["tags"] = json!(e.tags);
+                if !mf.tags.is_empty() {
+                    obj["tags"] = json!(mf.tags);
                 }
                 obj
             })
@@ -164,7 +166,7 @@ impl Tool for MemoryListTool {
             success: true,
             output: json!({
                 "success": true,
-                "count": entries.len(),
+                "count": json_entries.len(),
                 "entries": json_entries,
                 "hint": "Use memory_view(name) to read full content, or memory_search(query) to search."
             }).to_string(),
@@ -240,7 +242,10 @@ impl Tool for MemoryViewTool {
         match file {
             Some(mf) => {
                 let backlinks = build_backlinks(&files);
-                let file_backlinks = backlinks.get(&mf.name).cloned().unwrap_or_default();
+                let file_backlinks = backlinks
+                    .get(&crate::memory::layer_qualified_name(mf))
+                    .cloned()
+                    .unwrap_or_default();
                 let outgoing = link_values(&mf.links);
 
                 let mut output = json!({

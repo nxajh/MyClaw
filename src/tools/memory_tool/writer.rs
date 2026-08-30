@@ -145,7 +145,10 @@ impl Tool for MemorySearchTool {
                 let snippet = best_snippet(mf, &query, &tokens);
 
                 let outgoing = link_values(&mf.links);
-                let file_backlinks = backlinks.get(&mf.name).cloned().unwrap_or_default();
+                let file_backlinks = backlinks
+                    .get(&crate::memory::layer_qualified_name(mf))
+                    .cloned()
+                    .unwrap_or_default();
                 let mut related = Vec::new();
                 if include_related {
                     for link in &mf.links {
