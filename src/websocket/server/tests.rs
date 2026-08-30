@@ -37,9 +37,9 @@ fn write_user_mem(path: &std::path::Path, name: &str, body: &str, uid: &str) {
 fn test_workspace() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path();
-    // P1-B2: single flat memory dir; ownership via frontmatter.
-    // (A name is unique in the flat dir — the old two-layer
-    // same-name-in-both-scopes case no longer exists.)
+    // P4: pooled fixtures in the agent dir (pre-migration layout) — the
+    // frontmatter fallback keeps scope=user entries readable as user-layer
+    // until the stage-3 migration moves them into users/{uuid}/memory.
     let mem = ws.join("memory");
     write_mem(&mem, "agent_only", "agent body");
     write_mem(&mem, "agent_second", "second agent body");
@@ -182,11 +182,15 @@ fn memory_write_user_scope() {
         tmp.path(),
     );
     assert_eq!(resp["type"], "api_response");
-    let user_path = tmp.path().join("memory").join("fresh_user.md");
+    // P4: user-scope writes land in {base}/users/{dir}/memory, not the
+    // agent-layer root.
+    let user_path = crate::memory::user_memory_dir(&tmp.path().join("memory"), USER_UID)
+        .join("fresh_user.md");
     let written = std::fs::read_to_string(&user_path).unwrap();
     assert!(written.contains("scope: user"));
     assert!(written.contains(&format!("user_id: {}", USER_UID)));
     assert!(written.contains("new user body"));
+    assert!(!tmp.path().join("memory").join("fresh_user.md").exists());
     // Visible to this user via scope=user listing…
     let resp = api(
         "memory.list",

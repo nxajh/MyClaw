@@ -4,13 +4,15 @@
 //! body, unchanged; only the wrapper signature was added.)
 //!
 //! The `memory_scope_dir` / `memory_file_in_scope` / `memory_user_id`
-//! helpers moved alongside, unchanged.
+//! helpers moved alongside. P4 (RFC #101 §6): directory layout is layered
+//! ({base}/memory agent, {base}/users/{uuid}/memory user), mirroring the
+//! memory-tool reader implementation.
 
 use super::ApiContext;
 
 /// Resolve the memory directory for a scope.
-/// P1-B2: single flat memory root for both scopes — ownership is a
-/// frontmatter attribute (`scope` + `user_id`), not a path segment.
+/// P4: agent scope → the memory root itself; user scope →
+/// `{base}/users/{bare uuid}/memory` (mirrors memory_tool::reader).
 /// Falls back to the legacy `{workspace}/memory` when the memory root
 /// handle was not installed (older embedders / tests).
 pub(super) fn memory_scope_dir(
@@ -19,16 +21,21 @@ pub(super) fn memory_scope_dir(
     uid: &str,
     memory_root: Option<&std::path::Path>,
 ) -> std::path::PathBuf {
-    let _ = (scope, uid);
-    match memory_root {
+    let base = match memory_root {
         Some(kd) => kd.to_path_buf(),
         None => workspace.join(crate::memory::MEMORY_DIR_NAME),
+    };
+    if scope == "agent" {
+        base
+    } else {
+        crate::memory::user_memory_dir(&base, uid)
     }
 }
 
-/// Whether a memory file belongs to the given scope (frontmatter-based).
-/// Missing `scope` is treated as the agent layer; `scope=user` requires an
-/// exact `user_id` match.
+/// Whether a memory file belongs to the given scope. The layered scan
+/// helpers normalize `scope`/`user_id` (incl. the agent-dir frontmatter
+/// fallback for pre-migration single-pool entries), so membership is
+/// decided from the frontmatter fields alone.
 pub(super) fn memory_file_in_scope(f: &crate::memory::MemoryFile, scope: &str, uid: &str) -> bool {
     let f_scope = f.scope.as_deref().unwrap_or("agent");
     if scope == "agent" {
@@ -36,6 +43,16 @@ pub(super) fn memory_file_in_scope(f: &crate::memory::MemoryFile, scope: &str, u
     } else {
         f_scope == "user" && f.user_id.as_deref() == Some(uid)
     }
+}
+
+/// Both layers for scope-agnostic lookups: agent layer + this user's user
+/// layer (which itself includes pre-migration fallback entries still in
+/// the agent dir). User layer first — same-name shadowing is user>agent
+/// (RFC §6.2), matching what the memory tools display.
+fn scan_both_layers(base: &std::path::Path, uid: &str) -> Vec<crate::memory::MemoryFile> {
+    let mut candidates = crate::memory::scan_user_layer(base, uid);
+    candidates.extend(crate::memory::scan_agent_layer(base));
+    candidates
 }
 
 /// Resolve the request's user_id via the shared resolver (routing_key → uid).
@@ -53,27 +70,28 @@ pub(super) fn list(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>) -
         Some(dir) => {
             let dir = dir.as_path();
             let uid = memory_user_id(ctx);
-            // Collect (scope, file) rows; agent layer first so a
-            // same-named agent entry wins dedup (matches scan_merged).
+            // Collect (scope, file) rows; user layer first so a same-named
+            // user entry wins dedup (user>agent shadowing, matches
+            // scan_merged_for_user).
             let mut rows: Vec<(&str, crate::memory::MemoryFile)> = Vec::new();
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            if scope == "all" || scope == "agent" {
-                for f in crate::memory::scan_memory_files(&memory_scope_dir(dir, "agent", &uid, Some(dir)))
-                    .into_iter()
-                    .filter(|f| memory_file_in_scope(f, "agent", &uid))
-                {
-                    if seen.insert(f.name.clone()) {
-                        rows.push(("agent", f));
-                    }
-                }
-            }
             if scope == "all" || scope == "user" {
-                for f in crate::memory::scan_memory_files(&memory_scope_dir(dir, "user", &uid, Some(dir)))
+                for f in crate::memory::scan_user_layer(dir, &uid)
                     .into_iter()
                     .filter(|f| memory_file_in_scope(f, "user", &uid))
                 {
                     if seen.insert(f.name.clone()) {
                         rows.push(("user", f));
+                    }
+                }
+            }
+            if scope == "all" || scope == "agent" {
+                for f in crate::memory::scan_agent_layer(dir)
+                    .into_iter()
+                    .filter(|f| memory_file_in_scope(f, "agent", &uid))
+                {
+                    if seen.insert(f.name.clone()) {
+                        rows.push(("agent", f));
                     }
                 }
             }
@@ -203,14 +221,9 @@ pub(super) fn delete(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>)
     match dir_opt {
         Some(dir) => {
             let uid = memory_user_id(ctx);
-            // P1-B2: single flat dir — scope matching is done on
-            // parsed frontmatter, not by path.
-            let candidates = crate::memory::scan_memory_files(&memory_scope_dir(
-                &dir,
-                "all",
-                &uid,
-                Some(&dir),
-            ));
+            // P4: layered dirs — candidates span both layers, scope
+            // matching on the normalized frontmatter.
+            let candidates = scan_both_layers(&dir, &uid);
             let stem = filename.strip_suffix(".md").unwrap_or(filename);
             let matches_scope = |f: &crate::memory::MemoryFile, scope_name: &str| {
                 f.name == stem && memory_file_in_scope(f, scope_name, &uid)
@@ -236,10 +249,11 @@ pub(super) fn delete(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>)
                             "file not found in agent scope",
                         ))
                     }),
+                // Default: user layer first (user>agent shadowing).
                 _ => candidates
                     .iter()
-                    .find(|f| matches_scope(f, "agent"))
-                    .or_else(|| candidates.iter().find(|f| matches_scope(f, "user")))
+                    .find(|f| matches_scope(f, "user"))
+                    .or_else(|| candidates.iter().find(|f| matches_scope(f, "agent")))
                     .map(|f| std::fs::remove_file(&f.path))
                     .unwrap_or_else(|| {
                         Err(std::io::Error::new(
@@ -285,13 +299,9 @@ pub(super) fn read(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>) -
         Some(dir) => {
             let uid = memory_user_id(ctx);
             let scope = params["scope"].as_str();
-            // P1-B2: single flat dir — scope routing via frontmatter.
-            let candidates = crate::memory::scan_memory_files(&memory_scope_dir(
-                &dir,
-                "all",
-                &uid,
-                Some(&dir),
-            ));
+            // P4: layered dirs — candidates span both layers, scope
+            // routing via the normalized frontmatter.
+            let candidates = scan_both_layers(&dir, &uid);
             let stem = filename.strip_suffix(".md").unwrap_or(filename);
             let matches_scope = |f: &crate::memory::MemoryFile, scope_name: &str| {
                 f.name == stem && memory_file_in_scope(f, scope_name, &uid)
@@ -305,12 +315,13 @@ pub(super) fn read(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>) -
                     .iter()
                     .find(|f| matches_scope(f, "agent"))
                     .map(|f| ("agent".to_string(), std::fs::read_to_string(&f.path).ok())),
-                // Backwards-compatible default: agent layer first,
-                // fall back to the per-user layer.
+                // Default: user layer first (user>agent shadowing —
+                // matches what the memory tools display), agent fallback.
+                // Default: user layer first (user>agent shadowing).
                 _ => candidates
                     .iter()
-                    .find(|f| matches_scope(f, "agent"))
-                    .or_else(|| candidates.iter().find(|f| matches_scope(f, "user")))
+                    .find(|f| matches_scope(f, "user"))
+                    .or_else(|| candidates.iter().find(|f| matches_scope(f, "agent")))
                     .map(|f| {
                         let s = if memory_file_in_scope(f, "agent", &uid) {
                             "agent"
@@ -339,5 +350,72 @@ pub(super) fn read(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>) -
             "id": id,
             "error": "workspace directory not configured"
         }).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const UID: &str = "myclaw/u/018f6b2a-4c3d-7b2e-9f01-3a2b4c5d6e7f";
+
+    fn write_file(dir: &std::path::Path, name: &str, fm: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{}.md", name)),
+            format!(
+                "---\nname: {}\n{}\ntype: project\ninject: search\ncreated_at: 2026-08-30\n---\n\nbody",
+                name, fm
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn memory_scope_dir_layers_by_scope() {
+        let ws = std::path::Path::new("/tmp/myclaw_ws_test_scope_dir");
+        let memory_root = ws.join("memory");
+        assert_eq!(
+            memory_scope_dir(ws, "agent", UID, Some(&memory_root)),
+            memory_root
+        );
+        assert_eq!(
+            memory_scope_dir(ws, "user", UID, Some(&memory_root)),
+            ws.join("users").join("018f6b2a-4c3d-7b2e-9f01-3a2b4c5d6e7f").join("memory")
+        );
+        // Legacy fallback without an installed memory root handle.
+        assert_eq!(
+            memory_scope_dir(ws, "user", UID, None),
+            ws.join("users").join("018f6b2a-4c3d-7b2e-9f01-3a2b4c5d6e7f").join("memory")
+        );
+    }
+
+    #[test]
+    fn list_and_scope_filtering_across_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let memory_root = base.join("memory");
+        std::fs::create_dir_all(&memory_root).unwrap();
+
+        // Agent-layer entry + a pooled legacy user entry still in the agent
+        // dir (transition) + a real user-layer entry.
+        write_file(&memory_root, "shared-rule", "scope: agent");
+        write_file(&memory_root, "pooled-user", &format!("scope: user\nuser_id: {}", UID));
+        let user_dir = crate::memory::user_memory_dir(&memory_root, UID);
+        write_file(&user_dir, "user-note", &format!("scope: user\nuser_id: {}", UID));
+
+        let candidates = scan_both_layers(&memory_root, UID);
+        let in_scope = |scope: &str| {
+            candidates
+                .iter()
+                .filter(|f| memory_file_in_scope(f, scope, UID))
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(in_scope("agent"), vec!["shared-rule"]);
+        let user_names = in_scope("user");
+        assert!(user_names.contains(&"user-note"));
+        assert!(user_names.contains(&"pooled-user"), "frontmatter fallback must keep pooled user entries user-layer");
+        assert_eq!(user_names.len(), 2);
     }
 }
