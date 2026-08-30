@@ -469,7 +469,7 @@ def plan_and_execute(final_by_name, agent_dir, user_dir, backup_dir, dry_run):
         heading = f"## 历史：旧版 workaround（{date.today().isoformat()} 迁移并入）"
         target_text = content[MERGE_TARGET]
         merged = target_text if target_text.endswith("\n") else target_text + "\n"
-        merged += f"\n{heading}\n\n{body.strip('\n')}\n"
+        merged += "\n" + heading + "\n\n" + body.strip("\n") + "\n"
         content[MERGE_TARGET] = merged
         rewrite_list.append((MERGE_SOURCE, "merge", f"body appended to {MERGE_TARGET}.md"))
         if not dry_run:
