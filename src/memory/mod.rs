@@ -130,7 +130,7 @@ pub fn user_memory_dir(memory_root: &Path, user_id: &str) -> std::path::PathBuf 
 fn normalize_ownership(f: &mut MemoryFile, from_agent_dir: bool, dir_owner: Option<&str>) {
     if !from_agent_dir {
         f.scope = Some("user".to_string());
-        if f.user_id.as_deref().map_or(true, |u| u.is_empty()) {
+        if f.user_id.as_deref().is_none_or(|u| u.is_empty()) {
             f.user_id = Some(dir_owner.unwrap_or("unknown").to_string());
         }
     } else if f.scope.as_deref() != Some("user") {
