@@ -9,8 +9,12 @@ sole adjudication source — no counts are baked in anywhere.
 
 Forward run:
   0. Precheck: TSV name set must equal the {base}/memory/*.md disk inventory
-     exactly, and no TSV name may already exist under users/{uuid}/memory
-     (guards against stacking a second run on top of a finished one).
+     exactly, and no TSV name may already exist under users/{uuid}/memory.
+     Single-operator constraint: every `final=user` entry that declares a
+     frontmatter user_id must declare the --operator-fqid (entries with no
+     user_id are allowed — operator-signed ex-agent entries). A mixed-owner
+     pool aborts here, before any mutation. The collision check also guards
+     against stacking a second run on top of a finished one.
   1. Backup every pool file to {base}/backups/memory-split-pre-migration/
      and write manifest.json there recording what this run owns
      (`owned`: all TSV names, stems) and what it does NOT own
@@ -386,6 +390,39 @@ def validate_deleted_adjudication(final_by_name):
     if MERGE_SOURCE in deleted and final_by_name.get(MERGE_TARGET) in (None, "deleted"):
         fail(f"merge target {MERGE_TARGET!r} missing or deleted in TSV; cannot merge "
              f"{MERGE_SOURCE!r} into it")
+
+
+def precheck_user_ownership(final_by_name, agent_dir, operator_fqid):
+    """Single-operator constraint (PR #212 review r4): every `final=user`
+    row whose flat-pool file declares a frontmatter `user_id` must declare
+    THIS operator's FQID (quotes stripped). Rows without any `user_id`
+    declaration are allowed — those are agent-layer entries the operator
+    signed into their private layer (R-group), with no prior owner to
+    violate. A pool holding another user's private entries must abort
+    before any mutation: this script migrates into ONE user directory and
+    would otherwise reattribute cross-user data."""
+    conflicts = []
+    for name in sorted(final_by_name):
+        if final_by_name[name] != "user":
+            continue
+        path = os.path.join(agent_dir, name + ".md")
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as e:
+            fail(f"precheck: cannot read {path}: {e}")
+        uid = None
+        for line in text.splitlines():
+            if line.startswith("user_id:"):
+                uid = line.split(":", 1)[1].strip().strip('"').strip("'")
+                break
+        if uid and uid != operator_fqid:
+            conflicts.append(f"{name} (declares user_id {uid!r})")
+    if conflicts:
+        fail(f"precheck: single-operator constraint violated — these final=user "
+             f"entries belong to another user and must NOT be reattributed to "
+             f"{operator_fqid!r}: {conflicts}. Migrate each owner's entries "
+             f"separately (per-owner TSV runs) or re-adjudicate them.")
 
 
 # --------------------------------------------------------------------------- #
@@ -791,7 +828,10 @@ def _build_parser():
     parser.add_argument("--rollback", action="store_true", help="restore the flat pool from the backup")
     parser.add_argument("--operator-fqid", default=DEFAULT_OPERATOR_FQID,
                         help=f"operator user FQID <ns>/u/<uuid> (default {DEFAULT_OPERATOR_FQID}); "
-                             f"its uuid segment selects the users/{{uuid}}/memory target dir")
+                             f"its uuid segment selects the users/{{uuid}}/memory target dir. "
+                             f"SINGLE-OPERATOR constraint: every final=user entry that declares a "
+                             f"frontmatter user_id must declare this FQID — mixed-owner pools abort "
+                             f"before any mutation (migrate each owner with a separate TSV run)")
     parser.add_argument("--force", action="store_true",
                         help="proceed even if the myclaw daemon appears to be running (risky)")
     return parser
@@ -881,6 +921,7 @@ def _main_impl(argv=None, runner=None):
         if missing_on_disk or not_in_tsv:
             fail(f"precheck: TSV list != disk inventory "
                  f"(missing on disk: {missing_on_disk}; not in TSV: {not_in_tsv})")
+        precheck_user_ownership(final_by_name, agent_dir, operator_fqid)
         collisions = sorted(set(final_by_name) & md_names(user_dir))
         if collisions:
             fail(f"precheck: names already present in user layer (refusing to stack runs): "

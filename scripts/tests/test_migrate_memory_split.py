@@ -579,6 +579,39 @@ class MigrateMemorySplitTest(unittest.TestCase):
         self.assertFalse((self.base / USER_DIR_REL / "ghost.md.pending").exists())
 
 
+    def test_mixed_owner_pool_aborts_before_mutation(self):
+        # r4 review: final=user entries declaring ANOTHER user's FQID must
+        # abort before any mutation (single-operator constraint).
+        self.write_pool()
+        other = "myclaw/u/018f6b2a-4c3d-7b2e-9f01-3a2b4c5d6e99"
+        (self.base / "memory" / "beta_user.md").write_text(md(
+            "beta_user", scope="user",
+            extra_fm=[f'user_id: "{other}"', "type: feedback"],
+            body="someone else's private memory\n"))
+        rc, out, err = self.run_script()
+        self.assertEqual(rc, 1)
+        self.assertIn("single-operator constraint violated", err)
+        self.assertIn("beta_user", err)
+        self.assertIn(other, err)
+        # zero mutation: no backup, nothing moved, file byte-identical
+        self.assertFalse((self.base / "backups").exists())
+        self.assertFalse((self.base / USER_DIR_REL).exists())
+        self.assertIn("someone else's private memory",
+                      (self.base / "memory" / "beta_user.md").read_text())
+
+    def test_r_group_entries_without_userid_migrate(self):
+        # No user_id declaration = operator-signed ex-agent entry (R-group):
+        # allowed, migrated into the operator layer and stamped there.
+        self.write_pool()
+        self.assertEqual(
+            (self.base / "memory" / "gamma_user.md").read_text().find("user_id"), -1,
+            "fixture precondition: gamma_user must have no user_id")
+        rc, out, err = self.run_script()
+        self.assertEqual(rc, 0, out + err)
+        moved = self.base / USER_DIR_REL / "gamma_user.md"
+        self.assertTrue(moved.exists())
+        self.assertIn(f'user_id: "{FQID}"', moved.read_text())
+
     def test_migration_lock_excludes_second_concurrent_instance(self):
         # r3 review: two migrations started concurrently -> exactly one may
         # proceed. Second acquire must fail closed with the holder's pid.
