@@ -225,14 +225,29 @@ fn memory_delete_scope_routing() {
     );
     assert_eq!(resp["type"], "api_response");
     assert!(!tmp.path().join("memory").join("user_second.md").exists());
-    // Default fallback removes the agent-layer copy.
+    // Default (unscoped) no longer falls back to the agent layer: a shared
+    // agent entry requires an explicit scope (PR #211 review r4).
     let resp = api(
         "memory.delete",
         serde_json::json!({ "name": "agent_only.md" }),
         tmp.path(),
     );
+    assert_eq!(resp["type"], "api_error");
+    assert!(
+        resp["error"].as_str().unwrap().contains("agent layer"),
+        "hint must point at the explicit scope: {:?}",
+        resp["error"]
+    );
+    assert!(tmp.path().join("memory").join("agent_only.md").exists());
+    // Explicit agent scope removes it.
+    let resp = api(
+        "memory.delete",
+        serde_json::json!({ "name": "agent_only.md", "scope": "agent" }),
+        tmp.path(),
+    );
     assert_eq!(resp["type"], "api_response");
-    assert!(!tmp.path().join("memory").join("agent_only.md").exists());        // Another user's entry is not deletable via any scope param.
+    assert!(!tmp.path().join("memory").join("agent_only.md").exists());
+    // Another user's entry is not deletable via any scope param.
     let resp = api(
         "memory.delete",
         serde_json::json!({ "name": "other_user_only.md", "scope": "user" }),
