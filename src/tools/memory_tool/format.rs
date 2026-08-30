@@ -26,16 +26,12 @@ pub(super) fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Scan memory files visible to a user: all agent-scope entries plus the
-/// user's own user-scope entries, from the single flat memory root
-/// (ownership via frontmatter, not path). Dedup by name, agent layer wins.
+/// Scan memory files visible to a user: all agent-layer entries plus the
+/// user's own user-layer entries (P4 layered storage — delegated to the
+/// shared merged-scan helper, which also keeps pre-migration single-pool
+/// entries readable). Dedup by name, user layer wins (RFC §6.2).
 pub(super) fn scan_merged(memory_root: &Path, user_id: &str) -> Vec<crate::memory::MemoryFile> {
-    let mut files: Vec<crate::memory::MemoryFile> = crate::memory::scan_memory_files(memory_root)
-        .into_iter()
-        .filter(|f| f.scope.as_deref().unwrap_or("agent") == "agent" || f.user_id.as_deref() == Some(user_id))
-        .collect();
-    files.sort_by(|a, b| (&a.mem_type, &a.name).cmp(&(&b.mem_type, &b.name)));
-    files
+    crate::memory::scan_merged_for_user(memory_root, user_id)
 }
 
 pub(super) fn atomic_write(target: &Path, content: &str) -> std::io::Result<()> {
@@ -75,7 +71,10 @@ pub(super) fn lint_memory_content(name: &str, content: &str, files: &[MemoryFile
     let links = crate::memory::extract_links_from_content(content);
     let names: std::collections::HashSet<&str> = files.iter().map(|f| f.name.as_str()).collect();
     for link in &links {
-        if link.target != name && !names.contains(link.target.as_str()) {
+        // Layer-qualified targets (agent:x / user:x) resolve to the bare
+        // name for existence checking.
+        let bare = crate::memory::strip_layer_prefix(&link.target);
+        if bare != name && !names.contains(bare) {
             warnings.push(format!(
                 "See Also link '{}' points to a missing memory.",
                 link.target

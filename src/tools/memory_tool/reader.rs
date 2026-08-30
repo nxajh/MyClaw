@@ -26,27 +26,26 @@ pub(super) fn resolve_scope(args: &serde_json::Value) -> &'static str {
 }
 
 /// Directory for a scope's memory files.
-/// P1-B2: single flat memory root for both scopes — ownership is a
-/// frontmatter attribute (`scope` + `user_id`), not a path segment.
-pub(super) fn scope_memory_dir(memory_root: &Path, _scope: &str, _user_id: &str) -> PathBuf {
-    memory_root.to_path_buf()
+/// P4 (RFC #101 §6): layered storage — `scope=="agent"` → the memory root
+/// itself; user scope → `{base}/users/{bare uuid}/memory`. Pure computation;
+/// creating the directory is the caller's job.
+pub(super) fn scope_memory_dir(memory_root: &Path, scope: &str, user_id: &str) -> PathBuf {
+    if scope == "agent" {
+        memory_root.to_path_buf()
+    } else {
+        crate::memory::user_memory_dir(memory_root, user_id)
+    }
 }
 
-/// Scan memory files from a single scope (not merged), filtered by
-/// frontmatter ownership. `scope=user` requires an exact `user_id` match;
-/// a missing `scope` field is treated as the agent layer.
+/// Scan memory files from a single scope (not merged). Layered (P4):
+/// agent scope → the agent layer; user scope → this user's user layer plus
+/// pre-migration fallback entries still in the agent dir (frontmatter wins).
 pub(super) fn scan_scope(memory_root: &Path, scope: &str, user_id: &str) -> Vec<crate::memory::MemoryFile> {
-    crate::memory::scan_memory_files(&scope_memory_dir(memory_root, scope, user_id))
-        .into_iter()
-        .filter(|f| {
-            let f_scope = f.scope.as_deref().unwrap_or("agent");
-            if scope == "agent" {
-                f_scope == "agent"
-            } else {
-                f_scope == "user" && f.user_id.as_deref() == Some(user_id)
-            }
-        })
-        .collect()
+    if scope == "agent" {
+        crate::memory::scan_agent_layer(memory_root)
+    } else {
+        crate::memory::scan_user_layer(memory_root, user_id)
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════════

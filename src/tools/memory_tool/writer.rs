@@ -333,10 +333,24 @@ impl MemoryManageTool {
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
         let scope = resolve_scope(args);
-        // P1-B2: user-scope entries carry ownership in frontmatter — without a
-        // resolvable user_id they would be unreadable after the write.
+        // P4: user-scope entries live in the owner's private layer — without
+        // a resolvable user_id they would be unreadable after the write.
         if scope == "user" && user_id.trim().is_empty() {
             return Err("User scope requires a resolvable user_id.".to_string());
+        }
+        // P4 FQID gate: the user layer directory is keyed by the bare uuid of
+        // a registered identity. Legacy routing keys (`client:default:...`,
+        // `telegram:...`) cannot address a stable per-user layer — reject the
+        // write and point at the registration flow.
+        if scope == "user"
+            && crate::ids::Fqid::parse(user_id, crate::ids::DEFAULT_NAMESPACE).is_none()
+        {
+            return Err(format!(
+                "User scope rejected: channel identity '{}' is not a registered FQID. \
+                 This channel identity must be registered first (run /link) before \
+                 writing user-scope memories.",
+                user_id
+            ));
         }
 
         let content = args["content"]
@@ -358,17 +372,39 @@ impl MemoryManageTool {
             scan_agent_pii_opt(content)?;
         }
 
-        // P1-B2: flat dir — names are unique across scopes; an add that
-        // collides with an existing name owned by another scope must be
-        // rejected instead of silently overwriting the file.
-        let all_files = crate::memory::scan_memory_files(&self.memory_root);
-        if let Some(existing) = all_files.iter().find(|f| f.name == name) {
-            let existing_scope = existing.scope.as_deref().unwrap_or("agent");
+        // P4: per-target-layer name collision. Same name in the target layer
+        // → reject (use replace). Same name only in the OTHER layer → allow,
+        // but warn about the shadowing (user layer shadows agent in merged
+        // views — never silent).
+        let agent_files = crate::memory::scan_agent_layer(&self.memory_root);
+        let user_files = crate::memory::scan_user_layer(&self.memory_root, user_id);
+        let (target_files, other_files) = if scope == "agent" {
+            (&agent_files, &user_files)
+        } else {
+            (&user_files, &agent_files)
+        };
+        if target_files.iter().any(|f| f.name == name) {
             return Err(format!(
                 "Memory '{}' already exists in the {} scope. Use 'replace' to update it.",
-                name, existing_scope
+                name, scope
             ));
         }
+        let mut shadow_warning = None;
+        if other_files.iter().any(|f| f.name == name) {
+            if scope == "user" {
+                shadow_warning = Some(format!(
+                    "name '{}' exists in the agent layer; this user-layer entry shadows it",
+                    name
+                ));
+            } else {
+                shadow_warning = Some(format!(
+                    "name '{}' exists in a user layer; this agent-layer entry is shadowed there",
+                    name
+                ));
+            }
+        }
+        // Merged view is the lint context (See Also may reference both layers).
+        let all_files = scan_merged(&self.memory_root, user_id);
 
         let mem_type = self.resolve_type(args);
         let inject = self.resolve_inject(args);
@@ -377,7 +413,10 @@ impl MemoryManageTool {
         let filename = format!("{}.md", name);
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        let warnings = lint_memory_content(name, content, &all_files);
+        let mut warnings = lint_memory_content(name, content, &all_files);
+        if let Some(w) = shadow_warning {
+            warnings.push(w);
+        }
         let frontmatter = build_frontmatter(
             name,
             &description,
@@ -435,7 +474,7 @@ impl MemoryManageTool {
         let existing = files
             .iter()
             .find(|f| f.name == name)
-            .ok_or_else(|| format!("Memory '{}' not found in the {} scope.", name, scope))?;
+            .ok_or_else(|| self.not_found_error(name, scope))?;
         let old_content = std::fs::read_to_string(&existing.path).ok();
         let old_hash = old_content.as_deref().map(short_sha256);
 
@@ -546,7 +585,7 @@ impl MemoryManageTool {
         let existing = files
             .iter()
             .find(|f| f.name == name)
-            .ok_or_else(|| format!("Memory '{}' not found in the {} scope.", name, scope))?;
+            .ok_or_else(|| self.not_found_error(name, scope))?;
         let old_hash = std::fs::read_to_string(&existing.path)
             .ok()
             .map(|content| short_sha256(&content));
@@ -576,6 +615,24 @@ impl MemoryManageTool {
     fn resolve_type(&self, args: &serde_json::Value) -> String {
         normalize_optional_filter(args["memory_type"].as_str())
             .unwrap_or_else(|| "project".to_string())
+    }
+
+    /// Layer-aware not-found error. When the default (user) scope misses but
+    /// the agent layer has the same name, say so and require an explicit
+    /// `scope='agent'` — prevents accidentally mutating the shared layer.
+    fn not_found_error(&self, name: &str, scope: &str) -> String {
+        if scope != "agent"
+            && crate::memory::scan_agent_layer(&self.memory_root)
+                .iter()
+                .any(|f| f.name == name)
+        {
+            return format!(
+                "Memory '{}' not found in the {} scope; it exists in the agent layer — \
+                 pass scope='agent' explicitly to modify it.",
+                name, scope
+            );
+        }
+        format!("Memory '{}' not found in the {} scope.", name, scope)
     }
 
     fn resolve_inject(&self, args: &serde_json::Value) -> String {
