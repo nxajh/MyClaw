@@ -160,14 +160,19 @@ pub(super) fn list(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>) -
 fn split_client_frontmatter(content: &str) -> (Vec<String>, String) {
     let trimmed = content.trim_start();
     let Some(rest) = trimmed.strip_prefix("---") else {
-        return (Vec::new(), content.trim().to_string());
+        // No frontmatter: body is the payload verbatim — no fidelity loss
+        // from server-side trimming (r6 review).
+        return (Vec::new(), content.to_string());
     };
     let rest = rest.trim_start_matches(['\r', '\n']);
     let Some(end) = rest.find("\n---") else {
-        return (Vec::new(), content.trim().to_string());
+        return (Vec::new(), content.to_string());
     };
     let fm = &rest[..end];
-    let body = rest[end + 4..].trim().to_string();
+    // Only the line breaks following the closing delimiter are delimiter
+    // syntax — everything past them is the body and must round-trip
+    // byte-for-byte (leading indentation, trailing newlines included).
+    let body = rest[end + 4..].trim_start_matches(['\r', '\n']).to_string();
     (
         fm.lines()
             .map(str::trim)
@@ -576,6 +581,49 @@ mod tests {
         assert!(resp.contains("api_response"), "{}", resp);
         assert!(!user_dir.join("foo.md").exists(), "user copy removed");
         assert!(memory_root.join("foo.md").exists(), "agent copy untouched");
+    }
+
+    #[test]
+    fn write_preserves_body_whitespace_and_handles_crlf() {
+        // r6 review: (a) body content fidelity — the server must not trim
+        // the payload body while stamping ownership; (b) CRLF frontmatter
+        // delimiters must parse the same as LF.
+        let dir = tempfile::tempdir().unwrap();
+        let memory_root = dir.path().join("memory");
+        std::fs::create_dir_all(&memory_root).unwrap();
+        let ctx = make_ctx(UID, memory_root.clone());
+
+        // (a) leading indentation and trailing newlines must survive.
+        let params = serde_json::json!({
+            "name": "fidelity.md",
+            "scope": "agent",
+            "content": "---\nname: fidelity\n---\n\n    indented code block\n\n\n",
+        });
+        let resp = write("t-fid", &params, &ctx);
+        assert!(resp.contains("api_response"), "{}", resp);
+        let disk = std::fs::read_to_string(memory_root.join("fidelity.md")).unwrap();
+        assert!(
+            disk.contains("\n\n    indented code block\n\n\n"),
+            "body whitespace must round-trip: {:?}",
+            disk
+        );
+
+        // (b) CRLF delimiters: `---\r\nfm\r\n---\r\n\r\nbody`
+        let params = serde_json::json!({
+            "name": "crlf.md",
+            "scope": "agent",
+            "content": "---\r\nname: crlf_entry\r\ntype: project\r\n---\r\n\r\ncrlf body\r\n",
+        });
+        let resp = write("t-crlf", &params, &ctx);
+        assert!(resp.contains("api_response"), "{}", resp);
+        let disk = std::fs::read_to_string(memory_root.join("crlf.md")).unwrap();
+        let files = crate::memory::scan_agent_layer(&memory_root).unwrap();
+        let f = files.iter().find(|f| f.name == "crlf_entry").expect(
+            "CRLF frontmatter must parse (name/type extracted, server scope stamped)"
+        );
+        assert_eq!(f.scope.as_deref(), Some("agent"));
+        assert!(f.user_id.is_none(), "CRLF payload must not smuggle user_id");
+        assert!(disk.contains("scope: agent"), "{:?}", disk);
     }
 
     #[test]

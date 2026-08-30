@@ -188,6 +188,24 @@ fn print_banner(
 
 /// Run the MyClaw daemon, blocking until shutdown.
 pub async fn run(config: crate::config::AppConfig) -> Result<()> {
+    // P4 migration guard (PR #212 companion): refuse to start while a
+    // memory-split migration holds its lock. The migration script checks
+    // "daemon stopped" before mutating — this is the other direction of
+    // that handshake, closing the TOCTOU window where the daemon is
+    // started after the check but during the migration's filesystem
+    // rewrites. Stale lock (crashed migration): delete the file, restart.
+    if let Some(lock) = crate::memory::migration_lock_path(&config.memory_root())
+        .filter(|p| p.exists())
+    {
+        anyhow::bail!(
+            "memory-split migration lock present at {} — a migration is in \
+             progress (or crashed leaving a stale lock). Do not start the \
+             daemon until the migration completes; if it is stale, delete \
+             the file and restart.",
+            lock.display()
+        );
+    }
+
     // Initialize global safety config from the loaded config.
     crate::config::init_safety_config(config.safety.clone());
 

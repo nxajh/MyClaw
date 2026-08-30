@@ -120,6 +120,15 @@ pub fn user_memory_dir(memory_root: &Path, user_id: &str) -> std::path::PathBuf 
         .join(MEMORY_DIR_NAME)
 }
 
+/// Path of the memory-split migration lock file — a CROSS-PROCESS CONTRACT
+/// with `scripts/migrate-memory-split.py` (`MigrationLock`), which names it
+/// `{base}/memory-split-migration.lock`. The daemon refuses to start while
+/// it exists (see `daemon::run`); the script O_EXCL-creates it for the
+/// whole mutating run. Rename on one side breaks the handshake.
+pub fn migration_lock_path(memory_root: &Path) -> Option<std::path::PathBuf> {
+    memory_root.parent().map(|base| base.join("memory-split-migration.lock"))
+}
+
 /// Reconstruct the canonical FQID (`<ns>/u/<uuid>`) for a user-layer
 /// directory name. User dirs are named after the bare uuid of a registered
 /// identity (see [`user_memory_dir`]); the canonical `user_id` carried on
@@ -1143,6 +1152,21 @@ mod tests {
         assert!(merged.iter().any(|f| f.name == "legacy-user"));
         assert!(merged.iter().any(|f| f.name == "legacy-agent"));
         let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn migration_lock_path_matches_script_contract() {
+        // {base}/memory -> {base}/memory-split-migration.lock — must match
+        // scripts/migrate-memory-split.py MigrationLock exactly.
+        let root = std::path::Path::new("/tmp/myclaw_contract_probe/memory");
+        assert_eq!(
+            migration_lock_path(root),
+            Some(std::path::PathBuf::from(
+                "/tmp/myclaw_contract_probe/memory-split-migration.lock"
+            ))
+        );
+        // Relative memory root (no parent) → None (caller treats as no lock).
+        assert_eq!(migration_lock_path(std::path::Path::new("memory")), None);
     }
 
     #[test]
