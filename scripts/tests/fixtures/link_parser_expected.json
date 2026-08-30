@@ -1,0 +1,11 @@
+{
+  "comment": "Expected output of Rust src/memory::extract_links (and its Python mirror in scripts/tests/test_migrate_memory_split.py) over the See Also section of link_parser_samples.md. `target` is the raw stem exactly as Rust LinkRef.target reports it — layer prefixes (agent:/user:) are NOT stripped. Dropped sample classes (external/anchor/mailto/bare-name/empty/outside-section) appear here only by their absence. Keep in sync with both parsers; if a parser change breaks this file, update it deliberately.",
+  "links": [
+    { "label": "Related: bare same layer", "target": "alpha_agent" },
+    { "label": "Related: cross to agent", "target": "agent:beta_user" },
+    { "label": "Related: cross to user", "target": "user:gamma_user" },
+    { "label": "Case variant suffix", "target": "Mixed_Case" },
+    { "label": "Path qualified", "target": "alpha_agent" },
+    { "label": "First of two", "target": "alpha_agent" }
+  ]
+}
