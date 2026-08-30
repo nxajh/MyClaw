@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "migrate-memory-split.py"
@@ -79,7 +80,7 @@ class MigrateMemorySplitTest(unittest.TestCase):
 
         (mem / "gamma_user.md").write_text(md(
             "gamma_user", scope="agent",
-            body="Gamma body.\n\n## See Also\n"
+            body="Gamma body with [inline dead](ghost2.md) link.\n\n## See Also\n"
                  "- [Same layer](beta_user.md)\n"
                  "- [Cross layer](alpha_agent.md)\n"
                  "- [Prefixed ok](user:beta_user.md)\n"
@@ -87,6 +88,7 @@ class MigrateMemorySplitTest(unittest.TestCase):
                  "- [Wrong cross](user:alpha_agent.md)\n"
                  "- [Dead](nonexistent_thing.md)\n"
                  "- [To deleted](placeholder_check.md)\n"
+                 "- [Dead mixed](ghost3.md) and [Live](beta_user.md)\n"
                  "- [External](https://example.com/x.md)\n"
                  "- [Bare name](beta_user)\n"))
 
@@ -176,6 +178,7 @@ class MigrateMemorySplitTest(unittest.TestCase):
         rc, out, _ = self.run_script()
         self.assertEqual(rc, 0)
         gamma = (self.base / USER_DIR_REL / "gamma_user.md").read_text()
+        today = date.today().isoformat()
 
         self.assertIn("- [Same layer](beta_user.md)", gamma)          # same layer -> bare
         self.assertIn("- [Cross layer](agent:alpha_agent.md)", gamma)  # cross layer -> prefixed
@@ -183,8 +186,16 @@ class MigrateMemorySplitTest(unittest.TestCase):
         self.assertIn("- [Wrong prefix](beta_user.md)", gamma)        # wrong prefix -> canonical bare (same layer)
         self.assertNotIn("agent:beta_user.md", gamma)
         self.assertIn("- [Wrong cross](agent:alpha_agent.md)", gamma)  # wrong prefix -> corrected layer
-        self.assertNotIn("nonexistent_thing.md", gamma)               # dead line dropped
-        self.assertNotIn("placeholder_check.md", gamma)               # link to deleted dropped
+
+        # dead links are de-linked in place: label kept, removal noted — the
+        # line itself and sibling links survive, no link syntax remains
+        self.assertIn(f"- Dead（{today} 迁移清理：目标 nonexistent_thing 已移除）", gamma)
+        self.assertIn(f"- To deleted（{today} 迁移清理：目标 placeholder_check 已移除）", gamma)
+        self.assertIn(f"- Dead mixed（{today} 迁移清理：目标 ghost3 已移除） and [Live](beta_user.md)", gamma)
+        self.assertIn(f"Gamma body with inline dead（{today} 迁移清理：目标 ghost2 已移除） link.", gamma)
+        for gone in ("[Dead](", "[To deleted](", "[Dead mixed](", "[inline dead](",
+                     "nonexistent_thing.md", "placeholder_check.md", "ghost2.md", "ghost3.md"):
+            self.assertNotIn(gone, gamma)
         self.assertIn("- [External](https://example.com/x.md)", gamma)  # external untouched
         self.assertIn("- [Bare name](beta_user)", gamma)              # non-canonical untouched
 
@@ -192,8 +203,9 @@ class MigrateMemorySplitTest(unittest.TestCase):
         alpha = (self.base / "memory" / "alpha_agent.md").read_text()
         self.assertIn("- [Beta](user:beta_user.md)", alpha)
 
-        self.assertIn("dead link removed: gamma_user.md -> nonexistent_thing.md", out)
-        self.assertIn("dead link removed: gamma_user.md -> placeholder_check.md", out)
+        self.assertIn("dead link de-linked: gamma_user.md -> nonexistent_thing.md", out)
+        self.assertIn("dead link de-linked: gamma_user.md -> placeholder_check.md", out)
+        self.assertIn("dead_links_delinked=4", out)
         # merged-in section links get the same treatment (user->user stays bare)
         target = (self.base / USER_DIR_REL / "wechat_mp_draft_period_tracking.md").read_text()
         self.assertIn("- [Beta](beta_user.md)", target)

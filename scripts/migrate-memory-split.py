@@ -25,8 +25,10 @@ Forward run:
   3. Link rewrite across all surviving files (body incl. See Also, Rust
      extract/parse_md_link semantics): same-layer bare links stay bare,
      cross-layer links get an agent:/user: prefix, wrongly-prefixed links are
-     corrected, links whose target survived nowhere get their whole line
-     dropped (reported). No target guessing, no repair.
+     corrected. Links whose target survived nowhere are de-linked in place —
+     `[Label](old.md)` becomes `Label（<date> 迁移清理：目标 old 已移除）`,
+     line and sibling links kept — so the zero-dangling invariant holds with
+     no link syntax left behind. No target guessing, no repair.
   4. Absolute Invariants (all must pass for exit 0): count conservation,
      zero dangling links, layer/scope attribution consistency, and re-run
      idempotency (a finished pool re-detects as migrated -> full no-op).
@@ -352,16 +354,26 @@ def href_for(stem, layer, src_layer):
     return f"{layer}:{stem}.md"
 
 
+def delink_text(label, target):
+    """Plain-text replacement for a dead link: the label survives, the removal
+    is noted with the migration date. No link syntax remains."""
+    return f"{label}（{date.today().isoformat()} 迁移清理：目标 {target} 已移除）"
+
+
 def rewrite_links(text, src_layer, surviving):
-    """Rewrite/drop memory links in the body (frontmatter untouched).
+    """Rewrite/de-link memory links in the body (frontmatter untouched).
     `surviving` maps name -> final layer. Returns (new_text, rewrites, dead):
-    rewrites = [(old_href, new_href)], dead = [dangling target (prefixed)]."""
+    rewrites = [(old_href, new_href)], dead = [dangling target (prefixed)].
+    Dead links (target survived nowhere) are de-linked in place —
+    `[Label](old.md)` becomes `Label（<date> 迁移清理：目标 old 已移除）` —
+    anywhere in the body (See Also or inline prose): the line and any sibling
+    links survive, and no dangling link syntax is left behind."""
     fm, opener, closer, body = split_frontmatter(text)
     if fm is None:
         fm, opener, closer, body = [], "", "", text
     out_lines, rewrites, dead = [], [], []
     for line in body.splitlines(keepends=True):
-        decisions, line_dead = [], False
+        edits = []  # (start, end, replacement) spans within this line
         for m in MD_LINK_RE.finditer(line):
             parsed = parse_md_href(m.group(2))
             if parsed is None:
@@ -369,28 +381,31 @@ def rewrite_links(text, src_layer, surviving):
             prefix, stem = parsed
             if stem not in surviving:
                 dead.append(f"{prefix}:{stem}.md" if prefix else f"{stem}.md")
-                line_dead = True
+                edits.append((m.start(), m.end(),
+                              delink_text(m.group(1), f"{prefix}:{stem}" if prefix else stem)))
                 continue
             tgt_layer = surviving[stem]
             if prefix is None:
                 # bare link: keep same-layer, qualify cross-layer
                 if tgt_layer != src_layer:
-                    decisions.append((m, f"{tgt_layer}:{stem}.md"))
+                    edits.append((m.start(2), m.end(2), f"{tgt_layer}:{stem}.md"))
             elif prefix != tgt_layer:
                 # wrong layer prefix: rewrite to the canonical form for the relation
-                decisions.append((m, href_for(stem, tgt_layer, src_layer)))
+                edits.append((m.start(2), m.end(2), href_for(stem, tgt_layer, src_layer)))
             # else: correct layer prefix (or same-layer bare) — kept as-is
-        if line_dead:
-            continue  # drop the whole link line
-        if decisions:
-            rewrites.extend((m.group(2).strip(), want) for m, want in decisions)
+        if edits:
+            href_edits = [(s, e, r) for s, e, r in edits if r.endswith(".md")]
+            # report only href rewrites; de-links are reported via `dead`
+            old_text = line
             parts, last = [], 0
-            for m, want in decisions:
-                parts.append(line[last:m.start(2)])
-                parts.append(want)
-                last = m.end(2)
+            for start, end, repl in edits:
+                parts.append(line[last:start])
+                parts.append(repl)
+                last = end
             parts.append(line[last:])
             line = "".join(parts)
+            for s, e, r in href_edits:
+                rewrites.append((old_text[s:e].strip(), r))
         out_lines.append(line)
     return opener + "".join(fm) + closer + "".join(out_lines), rewrites, dead
 
@@ -618,7 +633,7 @@ def plan_and_execute(final_by_name, agent_dir, user_dir, backup_dir, dry_run):
     surviving = {n: f for n, f in final_by_name.items() if f != "deleted"}
 
     counts = {"agent_stay": 0, "user_move": 0, "delete_plain": 0, "merge": 0,
-              "fm_normalized": 0, "links_rewritten": 0, "dead_link_lines": 0}
+              "fm_normalized": 0, "links_rewritten": 0, "dead_links_delinked": 0}
     dead_list, rewrite_list = [], []
     content = {}  # name -> post-dispatch text for survivors (drives step 3)
 
@@ -678,10 +693,10 @@ def plan_and_execute(final_by_name, agent_dir, user_dir, backup_dir, dry_run):
     # -- step 3: link rewrite over every surviving file ----------------------
     for name in sorted(surviving):
         new, rewrites, dead = rewrite_links(content[name], surviving[name], surviving)
-        content[name] = new  # always keep the post-rewrite text (drops included)
+        content[name] = new  # post-rewrite text (de-linked dead links included)
         if dead:
             dead_list.extend((name, t) for t in dead)
-            counts["dead_link_lines"] += len(dead)
+            counts["dead_links_delinked"] += len(dead)
         if rewrites:
             rewrite_list.extend((name, "link", f"{old} -> {new}") for old, new in rewrites)
             counts["links_rewritten"] += len(rewrites)
@@ -794,9 +809,9 @@ def main(argv=None, runner=None):
         print(f"step 2 dispatch: agent_stay={counts['agent_stay']} user_move={counts['user_move']} "
               f"delete_plain={counts['delete_plain']} merge={counts['merge']} "
               f"(frontmatter normalized on {counts['fm_normalized']})")
-        print(f"step 3 links: rewritten={counts['links_rewritten']} dead_link_lines_dropped={counts['dead_link_lines']}")
+        print(f"step 3 links: rewritten={counts['links_rewritten']} dead_links_delinked={counts['dead_links_delinked']}")
         for src, tgt in dead_list:
-            print(f"  dead link removed: {src}.md -> {tgt}")
+            print(f"  dead link de-linked: {src}.md -> {tgt}")
 
         # shadow pairs: same name in both layers after migration (informational)
         shadow = sorted(md_names(agent_dir) & md_names(user_dir))
