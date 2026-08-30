@@ -179,26 +179,29 @@ fn filter_invalid_memory(f: &MemoryFile) -> bool {
 /// Scan the agent layer only (the memory root dir). Pre-migration user
 /// entries still living there are excluded — they belong to the user layer.
 /// Pipeline: normalize ownership → filter invalid entries → layer select.
-pub fn scan_agent_layer(memory_root: &Path) -> Vec<MemoryFile> {
-    let mut files = scan_memory_files(memory_root);
+/// I/O errors other than NotFound propagate — an unreadable layer must not
+/// masquerade as an empty one.
+pub fn scan_agent_layer(memory_root: &Path) -> std::io::Result<Vec<MemoryFile>> {
+    let mut files = scan_memory_files(memory_root)?;
     for f in &mut files {
         normalize_ownership(f, true, None);
     }
     files.retain(|f| filter_invalid_memory(f) && f.scope.as_deref() != Some("user"));
-    files
+    Ok(files)
 }
 
 /// Scan one user's user layer: their `users/{uuid}/memory` dir plus
 /// pre-migration fallback entries still in the agent dir (frontmatter
-/// `scope: user` + exact `user_id` match).
-pub fn scan_user_layer(memory_root: &Path, user_id: &str) -> Vec<MemoryFile> {
-    let mut files = scan_memory_files(&user_memory_dir(memory_root, user_id));
+/// `scope: user` + exact `user_id` match). I/O errors other than NotFound
+/// propagate (see [`scan_agent_layer`]).
+pub fn scan_user_layer(memory_root: &Path, user_id: &str) -> std::io::Result<Vec<MemoryFile>> {
+    let mut files = scan_memory_files(&user_memory_dir(memory_root, user_id))?;
     for f in &mut files {
         normalize_ownership(f, false, Some(user_id));
     }
     files.retain(filter_invalid_memory);
     // Transition fallback: single-pool entries not yet migrated.
-    for mut f in scan_memory_files(memory_root) {
+    for mut f in scan_memory_files(memory_root)? {
         if f.scope.as_deref() == Some("user") && f.user_id.as_deref() == Some(user_id) {
             normalize_ownership(&mut f, true, None);
             if filter_invalid_memory(&f) {
@@ -206,44 +209,54 @@ pub fn scan_user_layer(memory_root: &Path, user_id: &str) -> Vec<MemoryFile> {
             }
         }
     }
-    files
+    Ok(files)
 }
 
 /// Merged view visible to one user: the whole agent layer plus their own
 /// user layer. Same-name shadowing: the user layer wins (RFC §6.2).
-pub fn scan_merged_for_user(memory_root: &Path, user_id: &str) -> Vec<MemoryFile> {
-    let user = scan_user_layer(memory_root, user_id);
-    let mut agent = scan_agent_layer(memory_root);
+pub fn scan_merged_for_user(
+    memory_root: &Path,
+    user_id: &str,
+) -> std::io::Result<Vec<MemoryFile>> {
+    let user = scan_user_layer(memory_root, user_id)?;
+    let mut agent = scan_agent_layer(memory_root)?;
     // User layer shadows same-named agent entries.
     let mut seen: std::collections::HashSet<String> =
         user.iter().map(|f| f.name.clone()).collect();
     agent.retain(|f| seen.insert(f.name.clone()));
     let mut files: Vec<MemoryFile> = user.into_iter().chain(agent).collect();
     files.sort_by(|a, b| (&a.mem_type, &a.name).cmp(&(&b.mem_type, &b.name)));
-    files
+    Ok(files)
 }
 
 /// Every user-layer entry across all user dirs, plus agent-dir fallback
 /// entries — for cross-user maintenance jobs (distill). `user_id` is
 /// normalized on every entry to the canonical FQID (reconstructed from the
-/// user dir name) so per-user grouping works.
-pub fn scan_all_user_layers(memory_root: &Path) -> Vec<MemoryFile> {
+/// user dir name) so per-user grouping works. I/O errors other than
+/// NotFound propagate (see [`scan_agent_layer`]).
+pub fn scan_all_user_layers(memory_root: &Path) -> std::io::Result<Vec<MemoryFile>> {
     let mut out = Vec::new();
-    if let Ok(rd) = fs::read_dir(users_root_of(memory_root)) {
-        for entry in rd.flatten() {
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-            let owner = dir_owner_fqid(&dir_name);
-            let mem_dir = entry.path().join(MEMORY_DIR_NAME);
-            for mut f in scan_memory_files(&mem_dir) {
-                normalize_ownership(&mut f, false, Some(&owner));
-                if filter_invalid_memory(&f) {
-                    out.push(f);
+    match fs::read_dir(users_root_of(memory_root)) {
+        Ok(rd) => {
+            for entry in rd {
+                let entry = entry?;
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                let owner = dir_owner_fqid(&dir_name);
+                let mem_dir = entry.path().join(MEMORY_DIR_NAME);
+                for mut f in scan_memory_files(&mem_dir)? {
+                    normalize_ownership(&mut f, false, Some(&owner));
+                    if filter_invalid_memory(&f) {
+                        out.push(f);
+                    }
                 }
             }
         }
+        // No users root yet = legitimately no user layers.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
     // Transition fallback: single-pool entries not yet migrated.
-    for mut f in scan_memory_files(memory_root) {
+    for mut f in scan_memory_files(memory_root)? {
         if f.scope.as_deref() == Some("user") {
             normalize_ownership(&mut f, true, None);
             if filter_invalid_memory(&f) {
@@ -251,7 +264,7 @@ pub fn scan_all_user_layers(memory_root: &Path) -> Vec<MemoryFile> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 // ── Injection helpers ──────────────────────────────────────────────────────
@@ -275,44 +288,55 @@ pub fn ensure_memory_dir(memory_root: &str) -> std::io::Result<std::path::PathBu
 // ── Scanning ───────────────────────────────────────────────────────────────
 
 /// Scan `memory/*.md` files, parse frontmatter, return valid entries.
-/// Files with missing or malformed frontmatter are silently skipped.
-pub fn scan_memory_files(memory_dir: &Path) -> Vec<MemoryFile> {
+/// A missing directory is a legitimate empty layer (`Ok(vec![])`); any other
+/// I/O error propagates so an unreadable layer can never masquerade as an
+/// empty one. Files with missing or malformed frontmatter are skipped.
+pub fn scan_memory_files(memory_dir: &Path) -> std::io::Result<Vec<MemoryFile>> {
     let entries = match fs::read_dir(memory_dir) {
         Ok(rd) => rd,
-        Err(_) => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
 
     let mut files = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry?;
         let path = entry.path();
         if path.extension() != Some(OsStr::new("md")) {
             continue;
         }
-        if let Some(mf) = parse_memory_file(&path) {
+        if let Some(mf) = parse_memory_file(&path)? {
             files.push(mf);
         }
     }
 
     // Stable sort: by type, then by name.
     files.sort_by(|a, b| (&a.mem_type, &a.name).cmp(&(&b.mem_type, &b.name)));
-    files
+    Ok(files)
 }
 
 /// Parse a single `.md` file's YAML frontmatter + content.
-/// Returns `None` if frontmatter is missing or malformed.
-fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
-    let raw = fs::read_to_string(path).ok()?;
+/// Returns `Ok(None)` if frontmatter is missing or malformed, or the file
+/// vanished mid-scan (NotFound race). Other read errors propagate.
+fn parse_memory_file(path: &Path) -> std::io::Result<Option<MemoryFile>> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
     let trimmed = raw.trim();
 
     // Frontmatter must start with "---\n"
     if !trimmed.starts_with("---") {
-        return None;
+        return Ok(None);
     }
 
     // Find closing "---"
     let rest = &trimmed[3..];
     let rest = rest.trim_start_matches(['\r', '\n']);
-    let end = rest.find("\n---")?;
+    let Some(end) = rest.find("\n---") else {
+        return Ok(None);
+    };
 
     let frontmatter_text = &rest[..end];
     let content = rest[end + 4..].trim().to_string();
@@ -358,11 +382,17 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     // Parse See Also links from body
     let links = extract_links(&content);
 
-    Some(MemoryFile {
-        name: name?,
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let Some(mem_type) = mem_type else {
+        return Ok(None);
+    };
+    Ok(Some(MemoryFile {
+        name,
         scope,
         user_id,
-        mem_type: mem_type?,
+        mem_type,
         inject: inject.unwrap_or_else(|| "search".to_string()),
         description,
         tags,
@@ -371,7 +401,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
         links,
         content,
         path: path.to_path_buf(),
-    })
+    }))
 }
 
 /// Strip surrounding YAML double quotes from a value: `"foo"` → `foo`.
@@ -702,7 +732,7 @@ mod tests {
         let path = dir.join("user_lang.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.name, "user_lang");
         assert_eq!(mf.description, "用户偏好使用中文进行所有交流");
         assert_eq!(mf.tags, vec!["user", "language", "preference"]);
@@ -724,7 +754,7 @@ mod tests {
         let path = dir.join("test.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.name, "test");
         assert_eq!(mf.description, "A short summary");
 
@@ -739,7 +769,7 @@ mod tests {
         let path = dir.join("test2.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.description, "An abstract");
 
         let _ = fs::remove_dir_all(&dir);
@@ -753,7 +783,7 @@ mod tests {
         let path = dir.join("test3.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.description, "The real desc");
 
         let _ = fs::remove_dir_all(&dir);
@@ -767,7 +797,7 @@ mod tests {
         let path = dir.join("test4.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.updated_at.as_deref(), Some("2026-07-01"));
 
         let _ = fs::remove_dir_all(&dir);
@@ -781,7 +811,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("scoped.md");
         fs::write(&path, content).unwrap();
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.scope.as_deref(), Some("user"));
         assert_eq!(mf.user_id.as_deref(), Some("myclaw/u/abc"));
         let _ = fs::remove_dir_all(&dir);
@@ -792,7 +822,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("unscoped.md");
         fs::write(&path, content).unwrap();
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert!(mf.scope.is_none());
         assert!(mf.user_id.is_none());
         let _ = fs::remove_dir_all(&dir);
@@ -806,7 +836,7 @@ mod tests {
         let path = dir.join("test.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.name, "test");
         assert_eq!(mf.description, "");
 
@@ -820,7 +850,7 @@ mod tests {
         let path = dir.join("plain.md");
         fs::write(&path, "Just some text without frontmatter").unwrap();
 
-        assert!(parse_memory_file(&path).is_none());
+        assert!(parse_memory_file(&path).unwrap().is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1052,14 +1082,14 @@ mod tests {
         write_file(&alice_dir, "dup", &format!("scope: user\nuser_id: {}", ALICE));
         write_file(&root, "agent-only", "scope: agent");
 
-        let merged = scan_merged_for_user(&root, ALICE);
+        let merged = scan_merged_for_user(&root, ALICE).unwrap();
         let dup = merged.iter().find(|f| f.name == "dup").unwrap();
         assert_eq!(dup.scope.as_deref(), Some("user"), "user layer must shadow agent");
         assert!(merged.iter().any(|f| f.name == "agent-only"));
         assert_eq!(merged.len(), 2);
 
         // Bob sees the agent entry, not alice's shadow.
-        let bob_view = scan_merged_for_user(&root, BOB);
+        let bob_view = scan_merged_for_user(&root, BOB).unwrap();
         let dup_bob = bob_view.iter().find(|f| f.name == "dup").unwrap();
         assert_eq!(dup_bob.scope.as_deref(), Some("agent"));
         let _ = fs::remove_dir_all(root.parent().unwrap());
@@ -1073,16 +1103,16 @@ mod tests {
         write_file(&root, "legacy-user", &format!("scope: user\nuser_id: {}", ALICE));
         write_file(&root, "legacy-agent", "scope: agent");
 
-        let agent_layer = scan_agent_layer(&root);
+        let agent_layer = scan_agent_layer(&root).unwrap();
         assert!(!agent_layer.iter().any(|f| f.name == "legacy-user"));
         assert!(agent_layer.iter().any(|f| f.name == "legacy-agent"));
 
-        let alice_layer = scan_user_layer(&root, ALICE);
+        let alice_layer = scan_user_layer(&root, ALICE).unwrap();
         assert!(alice_layer.iter().any(|f| f.name == "legacy-user"));
         // Not attributed to another user.
-        assert!(scan_user_layer(&root, BOB).is_empty());
+        assert!(scan_user_layer(&root, BOB).unwrap().is_empty());
 
-        let merged = scan_merged_for_user(&root, ALICE);
+        let merged = scan_merged_for_user(&root, ALICE).unwrap();
         assert!(merged.iter().any(|f| f.name == "legacy-user"));
         assert!(merged.iter().any(|f| f.name == "legacy-agent"));
         let _ = fs::remove_dir_all(root.parent().unwrap());
@@ -1097,7 +1127,7 @@ mod tests {
         // Legacy single-pool entry still in the agent dir.
         write_file(&root, "legacy-note", &format!("scope: user\nuser_id: {}", ALICE));
 
-        let all = scan_all_user_layers(&root);
+        let all = scan_all_user_layers(&root).unwrap();
         let names: Vec<&str> = all.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"alice-note"));
         assert!(names.contains(&"bob-note"));
@@ -1130,7 +1160,7 @@ mod tests {
         // (c) frontmatter user_id claims another user — directory wins.
         write_file(&alice_dir, "wrong-uid", &format!("scope: user\nuser_id: {}", BOB));
 
-        for f in scan_user_layer(&root, ALICE) {
+        for f in scan_user_layer(&root, ALICE).unwrap() {
             let uid = f.user_id.as_deref().expect("user layer entry must carry user_id");
             assert_eq!(uid, ALICE, "entry {} must be owned by the dir owner FQID", f.name);
             assert!(
@@ -1139,10 +1169,51 @@ mod tests {
                 uid
             );
         }
-        for f in scan_all_user_layers(&root) {
+        for f in scan_all_user_layers(&root).unwrap() {
             let uid = f.user_id.as_deref().expect("user layer entry must carry user_id");
             assert_eq!(uid, ALICE);
             assert!(crate::ids::Fqid::parse(uid, crate::ids::DEFAULT_NAMESPACE).is_some());
+        }
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Restore directory permissions on drop, even on assertion panic.
+    struct PermGuard<'a>(&'a Path);
+    impl Drop for PermGuard<'_> {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+
+    #[test]
+    fn scan_io_errors_propagate_instead_of_empty_layers() {
+        let root = layered_layout("ioerr");
+        write_file(
+            &user_memory_dir(&root, ALICE),
+            "alice-note",
+            &format!("scope: user\nuser_id: {}", ALICE),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let alice_dir = user_memory_dir(&root, ALICE);
+            fs::set_permissions(&alice_dir, fs::Permissions::from_mode(0o000)).unwrap();
+            let guard = PermGuard(&alice_dir);
+            // Privileged runners (root) bypass mode bits — chmod 0 cannot
+            // produce EACCES there; skip instead of asserting vacuously.
+            if fs::read_dir(&alice_dir).is_ok() {
+                eprintln!("skipping: privileged runner, chmod 0 does not deny access");
+                return;
+            }
+            assert!(scan_memory_files(&alice_dir).is_err());
+            assert!(scan_user_layer(&root, ALICE).is_err());
+            assert!(scan_merged_for_user(&root, ALICE).is_err());
+            assert!(scan_all_user_layers(&root).is_err());
+            drop(guard); // restore permissions before cleanup
         }
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }
@@ -1179,9 +1250,9 @@ mod tests {
         // surfacing as an ownerless user entry.
         let root = layered_layout("invalid");
         write_file(&root, "orphan-user", "scope: user");
-        assert!(!scan_agent_layer(&root).iter().any(|f| f.name == "orphan-user"));
-        assert!(scan_user_layer(&root, ALICE).is_empty());
-        assert!(scan_all_user_layers(&root).is_empty());
+        assert!(!scan_agent_layer(&root).unwrap().iter().any(|f| f.name == "orphan-user"));
+        assert!(scan_user_layer(&root, ALICE).unwrap().is_empty());
+        assert!(scan_all_user_layers(&root).unwrap().is_empty());
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 
@@ -1191,9 +1262,9 @@ mod tests {
         // entry must never enter bob's merged view.
         let root = layered_layout("inject");
         write_file(&user_memory_dir(&root, ALICE), "alice-always", &format!("scope: user\nuser_id: {}\ninject: always", ALICE));
-        let bob_view = scan_merged_for_user(&root, BOB);
+        let bob_view = scan_merged_for_user(&root, BOB).unwrap();
         assert!(bob_view.iter().all(|f| f.name != "alice-always"));
-        let alice_view = scan_merged_for_user(&root, ALICE);
+        let alice_view = scan_merged_for_user(&root, ALICE).unwrap();
         assert!(alice_view.iter().any(|f| f.name == "alice-always"));
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }

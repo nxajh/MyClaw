@@ -40,11 +40,28 @@ pub(super) fn scope_memory_dir(memory_root: &Path, scope: &str, user_id: &str) -
 /// Scan memory files from a single scope (not merged). Layered (P4):
 /// agent scope → the agent layer; user scope → this user's user layer plus
 /// pre-migration fallback entries still in the agent dir (frontmatter wins).
-pub(super) fn scan_scope(memory_root: &Path, scope: &str, user_id: &str) -> Vec<crate::memory::MemoryFile> {
+/// I/O errors other than NotFound propagate — never fake an empty layer.
+pub(super) fn scan_scope(
+    memory_root: &Path,
+    scope: &str,
+    user_id: &str,
+) -> std::io::Result<Vec<crate::memory::MemoryFile>> {
     if scope == "agent" {
         crate::memory::scan_agent_layer(memory_root)
     } else {
         crate::memory::scan_user_layer(memory_root, user_id)
+    }
+}
+
+/// Tool-level scan failure: surface the I/O error in the tool output
+/// instead of pretending the layer is empty.
+pub(super) fn scan_error_result(tool: &str, e: std::io::Error) -> ToolResult {
+    tracing::error!(tool = tool, error = %e, "memory layer scan I/O error");
+    let msg = format!("memory layer scan failed: {}", e);
+    ToolResult {
+        success: false,
+        output: json!({ "success": false, "error": msg }).to_string(),
+        error: Some(msg),
     }
 }
 
@@ -96,7 +113,10 @@ impl Tool for MemoryListTool {
     ) -> anyhow::Result<ToolResult> {
         let type_filter = normalize_optional_filter(args["memory_type"].as_str());
         let user_id = user_id_for(ctx, &self.resolver);
-        let files = scan_merged(&self.memory_root, &user_id);
+        let files = match scan_merged(&self.memory_root, &user_id) {
+            Ok(files) => files,
+            Err(e) => return Ok(scan_error_result("memory_list", e)),
+        };
         let entries: Vec<crate::memory::IndexEntry> = files
             .iter()
             .filter(|mf| {
@@ -211,7 +231,10 @@ impl Tool for MemoryViewTool {
         };
 
         let user_id = user_id_for(ctx, &self.resolver);
-        let files = scan_merged(&self.memory_root, &user_id);
+        let files = match scan_merged(&self.memory_root, &user_id) {
+            Ok(files) => files,
+            Err(e) => return Ok(scan_error_result("memory_view", e)),
+        };
         let file = files.iter().find(|f| f.name == name);
 
         match file {

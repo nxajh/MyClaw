@@ -49,10 +49,24 @@ pub(super) fn memory_file_in_scope(f: &crate::memory::MemoryFile, scope: &str, u
 /// layer (which itself includes pre-migration fallback entries still in
 /// the agent dir). User layer first — same-name shadowing is user>agent
 /// (RFC §6.2), matching what the memory tools display.
-fn scan_both_layers(base: &std::path::Path, uid: &str) -> Vec<crate::memory::MemoryFile> {
-    let mut candidates = crate::memory::scan_user_layer(base, uid);
-    candidates.extend(crate::memory::scan_agent_layer(base));
-    candidates
+fn scan_both_layers(
+    base: &std::path::Path,
+    uid: &str,
+) -> std::io::Result<Vec<crate::memory::MemoryFile>> {
+    let mut candidates = crate::memory::scan_user_layer(base, uid)?;
+    candidates.extend(crate::memory::scan_agent_layer(base)?);
+    Ok(candidates)
+}
+
+/// Layer-scan I/O failure: surface an api_error instead of pretending the
+/// layer is empty.
+fn scan_api_error(id: &str, e: std::io::Error) -> String {
+    serde_json::json!({
+        "type": "api_error",
+        "id": id,
+        "error": format!("memory scan failed: {}", e)
+    })
+    .to_string()
 }
 
 /// Resolve the request's user_id via the shared resolver (routing_key → uid).
@@ -76,7 +90,11 @@ pub(super) fn list(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>) -
             let mut rows: Vec<(&str, crate::memory::MemoryFile)> = Vec::new();
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             if scope == "all" || scope == "user" {
-                for f in crate::memory::scan_user_layer(dir, &uid)
+                let files = match crate::memory::scan_user_layer(dir, &uid) {
+                    Ok(files) => files,
+                    Err(e) => return scan_api_error(id, e),
+                };
+                for f in files
                     .into_iter()
                     .filter(|f| memory_file_in_scope(f, "user", &uid))
                 {
@@ -86,7 +104,11 @@ pub(super) fn list(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>) -
                 }
             }
             if scope == "all" || scope == "agent" {
-                for f in crate::memory::scan_agent_layer(dir)
+                let files = match crate::memory::scan_agent_layer(dir) {
+                    Ok(files) => files,
+                    Err(e) => return scan_api_error(id, e),
+                };
+                for f in files
                     .into_iter()
                     .filter(|f| memory_file_in_scope(f, "agent", &uid))
                 {
@@ -223,7 +245,10 @@ pub(super) fn delete(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>)
             let uid = memory_user_id(ctx);
             // P4: layered dirs — candidates span both layers, scope
             // matching on the normalized frontmatter.
-            let candidates = scan_both_layers(&dir, &uid);
+            let candidates = match scan_both_layers(&dir, &uid) {
+                Ok(c) => c,
+                Err(e) => return scan_api_error(id, e),
+            };
             let stem = filename.strip_suffix(".md").unwrap_or(filename);
             let matches_scope = |f: &crate::memory::MemoryFile, scope_name: &str| {
                 f.name == stem && memory_file_in_scope(f, scope_name, &uid)
@@ -301,7 +326,10 @@ pub(super) fn read(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>) -
             let scope = params["scope"].as_str();
             // P4: layered dirs — candidates span both layers, scope
             // routing via the normalized frontmatter.
-            let candidates = scan_both_layers(&dir, &uid);
+            let candidates = match scan_both_layers(&dir, &uid) {
+                Ok(c) => c,
+                Err(e) => return scan_api_error(id, e),
+            };
             let stem = filename.strip_suffix(".md").unwrap_or(filename);
             let matches_scope = |f: &crate::memory::MemoryFile, scope_name: &str| {
                 f.name == stem && memory_file_in_scope(f, scope_name, &uid)

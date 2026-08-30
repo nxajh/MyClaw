@@ -29,8 +29,12 @@ pub(super) fn validate_name(name: &str) -> Result<(), String> {
 /// Scan memory files visible to a user: all agent-layer entries plus the
 /// user's own user-layer entries (P4 layered storage — delegated to the
 /// shared merged-scan helper, which also keeps pre-migration single-pool
-/// entries readable). Dedup by name, user layer wins (RFC §6.2).
-pub(super) fn scan_merged(memory_root: &Path, user_id: &str) -> Vec<crate::memory::MemoryFile> {
+/// entries readable). Dedup by name, user layer wins (RFC §6.2). I/O errors
+/// other than NotFound propagate — never fake an empty layer.
+pub(super) fn scan_merged(
+    memory_root: &Path,
+    user_id: &str,
+) -> std::io::Result<Vec<crate::memory::MemoryFile>> {
     crate::memory::scan_merged_for_user(memory_root, user_id)
 }
 

@@ -181,7 +181,18 @@ pub fn has_pending_user_memories(memory_root: &str, last_distill_ts: Option<&str
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
 
-    let files = crate::memory::scan_all_user_layers(std::path::Path::new(memory_root));
+    let files = match crate::memory::scan_all_user_layers(std::path::Path::new(memory_root)) {
+        Ok(files) => files,
+        // Never fake an empty layer: log and report nothing pending this
+        // round; the next distill attempt re-scans.
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "memory_distill: user-layer scan failed; skipping pending check this round"
+            );
+            return false;
+        }
+    };
     for f in files {
         let Ok(meta) = std::fs::metadata(&f.path) else {
             continue;
@@ -211,7 +222,18 @@ fn collect_user_memories(memory_root: &str) -> (usize, usize, String) {
     // entries) by their normalized frontmatter `user_id`.
     let mut by_user: std::collections::BTreeMap<String, Vec<crate::memory::MemoryFile>> =
         std::collections::BTreeMap::new();
-    for f in crate::memory::scan_all_user_layers(std::path::Path::new(memory_root)) {
+    let all_files = match crate::memory::scan_all_user_layers(std::path::Path::new(memory_root)) {
+        Ok(files) => files,
+        // Never fake an empty layer: log and skip this scan pass.
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "memory_distill: user-layer scan failed; skipping user memory collection this pass"
+            );
+            Vec::new()
+        }
+    };
+    for f in all_files {
         let uid = f.user_id.clone().unwrap_or_else(|| "unknown".to_string());
         by_user.entry(uid).or_default().push(f);
     }
@@ -264,7 +286,16 @@ fn name_tokens(name: &str) -> std::collections::HashSet<String> {
 /// memory name. Runtime backstop for the prompt rule: distill must merge into
 /// an existing memory instead of adding a duplicate topic.
 fn find_duplicate_agent_memory(workspace_dir: &str, candidate_name: &str) -> Option<String> {
-    let files = crate::memory::scan_agent_layer(std::path::Path::new(workspace_dir));
+    let files = match crate::memory::scan_agent_layer(std::path::Path::new(workspace_dir)) {
+        Ok(files) => files,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "memory_distill: agent-layer scan failed; skipping duplicate check this pass"
+            );
+            return None;
+        }
+    };
     let cand = name_tokens(candidate_name);
     if cand.is_empty() {
         return None;
@@ -296,7 +327,16 @@ fn find_duplicate_agent_memory(workspace_dir: &str, candidate_name: &str) -> Opt
 /// prompt injection — mirrors `memory_fork::build_extraction_prompt` so the
 /// model can spot covered topics without guessing.
 fn build_existing_agent_index(workspace_dir: &str) -> String {
-    let files = crate::memory::scan_agent_layer(std::path::Path::new(workspace_dir));
+    let files = match crate::memory::scan_agent_layer(std::path::Path::new(workspace_dir)) {
+        Ok(files) => files,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "memory_distill: agent-layer scan failed; skipping existing-agent index this pass"
+            );
+            return "(agent memory index unavailable)".to_string();
+        }
+    };
     if files.is_empty() {
         return "(empty — no agent-level memories yet)".to_string();
     }
@@ -308,7 +348,16 @@ fn build_existing_agent_index(workspace_dir: &str) -> String {
 /// Snapshot agent-layer memory names and their content hashes.
 /// Used to diff before/after pass 1 to find newly written/modified memories.
 fn snapshot_agent_memories(workspace_dir: &str) -> std::collections::HashMap<String, String> {
-    let files = crate::memory::scan_agent_layer(std::path::Path::new(workspace_dir));
+    let files = match crate::memory::scan_agent_layer(std::path::Path::new(workspace_dir)) {
+        Ok(files) => files,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "memory_distill: agent-layer scan failed; skipping snapshot this pass"
+            );
+            return std::collections::HashMap::new();
+        }
+    };
     files
         .iter()
         .map(|f| {

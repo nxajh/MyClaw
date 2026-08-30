@@ -13,7 +13,7 @@ use super::format::{
     atomic_write, build_frontmatter, link_values, lint_memory_content, scan_merged,
     validate_body_only, validate_name,
 };
-use super::reader::{resolve_scope, scan_scope, scope_memory_dir, user_id_for};
+use super::reader::{resolve_scope, scan_error_result, scan_scope, scope_memory_dir, user_id_for};
 use super::search::{best_snippet, memory_search_score, normalize_optional_filter, query_tokens};
 use crate::api::tool::ToolContext;
 use crate::identity::user_profile::UserResolver;
@@ -104,7 +104,10 @@ impl Tool for MemorySearchTool {
         let include_related = args["include_related"].as_bool().unwrap_or(false);
 
         let user_id = user_id_for(ctx, &self.resolver);
-        let files = scan_merged(&self.memory_root, &user_id);
+        let files = match scan_merged(&self.memory_root, &user_id) {
+            Ok(files) => files,
+            Err(e) => return Ok(scan_error_result("memory_search", e)),
+        };
 
         let mut results: Vec<(i32, &crate::memory::MemoryFile)> = Vec::new();
         for mf in &files {
@@ -376,8 +379,10 @@ impl MemoryManageTool {
         // → reject (use replace). Same name only in the OTHER layer → allow,
         // but warn about the shadowing (user layer shadows agent in merged
         // views — never silent).
-        let agent_files = crate::memory::scan_agent_layer(&self.memory_root);
-        let user_files = crate::memory::scan_user_layer(&self.memory_root, user_id);
+        let agent_files = crate::memory::scan_agent_layer(&self.memory_root)
+            .map_err(|e| format!("agent layer scan failed: {}", e))?;
+        let user_files = crate::memory::scan_user_layer(&self.memory_root, user_id)
+            .map_err(|e| format!("user layer scan failed: {}", e))?;
         let (target_files, other_files) = if scope == "agent" {
             (&agent_files, &user_files)
         } else {
@@ -404,7 +409,8 @@ impl MemoryManageTool {
             }
         }
         // Merged view is the lint context (See Also may reference both layers).
-        let all_files = scan_merged(&self.memory_root, user_id);
+        let all_files = scan_merged(&self.memory_root, user_id)
+            .map_err(|e| format!("memory scan failed: {}", e))?;
 
         let mem_type = self.resolve_type(args);
         let inject = self.resolve_inject(args);
@@ -470,7 +476,8 @@ impl MemoryManageTool {
         validate_name(name)?;
         let scope = resolve_scope(args);
 
-        let files = scan_scope(&self.memory_root, scope, user_id);
+        let files = scan_scope(&self.memory_root, scope, user_id)
+            .map_err(|e| format!("memory layer scan failed: {}", e))?;
         let existing = files
             .iter()
             .find(|f| f.name == name)
@@ -581,7 +588,8 @@ impl MemoryManageTool {
             );
         }
 
-        let files = scan_scope(&self.memory_root, scope, user_id);
+        let files = scan_scope(&self.memory_root, scope, user_id)
+            .map_err(|e| format!("memory layer scan failed: {}", e))?;
         let existing = files
             .iter()
             .find(|f| f.name == name)
@@ -623,8 +631,9 @@ impl MemoryManageTool {
     fn not_found_error(&self, name: &str, scope: &str) -> String {
         if scope != "agent"
             && crate::memory::scan_agent_layer(&self.memory_root)
-                .iter()
-                .any(|f| f.name == name)
+                // Scan failure here only degrades the hint, not the outcome.
+                .map(|files| files.iter().any(|f| f.name == name))
+                .unwrap_or(false)
         {
             return format!(
                 "Memory '{}' not found in the {} scope; it exists in the agent layer — \

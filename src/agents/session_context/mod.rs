@@ -807,17 +807,26 @@ impl SessionContext {
             // owner's user layer. The previous full single-pool scan let any
             // user's inject=always entries leak into every conversation.
             let memory_root = &runtime.defaults.prompt.memory_root;
-            let memory_entries: Vec<crate::memory::IndexEntry> = if !memory_root.is_empty() {
+            if !memory_root.is_empty() {
                 let memory_dir = std::path::Path::new(memory_root);
-                let files =
-                    crate::memory::scan_merged_for_user(memory_dir, &session.owner_fqid);
-                files.iter().map(crate::memory::IndexEntry::from).collect()
-            } else {
-                Vec::new()
-            };
-            session
-                .attachments
-                .diff_memory(&memory_entries, &history_clone);
+                match crate::memory::scan_merged_for_user(memory_dir, &session.owner_fqid) {
+                    Ok(files) => {
+                        let memory_entries: Vec<crate::memory::IndexEntry> = files
+                            .iter()
+                            .map(crate::memory::IndexEntry::from)
+                            .collect();
+                        session
+                            .attachments
+                            .diff_memory(&memory_entries, &history_clone);
+                    }
+                    // Never fake an empty layer — log and skip this
+                    // turn's injection entirely.
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        "memory layer scan failed; skipping memory index injection this turn"
+                    ),
+                }
+            }
             let text = session.attachments.build_text(&skills_snap);
             session.attachments.clear_pending();
 
