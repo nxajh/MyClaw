@@ -26,27 +26,43 @@ pub(super) fn resolve_scope(args: &serde_json::Value) -> &'static str {
 }
 
 /// Directory for a scope's memory files.
-/// P1-B2: single flat memory root for both scopes — ownership is a
-/// frontmatter attribute (`scope` + `user_id`), not a path segment.
-pub(super) fn scope_memory_dir(memory_root: &Path, _scope: &str, _user_id: &str) -> PathBuf {
-    memory_root.to_path_buf()
+/// P4 (RFC #101 §6): layered storage — `scope=="agent"` → the memory root
+/// itself; user scope → `{base}/users/{bare uuid}/memory`. Pure computation;
+/// creating the directory is the caller's job.
+pub(super) fn scope_memory_dir(memory_root: &Path, scope: &str, user_id: &str) -> PathBuf {
+    if scope == "agent" {
+        memory_root.to_path_buf()
+    } else {
+        crate::memory::user_memory_dir(memory_root, user_id)
+    }
 }
 
-/// Scan memory files from a single scope (not merged), filtered by
-/// frontmatter ownership. `scope=user` requires an exact `user_id` match;
-/// a missing `scope` field is treated as the agent layer.
-pub(super) fn scan_scope(memory_root: &Path, scope: &str, user_id: &str) -> Vec<crate::memory::MemoryFile> {
-    crate::memory::scan_memory_files(&scope_memory_dir(memory_root, scope, user_id))
-        .into_iter()
-        .filter(|f| {
-            let f_scope = f.scope.as_deref().unwrap_or("agent");
-            if scope == "agent" {
-                f_scope == "agent"
-            } else {
-                f_scope == "user" && f.user_id.as_deref() == Some(user_id)
-            }
-        })
-        .collect()
+/// Scan memory files from a single scope (not merged). Layered (P4):
+/// agent scope → the agent layer; user scope → this user's user layer plus
+/// pre-migration fallback entries still in the agent dir (frontmatter wins).
+/// I/O errors other than NotFound propagate — never fake an empty layer.
+pub(super) fn scan_scope(
+    memory_root: &Path,
+    scope: &str,
+    user_id: &str,
+) -> std::io::Result<Vec<crate::memory::MemoryFile>> {
+    if scope == "agent" {
+        crate::memory::scan_agent_layer(memory_root)
+    } else {
+        crate::memory::scan_user_layer(memory_root, user_id)
+    }
+}
+
+/// Tool-level scan failure: surface the I/O error in the tool output
+/// instead of pretending the layer is empty.
+pub(super) fn scan_error_result(tool: &str, e: std::io::Error) -> ToolResult {
+    tracing::error!(tool = tool, error = %e, "memory layer scan I/O error");
+    let msg = format!("memory layer scan failed: {}", e);
+    ToolResult {
+        success: false,
+        output: json!({ "success": false, "error": msg }).to_string(),
+        error: Some(msg),
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -97,18 +113,20 @@ impl Tool for MemoryListTool {
     ) -> anyhow::Result<ToolResult> {
         let type_filter = normalize_optional_filter(args["memory_type"].as_str());
         let user_id = user_id_for(ctx, &self.resolver);
-        let files = scan_merged(&self.memory_root, &user_id);
-        let entries: Vec<crate::memory::IndexEntry> = files
+        let files = match scan_merged(&self.memory_root, &user_id) {
+            Ok(files) => files,
+            Err(e) => return Ok(scan_error_result("memory_list", e)),
+        };
+        let filtered: Vec<&crate::memory::MemoryFile> = files
             .iter()
             .filter(|mf| {
                 type_filter
                     .as_ref()
                     .is_none_or(|wanted| mf.mem_type.to_lowercase() == *wanted)
             })
-            .map(crate::memory::IndexEntry::from)
             .collect();
 
-        if entries.is_empty() {
+        if filtered.is_empty() {
             return Ok(ToolResult {
                 success: true,
                 output: json!({
@@ -123,19 +141,22 @@ impl Tool for MemoryListTool {
         }
 
         let backlinks = build_backlinks(&files);
-        let json_entries: Vec<serde_json::Value> = entries
+        let json_entries: Vec<serde_json::Value> = filtered
             .iter()
-            .map(|e| {
-                let backlinks_count = backlinks.get(&e.name).map(|b| b.len()).unwrap_or(0);
+            .map(|mf| {
+                // Layer-qualified key: same-named entries in different
+                // layers keep separate backlink lists.
+                let bl_key = crate::memory::layer_qualified_name(mf);
+                let backlinks_count = backlinks.get(&bl_key).map(|b| b.len()).unwrap_or(0);
                 let mut obj = json!({
-                    "type": &e.mem_type,
-                    "name": &e.name,
-                    "description": &e.description,
-                    "link_count": e.link_count,
+                    "type": &mf.mem_type,
+                    "name": &mf.name,
+                    "description": &mf.description,
+                    "link_count": mf.links.len(),
                     "backlink_count": backlinks_count,
                 });
-                if !e.tags.is_empty() {
-                    obj["tags"] = json!(e.tags);
+                if !mf.tags.is_empty() {
+                    obj["tags"] = json!(mf.tags);
                 }
                 obj
             })
@@ -145,7 +166,7 @@ impl Tool for MemoryListTool {
             success: true,
             output: json!({
                 "success": true,
-                "count": entries.len(),
+                "count": json_entries.len(),
                 "entries": json_entries,
                 "hint": "Use memory_view(name) to read full content, or memory_search(query) to search."
             }).to_string(),
@@ -212,13 +233,19 @@ impl Tool for MemoryViewTool {
         };
 
         let user_id = user_id_for(ctx, &self.resolver);
-        let files = scan_merged(&self.memory_root, &user_id);
+        let files = match scan_merged(&self.memory_root, &user_id) {
+            Ok(files) => files,
+            Err(e) => return Ok(scan_error_result("memory_view", e)),
+        };
         let file = files.iter().find(|f| f.name == name);
 
         match file {
             Some(mf) => {
                 let backlinks = build_backlinks(&files);
-                let file_backlinks = backlinks.get(&mf.name).cloned().unwrap_or_default();
+                let file_backlinks = backlinks
+                    .get(&crate::memory::layer_qualified_name(mf))
+                    .cloned()
+                    .unwrap_or_default();
                 let outgoing = link_values(&mf.links);
 
                 let mut output = json!({

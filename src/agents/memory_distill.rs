@@ -173,18 +173,27 @@ impl DistillState {
 
 /// Whether any per-user memory file was modified after `last_distill_ts`.
 /// A `None` last-distill timestamp means "never distilled" → pending.
+/// P4: user-layer entries live under `{base}/users/{uuid}/memory` (plus
+/// pre-migration single-pool entries still in the agent dir, kept via the
+/// frontmatter fallback inside the shared scan helper).
 pub fn has_pending_user_memories(memory_root: &str, last_distill_ts: Option<&str>) -> bool {
     let last_distill = last_distill_ts
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
 
-    // P1-B2: single flat memory root; user-layer entries are identified
-    // by frontmatter scope=user (file mtime check does not need parsing).
-    let files = crate::memory::scan_memory_files(std::path::Path::new(memory_root));
-    for f in files {
-        if f.scope.as_deref() != Some("user") {
-            continue;
+    let files = match crate::memory::scan_all_user_layers(std::path::Path::new(memory_root)) {
+        Ok(files) => files,
+        // Never fake an empty layer: log and report nothing pending this
+        // round; the next distill attempt re-scans.
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "memory_distill: user-layer scan failed; skipping pending check this round"
+            );
+            return false;
         }
+    };
+    for f in files {
         let Ok(meta) = std::fs::metadata(&f.path) else {
             continue;
         };
@@ -209,13 +218,22 @@ fn collect_user_memories(memory_root: &str) -> (usize, usize, String) {
     let mut total_chars = 0usize;
     let mut user_idx = 0usize;
 
-    // P1-B2: group flat-dir user-layer files by frontmatter user_id.
+    // P4: group user-layer files (every user dir + agent-dir fallback
+    // entries) by their normalized frontmatter `user_id`.
     let mut by_user: std::collections::BTreeMap<String, Vec<crate::memory::MemoryFile>> =
         std::collections::BTreeMap::new();
-    for f in crate::memory::scan_memory_files(std::path::Path::new(memory_root)) {
-        if f.scope.as_deref() != Some("user") {
-            continue;
+    let all_files = match crate::memory::scan_all_user_layers(std::path::Path::new(memory_root)) {
+        Ok(files) => files,
+        // Never fake an empty layer: log and skip this scan pass.
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "memory_distill: user-layer scan failed; skipping user memory collection this pass"
+            );
+            Vec::new()
         }
+    };
+    for f in all_files {
         let uid = f.user_id.clone().unwrap_or_else(|| "unknown".to_string());
         by_user.entry(uid).or_default().push(f);
     }
@@ -268,8 +286,16 @@ fn name_tokens(name: &str) -> std::collections::HashSet<String> {
 /// memory name. Runtime backstop for the prompt rule: distill must merge into
 /// an existing memory instead of adding a duplicate topic.
 fn find_duplicate_agent_memory(workspace_dir: &str, candidate_name: &str) -> Option<String> {
-    let memory_dir = std::path::Path::new(workspace_dir);
-    let files = crate::memory::scan_memory_files(memory_dir);
+    let files = match crate::memory::scan_agent_layer(std::path::Path::new(workspace_dir)) {
+        Ok(files) => files,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "memory_distill: agent-layer scan failed; skipping duplicate check this pass"
+            );
+            return None;
+        }
+    };
     let cand = name_tokens(candidate_name);
     if cand.is_empty() {
         return None;
@@ -301,8 +327,16 @@ fn find_duplicate_agent_memory(workspace_dir: &str, candidate_name: &str) -> Opt
 /// prompt injection — mirrors `memory_fork::build_extraction_prompt` so the
 /// model can spot covered topics without guessing.
 fn build_existing_agent_index(workspace_dir: &str) -> String {
-    let memory_dir = std::path::Path::new(workspace_dir);
-    let files = crate::memory::scan_memory_files(memory_dir);
+    let files = match crate::memory::scan_agent_layer(std::path::Path::new(workspace_dir)) {
+        Ok(files) => files,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "memory_distill: agent-layer scan failed; skipping existing-agent index this pass"
+            );
+            return "(agent memory index unavailable)".to_string();
+        }
+    };
     if files.is_empty() {
         return "(empty — no agent-level memories yet)".to_string();
     }
@@ -314,8 +348,16 @@ fn build_existing_agent_index(workspace_dir: &str) -> String {
 /// Snapshot agent-layer memory names and their content hashes.
 /// Used to diff before/after pass 1 to find newly written/modified memories.
 fn snapshot_agent_memories(workspace_dir: &str) -> std::collections::HashMap<String, String> {
-    let memory_dir = std::path::Path::new(workspace_dir);
-    let files = crate::memory::scan_memory_files(memory_dir);
+    let files = match crate::memory::scan_agent_layer(std::path::Path::new(workspace_dir)) {
+        Ok(files) => files,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "memory_distill: agent-layer scan failed; skipping snapshot this pass"
+            );
+            return std::collections::HashMap::new();
+        }
+    };
     files
         .iter()
         .map(|f| {
@@ -921,18 +963,51 @@ mod tests {
     #[test]
     fn has_pending_user_memories_detects_new_files() {
         let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path().to_str().unwrap();
+        let base = dir.path();
+        let memory_root = base.join("memory");
+        std::fs::create_dir_all(&memory_root).unwrap();
+        let root = memory_root.to_str().unwrap();
 
-        // No users/ at all → nothing pending.
-        assert!(!has_pending_user_memories(ws, None));
+        // Empty layers → nothing pending.
+        assert!(!has_pending_user_memories(root, None));
 
-        // Write one user memory (flat dir + frontmatter scope).
-        let file = dir.path().join("note.md");
+        // User-layer file under {base}/users/{uuid}/memory.
+        let uid = "myclaw/u/018f6b2a-4c3d-7b2e-9f01-3a2b4c5d6e7f";
+        let user_dir = crate::memory::user_memory_dir(&memory_root, uid);
+        std::fs::create_dir_all(&user_dir).unwrap();
         std::fs::write(
-            &file,
+            user_dir.join("note.md"),
             "---\n\
              name: \"note\"\n\
              description: \"user note\"\n\
+             type: \"project\"\n\
+             inject: search\n\
+             scope: user\n\
+             ---\n\
+             body\n",
+        )
+        .unwrap();
+
+        // Never distilled → pending.
+        assert!(has_pending_user_memories(root, None));
+
+        // Last distill AFTER the file mtime → not pending.
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(!has_pending_user_memories(root, Some(&future)));
+
+        // Last distill BEFORE the file mtime → pending.
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(has_pending_user_memories(root, Some(&past)));
+
+        // Transition fallback: a pre-migration scope=user entry still lying
+        // in the agent dir (single pool) also counts as pending user data.
+        std::fs::remove_file(user_dir.join("note.md")).unwrap();
+        assert!(!has_pending_user_memories(root, None));
+        std::fs::write(
+            memory_root.join("legacy.md"),
+            "---\n\
+             name: \"legacy\"\n\
+             description: \"pooled user note\"\n\
              type: \"project\"\n\
              inject: search\n\
              scope: user\n\
@@ -941,17 +1016,23 @@ mod tests {
              body\n",
         )
         .unwrap();
+        assert!(has_pending_user_memories(root, None));
 
-        // Never distilled → pending.
-        assert!(has_pending_user_memories(ws, None));
-
-        // Last distill AFTER the file mtime → not pending.
-        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-        assert!(!has_pending_user_memories(ws, Some(&future)));
-
-        // Last distill BEFORE the file mtime → pending.
-        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-        assert!(has_pending_user_memories(ws, Some(&past)));
+        // Agent-layer entries alone never trigger distill.
+        std::fs::remove_file(memory_root.join("legacy.md")).unwrap();
+        std::fs::write(
+            memory_root.join("agent-note.md"),
+            "---\n\
+             name: \"agent-note\"\n\
+             description: \"shared rule\"\n\
+             type: \"rule\"\n\
+             inject: search\n\
+             scope: agent\n\
+             ---\n\
+             body\n",
+        )
+        .unwrap();
+        assert!(!has_pending_user_memories(root, None));
     }
 
     #[test]

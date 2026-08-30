@@ -494,13 +494,21 @@ fn build_extraction_prompt(memory_root: &str, session_id: &str) -> String {
     // Build existing memory index so the model avoids duplicates.
     let existing_index = if !memory_root.is_empty() {
         let memory_dir = std::path::Path::new(memory_root);
-        let files = crate::memory::scan_memory_files(memory_dir);
-        if files.is_empty() {
-            String::from("(empty — no memories yet)")
-        } else {
-            let entries: Vec<crate::memory::IndexEntry> =
-                files.iter().map(crate::memory::IndexEntry::from).collect();
-            crate::memory::format_full_memory_index(&entries)
+        match crate::memory::scan_memory_files(memory_dir) {
+            Ok(files) if files.is_empty() => String::from("(empty — no memories yet)"),
+            Ok(files) => {
+                let entries: Vec<crate::memory::IndexEntry> =
+                    files.iter().map(crate::memory::IndexEntry::from).collect();
+                crate::memory::format_full_memory_index(&entries)
+            }
+            // Never fake an empty layer: log and degrade the prompt note.
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "memory scan failed; skipping existing-memory index in extraction prompt"
+                );
+                String::from("(memory index unavailable)")
+            }
         }
     } else {
         String::from("(memory directory not configured)")

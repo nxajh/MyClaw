@@ -4,8 +4,10 @@ use crate::providers::capability_tool::ToolSpec;
 use crate::providers::ProviderRegistry;
 
 const USER_KEY: &str = "client:default:web-user:default";
-const USER_UID: &str = "myclaw/u/019fe342-test";
-const OTHER_UID: &str = "myclaw/u/019fe342-other";
+// Real uuid-shaped FQIDs: the P4 write gate (PR #211) rejects user-scope
+// writes for identities that are not parseable FQIDs.
+const USER_UID: &str = "myclaw/u/019fe342-1111-4abc-8def-000000000001";
+const OTHER_UID: &str = "myclaw/u/019fe342-2222-4abc-8def-000000000002";
 
 fn mem_body(name: &str, body: &str) -> String {
     // No `scope` field → agent layer (matches legacy agent files).
@@ -37,9 +39,9 @@ fn write_user_mem(path: &std::path::Path, name: &str, body: &str, uid: &str) {
 fn test_workspace() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path();
-    // P1-B2: single flat memory dir; ownership via frontmatter.
-    // (A name is unique in the flat dir — the old two-layer
-    // same-name-in-both-scopes case no longer exists.)
+    // P4: pooled fixtures in the agent dir (pre-migration layout) — the
+    // frontmatter fallback keeps scope=user entries readable as user-layer
+    // until the stage-3 migration moves them into users/{uuid}/memory.
     let mem = ws.join("memory");
     write_mem(&mem, "agent_only", "agent body");
     write_mem(&mem, "agent_second", "second agent body");
@@ -182,11 +184,15 @@ fn memory_write_user_scope() {
         tmp.path(),
     );
     assert_eq!(resp["type"], "api_response");
-    let user_path = tmp.path().join("memory").join("fresh_user.md");
+    // P4: user-scope writes land in {base}/users/{dir}/memory, not the
+    // agent-layer root.
+    let user_path = crate::memory::user_memory_dir(&tmp.path().join("memory"), USER_UID)
+        .join("fresh_user.md");
     let written = std::fs::read_to_string(&user_path).unwrap();
     assert!(written.contains("scope: user"));
     assert!(written.contains(&format!("user_id: {}", USER_UID)));
     assert!(written.contains("new user body"));
+    assert!(!tmp.path().join("memory").join("fresh_user.md").exists());
     // Visible to this user via scope=user listing…
     let resp = api(
         "memory.list",
@@ -219,14 +225,29 @@ fn memory_delete_scope_routing() {
     );
     assert_eq!(resp["type"], "api_response");
     assert!(!tmp.path().join("memory").join("user_second.md").exists());
-    // Default fallback removes the agent-layer copy.
+    // Default (unscoped) no longer falls back to the agent layer: a shared
+    // agent entry requires an explicit scope (PR #211 review r4).
     let resp = api(
         "memory.delete",
         serde_json::json!({ "name": "agent_only.md" }),
         tmp.path(),
     );
+    assert_eq!(resp["type"], "api_error");
+    assert!(
+        resp["error"].as_str().unwrap().contains("agent layer"),
+        "hint must point at the explicit scope: {:?}",
+        resp["error"]
+    );
+    assert!(tmp.path().join("memory").join("agent_only.md").exists());
+    // Explicit agent scope removes it.
+    let resp = api(
+        "memory.delete",
+        serde_json::json!({ "name": "agent_only.md", "scope": "agent" }),
+        tmp.path(),
+    );
     assert_eq!(resp["type"], "api_response");
-    assert!(!tmp.path().join("memory").join("agent_only.md").exists());        // Another user's entry is not deletable via any scope param.
+    assert!(!tmp.path().join("memory").join("agent_only.md").exists());
+    // Another user's entry is not deletable via any scope param.
     let resp = api(
         "memory.delete",
         serde_json::json!({ "name": "other_user_only.md", "scope": "user" }),

@@ -54,7 +54,7 @@ pub async fn run(
         cfg.skills_root(),
         cfg.agents_skills_dir_opt(),
     )));
-    // Memory tools — P1-B2 flat memory root, ownership via frontmatter.
+    // Memory tools — P4: layered storage (agent root + users/{uuid}).
     tools.register(Arc::new(myclaw::tools::MemoryListTool::new(
         memory_root.clone(),
         Arc::clone(&resolver),

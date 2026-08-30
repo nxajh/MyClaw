@@ -422,8 +422,9 @@ pub(crate) async fn build_tools(
         Arc::clone(user_resolver),
     )));
 
-    // Memory tools — P1-B2: single flat memory root ({base_dir}/memory),
-    // ownership expressed via frontmatter `scope`/`user_id` (not by path).
+    // Memory tools — P4: layered storage. The agent layer is the memory
+    // root ({base_dir}/memory); user layers derive from it as
+    // {base_dir}/users/{uuid}/memory inside the tools.
     let kd = config.memory_root();
     let r = Arc::clone(user_resolver);
     tools.register(Arc::new(crate::tools::MemoryListTool::new(

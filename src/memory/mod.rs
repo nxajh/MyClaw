@@ -91,6 +91,200 @@ impl From<&MemoryFile> for IndexEntry {
     }
 }
 
+// ── Layered storage (P4 / RFC #101 §6) ────────────────────────────────────
+//
+// Layout:
+//   {base_dir}/memory/               agent layer (the memory root itself)
+//   {base_dir}/users/{uuid}/memory/  user layer (dir name = bare uuid)
+//
+// Directories are authoritative for layering; frontmatter `scope`/`user_id`
+// are kept as redundant verification. Transition compatibility: pre-migration
+// single-pool data still sits in the agent dir with `scope: user` frontmatter
+// — for those entries frontmatter wins over the directory, so they keep
+// reading/writing as user-layer entries until the stage-3 migration moves
+// them physically.
+
+/// Users root derived from a memory root (`{base}/memory` → `{base}/users`).
+fn users_root_of(memory_root: &Path) -> std::path::PathBuf {
+    match memory_root.parent() {
+        Some(base) => base.join("users"),
+        None => std::path::PathBuf::from("users"),
+    }
+}
+
+/// Directory of one user's private memory layer. Pure computation — creating
+/// the directory is the caller's job.
+pub fn user_memory_dir(memory_root: &Path, user_id: &str) -> std::path::PathBuf {
+    users_root_of(memory_root)
+        .join(crate::ids::bare_dir_name(user_id))
+        .join(MEMORY_DIR_NAME)
+}
+
+/// Path of the memory-split migration lock file — a CROSS-PROCESS CONTRACT
+/// with `scripts/migrate-memory-split.py` (`MigrationLock`), which names it
+/// `{base}/memory-split-migration.lock`. The daemon refuses to start while
+/// it exists (see `daemon::run`); the script O_EXCL-creates it for the
+/// whole mutating run. Rename on one side breaks the handshake.
+pub fn migration_lock_path(memory_root: &Path) -> Option<std::path::PathBuf> {
+    memory_root.parent().map(|base| base.join("memory-split-migration.lock"))
+}
+
+/// Reconstruct the canonical FQID (`<ns>/u/<uuid>`) for a user-layer
+/// directory name. User dirs are named after the bare uuid of a registered
+/// identity (see [`user_memory_dir`]); the canonical `user_id` carried on
+/// scanned entries must be the full FQID, reconstructed via the identity
+/// module's [`crate::identity::user_registry::user_id`] constructor (never
+/// hand-assembled). Legacy escaped dir names that do not round-trip to a
+/// valid FQID are kept verbatim.
+fn dir_owner_fqid(dir_name: &str) -> String {
+    let candidate = crate::identity::user_registry::user_id(
+        crate::identity::DEFAULT_NAMESPACE,
+        dir_name,
+    );
+    if crate::ids::Fqid::parse(&candidate, crate::ids::DEFAULT_NAMESPACE).is_some() {
+        candidate
+    } else {
+        dir_name.to_string()
+    }
+}
+
+/// Phase 1 — normalize `scope`/`user_id` so the frontmatter fields alone
+/// determine the layer (downstream code never has to re-derive provenance
+/// from paths). Only rewrites ownership fields; filtering is a separate
+/// phase ([`filter_invalid_memory`]):
+/// - agent-dir file with `scope: user` → stays user-layer (transition
+///   fallback; `user_id` must come from frontmatter);
+/// - agent-dir file otherwise → agent layer;
+/// - user-dir file → user layer, `user_id` set to the dir owner (the
+///   directory is authoritative — the canonical FQID reconstructed by the
+///   scan helper; frontmatter is redundant verification only).
+fn normalize_ownership(f: &mut MemoryFile, from_agent_dir: bool, dir_owner: Option<&str>) {
+    if !from_agent_dir {
+        f.scope = Some("user".to_string());
+        f.user_id = Some(dir_owner.unwrap_or("unknown").to_string());
+    } else if f.scope.as_deref() != Some("user") {
+        f.scope = Some("agent".to_string());
+    }
+}
+
+/// Phase 2 — validity filter, run after [`normalize_ownership`]. Drops
+/// entries that cannot participate in the layer model:
+/// - empty `name` / `type` identity fields;
+/// - `scope` outside {agent, user} (cannot happen post-normalize; kept as
+///   a hard guard so callers can never index a bogus scope);
+/// - user-scope entries without a non-empty `user_id`.
+///
+/// Returns `true` for entries to keep.
+fn filter_invalid_memory(f: &MemoryFile) -> bool {
+    if f.name.trim().is_empty() || f.mem_type.trim().is_empty() {
+        return false;
+    }
+    match f.scope.as_deref() {
+        Some("agent") => true,
+        Some("user") => f.user_id.as_deref().is_some_and(|u| !u.trim().is_empty()),
+        _ => false,
+    }
+}
+
+/// Scan the agent layer only (the memory root dir). Pre-migration user
+/// entries still living there are excluded — they belong to the user layer.
+/// Pipeline: normalize ownership → filter invalid entries → layer select.
+/// I/O errors other than NotFound propagate — an unreadable layer must not
+/// masquerade as an empty one.
+pub fn scan_agent_layer(memory_root: &Path) -> std::io::Result<Vec<MemoryFile>> {
+    let mut files = scan_memory_files(memory_root)?;
+    for f in &mut files {
+        normalize_ownership(f, true, None);
+    }
+    files.retain(|f| filter_invalid_memory(f) && f.scope.as_deref() != Some("user"));
+    Ok(files)
+}
+
+/// Scan one user's user layer: their `users/{uuid}/memory` dir plus
+/// pre-migration fallback entries still in the agent dir (frontmatter
+/// `scope: user` + exact `user_id` match). I/O errors other than NotFound
+/// propagate (see [`scan_agent_layer`]).
+pub fn scan_user_layer(memory_root: &Path, user_id: &str) -> std::io::Result<Vec<MemoryFile>> {
+    let mut files = scan_memory_files(&user_memory_dir(memory_root, user_id))?;
+    for f in &mut files {
+        normalize_ownership(f, false, Some(user_id));
+    }
+    files.retain(filter_invalid_memory);
+    // Transition fallback: single-pool entries not yet migrated. The
+    // physical user directory is authoritative — the flat-pool fallback
+    // only adds names MISSING from it, never duplicates (same name in
+    // both places must not yield two user-layer entries).
+    let present: std::collections::HashSet<String> =
+        files.iter().map(|f| f.name.clone()).collect();
+    for mut f in scan_memory_files(memory_root)? {
+        if f.scope.as_deref() == Some("user")
+            && f.user_id.as_deref() == Some(user_id)
+            && !present.contains(&f.name)
+        {
+            normalize_ownership(&mut f, true, None);
+            if filter_invalid_memory(&f) {
+                files.push(f);
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Merged view visible to one user: the whole agent layer plus their own
+/// user layer. Same-name shadowing: the user layer wins (RFC §6.2).
+pub fn scan_merged_for_user(
+    memory_root: &Path,
+    user_id: &str,
+) -> std::io::Result<Vec<MemoryFile>> {
+    let user = scan_user_layer(memory_root, user_id)?;
+    let mut agent = scan_agent_layer(memory_root)?;
+    // User layer shadows same-named agent entries.
+    let mut seen: std::collections::HashSet<String> =
+        user.iter().map(|f| f.name.clone()).collect();
+    agent.retain(|f| seen.insert(f.name.clone()));
+    let mut files: Vec<MemoryFile> = user.into_iter().chain(agent).collect();
+    files.sort_by(|a, b| (&a.mem_type, &a.name).cmp(&(&b.mem_type, &b.name)));
+    Ok(files)
+}
+
+/// Every user-layer entry across all user dirs, plus agent-dir fallback
+/// entries — for cross-user maintenance jobs (distill). `user_id` is
+/// normalized on every entry to the canonical FQID (reconstructed from the
+/// user dir name) so per-user grouping works. I/O errors other than
+/// NotFound propagate (see [`scan_agent_layer`]).
+pub fn scan_all_user_layers(memory_root: &Path) -> std::io::Result<Vec<MemoryFile>> {
+    let mut out = Vec::new();
+    match fs::read_dir(users_root_of(memory_root)) {
+        Ok(rd) => {
+            for entry in rd {
+                let entry = entry?;
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                let owner = dir_owner_fqid(&dir_name);
+                let mem_dir = entry.path().join(MEMORY_DIR_NAME);
+                for mut f in scan_memory_files(&mem_dir)? {
+                    normalize_ownership(&mut f, false, Some(&owner));
+                    if filter_invalid_memory(&f) {
+                        out.push(f);
+                    }
+                }
+            }
+        }
+        // No users root yet = legitimately no user layers.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    // Transition fallback: single-pool entries not yet migrated.
+    for mut f in scan_memory_files(memory_root)? {
+        if f.scope.as_deref() == Some("user") {
+            normalize_ownership(&mut f, true, None);
+            if filter_invalid_memory(&f) {
+                out.push(f);
+            }
+        }
+    }
+    Ok(out)
+}
+
 // ── Injection helpers ──────────────────────────────────────────────────────
 
 /// Whether a memory entry should be auto-injected into system-reminders.
@@ -112,44 +306,55 @@ pub fn ensure_memory_dir(memory_root: &str) -> std::io::Result<std::path::PathBu
 // ── Scanning ───────────────────────────────────────────────────────────────
 
 /// Scan `memory/*.md` files, parse frontmatter, return valid entries.
-/// Files with missing or malformed frontmatter are silently skipped.
-pub fn scan_memory_files(memory_dir: &Path) -> Vec<MemoryFile> {
+/// A missing directory is a legitimate empty layer (`Ok(vec![])`); any other
+/// I/O error propagates so an unreadable layer can never masquerade as an
+/// empty one. Files with missing or malformed frontmatter are skipped.
+pub fn scan_memory_files(memory_dir: &Path) -> std::io::Result<Vec<MemoryFile>> {
     let entries = match fs::read_dir(memory_dir) {
         Ok(rd) => rd,
-        Err(_) => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
 
     let mut files = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry?;
         let path = entry.path();
         if path.extension() != Some(OsStr::new("md")) {
             continue;
         }
-        if let Some(mf) = parse_memory_file(&path) {
+        if let Some(mf) = parse_memory_file(&path)? {
             files.push(mf);
         }
     }
 
     // Stable sort: by type, then by name.
     files.sort_by(|a, b| (&a.mem_type, &a.name).cmp(&(&b.mem_type, &b.name)));
-    files
+    Ok(files)
 }
 
 /// Parse a single `.md` file's YAML frontmatter + content.
-/// Returns `None` if frontmatter is missing or malformed.
-fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
-    let raw = fs::read_to_string(path).ok()?;
+/// Returns `Ok(None)` if frontmatter is missing or malformed, or the file
+/// vanished mid-scan (NotFound race). Other read errors propagate.
+fn parse_memory_file(path: &Path) -> std::io::Result<Option<MemoryFile>> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
     let trimmed = raw.trim();
 
     // Frontmatter must start with "---\n"
     if !trimmed.starts_with("---") {
-        return None;
+        return Ok(None);
     }
 
     // Find closing "---"
     let rest = &trimmed[3..];
     let rest = rest.trim_start_matches(['\r', '\n']);
-    let end = rest.find("\n---")?;
+    let Some(end) = rest.find("\n---") else {
+        return Ok(None);
+    };
 
     let frontmatter_text = &rest[..end];
     let content = rest[end + 4..].trim().to_string();
@@ -195,11 +400,17 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     // Parse See Also links from body
     let links = extract_links(&content);
 
-    Some(MemoryFile {
-        name: name?,
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let Some(mem_type) = mem_type else {
+        return Ok(None);
+    };
+    Ok(Some(MemoryFile {
+        name,
         scope,
         user_id,
-        mem_type: mem_type?,
+        mem_type,
         inject: inject.unwrap_or_else(|| "search".to_string()),
         description,
         tags,
@@ -208,7 +419,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
         links,
         content,
         path: path.to_path_buf(),
-    })
+    }))
 }
 
 /// Strip surrounding YAML double quotes from a value: `"foo"` → `foo`.
@@ -276,7 +487,9 @@ fn extract_links(content: &str) -> Vec<LinkRef> {
 ///
 /// Canonical form requires a `.md` suffix on the href (after any path segment).
 /// Bare names like `(other_memory_name)` are rejected and not indexed.
-/// Logical `LinkRef.target` is stored without the `.md` suffix.
+/// Layer-qualified hrefs `agent:<name>.md` / `user:<name>.md` are accepted —
+/// logical `LinkRef.target` keeps the prefix (`agent:<name>`).
+/// Logical same-layer targets are stored without the `.md` suffix.
 fn parse_md_link(line: &str) -> Option<LinkRef> {
     let bracket_start = line.find('[')?;
     let rest_after_bracket = &line[bracket_start + 1..];
@@ -327,16 +540,77 @@ fn parse_md_link(line: &str) -> Option<LinkRef> {
     })
 }
 
-/// Build a reverse-link (backlink) index: for each entity name, which
-/// other entities link to it.
+/// Layer-qualified link target prefix (`agent:` / `user:`), RFC #101 §6.3.
+/// `(layer, bare_name)` — e.g. `agent:x` → `("agent", "x")`. `@<uuid>` is a
+/// reserved form and not implemented.
+pub fn parse_layer_prefix(target: &str) -> Option<(&'static str, &str)> {
+    if let Some(rest) = target.strip_prefix("agent:") {
+        if !rest.is_empty() {
+            return Some(("agent", rest));
+        }
+    }
+    if let Some(rest) = target.strip_prefix("user:") {
+        if !rest.is_empty() {
+            return Some(("user", rest));
+        }
+    }
+    None
+}
+
+/// Bare entity name of a link target: strips a layer prefix if present.
+pub fn strip_layer_prefix(target: &str) -> &str {
+    match parse_layer_prefix(target) {
+        Some((_, name)) => name,
+        None => target,
+    }
+}
+
+/// Effective layer of a scanned memory file. The scan helpers normalize
+/// `scope` on every entry, so the frontmatter field is authoritative here.
+fn file_layer(f: &MemoryFile) -> &'static str {
+    if f.scope.as_deref() == Some("user") {
+        "user"
+    } else {
+        "agent"
+    }
+}
+
+/// Layer-qualified entity name (`agent:x` / `user:x`) — the canonical key
+/// form for cross-layer reference: the backlink index is keyed by it, and
+/// backlink values use it so a same-named entry in the other layer is never
+/// confused with this one.
+pub fn layer_qualified_name(f: &MemoryFile) -> String {
+    format!("{}:{}", file_layer(f), f.name)
+}
+
+/// Build a reverse-link (backlink) index: for each layer-qualified entity
+/// name (`agent:x` / `user:x`), which other entities link to it (values are
+/// layer-qualified too). Layer rules (RFC #101 §6.3):
+/// - `agent:x` / `user:x` targets match the entry `x` in that layer;
+/// - a bare target only matches a same-layer entry — pointing at another
+///   layer's same-named entry does NOT count (cross-layer must be explicit).
+///
+/// Same-named entries in different layers never aggregate: their keys
+/// (`agent:foo` vs `user:foo`) are distinct.
 pub fn build_backlinks(files: &[MemoryFile]) -> HashMap<String, Vec<String>> {
     let mut backlinks: HashMap<String, Vec<String>> = HashMap::new();
     for f in files {
+        let src_layer = file_layer(f);
         for link in &f.links {
-            backlinks
-                .entry(link.target.clone())
-                .or_default()
-                .push(f.name.clone());
+            let (target_layer, target_name) = match parse_layer_prefix(&link.target) {
+                Some((layer, name)) => (layer, name),
+                // Bare name: same layer only, never crosses layers.
+                None => (src_layer, link.target.as_str()),
+            };
+            let hit = files
+                .iter()
+                .any(|g| g.name == target_name && file_layer(g) == target_layer);
+            if hit {
+                backlinks
+                    .entry(format!("{}:{}", target_layer, target_name))
+                    .or_default()
+                    .push(layer_qualified_name(f));
+            }
         }
     }
     // Deduplicate and sort each entry
@@ -488,7 +762,7 @@ mod tests {
         let path = dir.join("user_lang.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.name, "user_lang");
         assert_eq!(mf.description, "用户偏好使用中文进行所有交流");
         assert_eq!(mf.tags, vec!["user", "language", "preference"]);
@@ -510,7 +784,7 @@ mod tests {
         let path = dir.join("test.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.name, "test");
         assert_eq!(mf.description, "A short summary");
 
@@ -525,7 +799,7 @@ mod tests {
         let path = dir.join("test2.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.description, "An abstract");
 
         let _ = fs::remove_dir_all(&dir);
@@ -539,7 +813,7 @@ mod tests {
         let path = dir.join("test3.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.description, "The real desc");
 
         let _ = fs::remove_dir_all(&dir);
@@ -553,7 +827,7 @@ mod tests {
         let path = dir.join("test4.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.updated_at.as_deref(), Some("2026-07-01"));
 
         let _ = fs::remove_dir_all(&dir);
@@ -567,7 +841,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("scoped.md");
         fs::write(&path, content).unwrap();
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.scope.as_deref(), Some("user"));
         assert_eq!(mf.user_id.as_deref(), Some("myclaw/u/abc"));
         let _ = fs::remove_dir_all(&dir);
@@ -578,7 +852,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("unscoped.md");
         fs::write(&path, content).unwrap();
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert!(mf.scope.is_none());
         assert!(mf.user_id.is_none());
         let _ = fs::remove_dir_all(&dir);
@@ -592,7 +866,7 @@ mod tests {
         let path = dir.join("test.md");
         fs::write(&path, content).unwrap();
 
-        let mf = parse_memory_file(&path).unwrap();
+        let mf = parse_memory_file(&path).unwrap().unwrap();
         assert_eq!(mf.name, "test");
         assert_eq!(mf.description, "");
 
@@ -606,7 +880,7 @@ mod tests {
         let path = dir.join("plain.md");
         fs::write(&path, "Just some text without frontmatter").unwrap();
 
-        assert!(parse_memory_file(&path).is_none());
+        assert!(parse_memory_file(&path).unwrap().is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -690,15 +964,38 @@ mod tests {
                 scope: None,
                 user_id: None,
             },
+            // build_backlinks only indexes links whose target exists (layer-
+            // qualified matching requires a real counterpart), so gamma must
+            // be present for the assertions below.
+            MemoryFile {
+                name: "gamma".into(),
+                mem_type: "entity".into(),
+                inject: "search".into(),
+                description: String::new(),
+                tags: vec![],
+                created_at: String::new(),
+                updated_at: None,
+                links: vec![],
+                content: String::new(),
+                path: std::path::PathBuf::new(),
+                scope: None,
+                user_id: None,
+            },
         ];
 
         let backlinks = build_backlinks(&files);
-        assert_eq!(backlinks.get("beta"), Some(&vec!["alpha".to_string()]));
+        // Keys and values are layer-qualified (scope None → agent layer).
         assert_eq!(
-            backlinks.get("gamma"),
-            Some(&vec!["alpha".to_string(), "beta".to_string()])
+            backlinks.get("agent:beta"),
+            Some(&vec!["agent:alpha".to_string()])
         );
-        assert!(backlinks.get("alpha").is_none());
+        assert_eq!(
+            backlinks.get("agent:gamma"),
+            Some(&vec!["agent:alpha".to_string(), "agent:beta".to_string()])
+        );
+        assert!(backlinks.get("agent:alpha").is_none());
+        // Bare-name keys no longer exist.
+        assert!(backlinks.get("beta").is_none());
     }
 
     #[test]
@@ -771,5 +1068,399 @@ mod tests {
         let truncated = truncate_index(&long, 200, 25_000);
         assert!(truncated.contains("WARNING"));
         assert!(truncated.lines().count() <= 202);
+    }
+
+    // ── P4 layered storage tests ───────────────────────────────────────────
+
+    const ALICE: &str = "myclaw/u/018f6b2a-4c3d-7b2e-9f01-3a2b4c5d6e7f";
+    const BOB: &str = "myclaw/u/018f6b2a-4c3d-7b2e-9f01-3a2b4c5d6e80";
+
+    /// Build `{base}/memory` (agent layer) layout and return the memory root.
+    fn layered_layout(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("myclaw_test_layered_{}", tag));
+        let _ = fs::remove_dir_all(&base);
+        let memory_root = base.join("memory");
+        fs::create_dir_all(&memory_root).unwrap();
+        memory_root
+    }
+
+    fn write_file(dir: &Path, name: &str, fm: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join(format!("{}.md", name)),
+            format!("---\nname: {}\n{}\ntype: project\ncreated_at: 2026-08-30\n---\n\nbody {}", name, fm, name),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn user_memory_dir_is_bare_uuid_under_users() {
+        let root = layered_layout("dir");
+        let dir = user_memory_dir(&root, ALICE);
+        assert_eq!(
+            dir,
+            root.parent().unwrap().join("users").join("018f6b2a-4c3d-7b2e-9f01-3a2b4c5d6e7f").join("memory")
+        );
+        // Legacy routing keys fall back to dir_name (which does not escape
+        // `:` — matches ids::bare_dir_name semantics for legacy keys).
+        assert_eq!(
+            user_memory_dir(&root, "telegram:123"),
+            root.parent().unwrap().join("users").join("telegram:123").join("memory")
+        );
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn scan_merged_shadows_agent_with_user_layer() {
+        let root = layered_layout("shadow");
+        write_file(&root, "dup", "scope: agent");
+        let alice_dir = user_memory_dir(&root, ALICE);
+        write_file(&alice_dir, "dup", &format!("scope: user\nuser_id: {}", ALICE));
+        write_file(&root, "agent-only", "scope: agent");
+
+        let merged = scan_merged_for_user(&root, ALICE).unwrap();
+        let dup = merged.iter().find(|f| f.name == "dup").unwrap();
+        assert_eq!(dup.scope.as_deref(), Some("user"), "user layer must shadow agent");
+        assert!(merged.iter().any(|f| f.name == "agent-only"));
+        assert_eq!(merged.len(), 2);
+
+        // Bob sees the agent entry, not alice's shadow.
+        let bob_view = scan_merged_for_user(&root, BOB).unwrap();
+        let dup_bob = bob_view.iter().find(|f| f.name == "dup").unwrap();
+        assert_eq!(dup_bob.scope.as_deref(), Some("agent"));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn transition_fallback_agent_dir_user_entries_stay_user_layer() {
+        let root = layered_layout("fallback");
+        // Pre-migration single-pool entry: physically in the agent dir,
+        // frontmatter says user.
+        write_file(&root, "legacy-user", &format!("scope: user\nuser_id: {}", ALICE));
+        write_file(&root, "legacy-agent", "scope: agent");
+
+        let agent_layer = scan_agent_layer(&root).unwrap();
+        assert!(!agent_layer.iter().any(|f| f.name == "legacy-user"));
+        assert!(agent_layer.iter().any(|f| f.name == "legacy-agent"));
+
+        let alice_layer = scan_user_layer(&root, ALICE).unwrap();
+        assert!(alice_layer.iter().any(|f| f.name == "legacy-user"));
+        // Not attributed to another user.
+        assert!(scan_user_layer(&root, BOB).unwrap().is_empty());
+
+        let merged = scan_merged_for_user(&root, ALICE).unwrap();
+        assert!(merged.iter().any(|f| f.name == "legacy-user"));
+        assert!(merged.iter().any(|f| f.name == "legacy-agent"));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn migration_lock_path_matches_script_contract() {
+        // {base}/memory -> {base}/memory-split-migration.lock — must match
+        // scripts/migrate-memory-split.py MigrationLock exactly.
+        let root = std::path::Path::new("/tmp/myclaw_contract_probe/memory");
+        assert_eq!(
+            migration_lock_path(root),
+            Some(std::path::PathBuf::from(
+                "/tmp/myclaw_contract_probe/memory-split-migration.lock"
+            ))
+        );
+        // Relative memory root resolves relative to cwd (Path::parent of
+        // "memory" is Some("")) — the daemon always passes an absolute
+        // root; this documents the semantics.
+        assert_eq!(
+            migration_lock_path(std::path::Path::new("memory")),
+            Some(std::path::PathBuf::from("memory-split-migration.lock"))
+        );
+        // Root path has no parent → None (caller treats as no lock).
+        assert_eq!(migration_lock_path(std::path::Path::new("/")), None);
+    }
+
+    #[test]
+    fn scan_user_layer_no_duplicate_names_between_dir_and_fallback() {
+        // Physical user dir is authoritative: a same-named pre-migration
+        // leftover in the flat pool must not produce a second user-layer
+        // entry (PR #211 review r4).
+        let root = layered_layout("dedup");
+        let alice_dir = user_memory_dir(&root, ALICE);
+        write_file(&alice_dir, "dup", &format!("scope: user\nuser_id: {}", ALICE));
+        write_file(&alice_dir, "only-dir", &format!("scope: user\nuser_id: {}", ALICE));
+        // Same name in the flat pool (transition leftover) + a name that
+        // exists ONLY in the flat pool (must still surface via fallback).
+        write_file(&root, "dup", &format!("scope: user\nuser_id: {}", ALICE));
+        write_file(&root, "flat-only", &format!("scope: user\nuser_id: {}", ALICE));
+
+        let user = scan_user_layer(&root, ALICE).unwrap();
+        assert_eq!(
+            user.iter().filter(|f| f.name == "dup").count(),
+            1,
+            "dir + fallback same name must yield exactly one entry"
+        );
+        assert!(user.iter().any(|f| f.name == "only-dir"));
+        assert!(
+            user.iter().any(|f| f.name == "flat-only"),
+            "fallback still surfaces names missing from the physical dir"
+        );
+
+        let merged = scan_merged_for_user(&root, ALICE).unwrap();
+        assert_eq!(merged.iter().filter(|f| f.name == "dup").count(), 1);
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn scan_all_user_layers_spans_every_user_dir() {
+        let root = layered_layout("allusers");
+        write_file(&user_memory_dir(&root, ALICE), "alice-note", &format!("scope: user\nuser_id: {}", ALICE));
+        write_file(&user_memory_dir(&root, BOB), "bob-note", &format!("scope: user\nuser_id: {}", BOB));
+        write_file(&root, "agent-note", "scope: agent");
+        // Legacy single-pool entry still in the agent dir.
+        write_file(&root, "legacy-note", &format!("scope: user\nuser_id: {}", ALICE));
+
+        let all = scan_all_user_layers(&root).unwrap();
+        let names: Vec<&str> = all.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"alice-note"));
+        assert!(names.contains(&"bob-note"));
+        assert!(names.contains(&"legacy-note"));
+        assert!(!names.contains(&"agent-note"));
+        // user_id normalized (FQID from frontmatter where present).
+        let alice_note = all.iter().find(|f| f.name == "alice-note").unwrap();
+        assert_eq!(alice_note.user_id.as_deref(), Some(ALICE));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn scan_user_layers_user_ids_are_canonical_fqid() {
+        // Dir name is a bare uuid; the reconstructed owner must be the full
+        // FQID (via identity::user_registry::user_id), regardless of what
+        // the redundant frontmatter `user_id` claims.
+        let root = layered_layout("fqid");
+        let alice_dir = user_memory_dir(&root, ALICE);
+        // (a) frontmatter user_id missing;
+        write_file(&alice_dir, "no-uid", "scope: user");
+        // (b) frontmatter user_id is a bare uuid (legacy);
+        write_file(
+            &alice_dir,
+            "bare-uid",
+            &format!(
+                "scope: user\nuser_id: {}",
+                ALICE.rsplit('/').next().unwrap()
+            ),
+        );
+        // (c) frontmatter user_id claims another user — directory wins.
+        write_file(&alice_dir, "wrong-uid", &format!("scope: user\nuser_id: {}", BOB));
+
+        for f in scan_user_layer(&root, ALICE).unwrap() {
+            let uid = f.user_id.as_deref().expect("user layer entry must carry user_id");
+            assert_eq!(uid, ALICE, "entry {} must be owned by the dir owner FQID", f.name);
+            assert!(
+                crate::ids::Fqid::parse(uid, crate::ids::DEFAULT_NAMESPACE).is_some(),
+                "scanned user_id must be canonical FQID form, got '{}'",
+                uid
+            );
+        }
+        for f in scan_all_user_layers(&root).unwrap() {
+            let uid = f.user_id.as_deref().expect("user layer entry must carry user_id");
+            assert_eq!(uid, ALICE);
+            assert!(crate::ids::Fqid::parse(uid, crate::ids::DEFAULT_NAMESPACE).is_some());
+        }
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Restore directory permissions on drop, even on assertion panic.
+    struct PermGuard<'a>(&'a Path);
+    impl Drop for PermGuard<'_> {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+
+    #[test]
+    fn scan_io_errors_propagate_instead_of_empty_layers() {
+        let root = layered_layout("ioerr");
+        write_file(
+            &user_memory_dir(&root, ALICE),
+            "alice-note",
+            &format!("scope: user\nuser_id: {}", ALICE),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let alice_dir = user_memory_dir(&root, ALICE);
+            fs::set_permissions(&alice_dir, fs::Permissions::from_mode(0o000)).unwrap();
+            let guard = PermGuard(&alice_dir);
+            // Privileged runners (root) bypass mode bits — chmod 0 cannot
+            // produce EACCES there; skip instead of asserting vacuously.
+            if fs::read_dir(&alice_dir).is_ok() {
+                eprintln!("skipping: privileged runner, chmod 0 does not deny access");
+                return;
+            }
+            assert!(scan_memory_files(&alice_dir).is_err());
+            assert!(scan_user_layer(&root, ALICE).is_err());
+            assert!(scan_merged_for_user(&root, ALICE).is_err());
+            assert!(scan_all_user_layers(&root).is_err());
+            drop(guard); // restore permissions before cleanup
+        }
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn filter_invalid_memory_drops_broken_entries() {
+        let base = |name: &str, scope: Option<&str>, user_id: Option<&str>| MemoryFile {
+            name: name.into(),
+            scope: scope.map(|s| s.to_string()),
+            user_id: user_id.map(|s| s.to_string()),
+            mem_type: "entity".into(),
+            inject: "search".into(),
+            description: String::new(),
+            tags: vec![],
+            created_at: String::new(),
+            updated_at: None,
+            links: vec![],
+            content: String::new(),
+            path: std::path::PathBuf::new(),
+        };
+        // Valid: agent + complete user entries survive.
+        assert!(filter_invalid_memory(&base("a", Some("agent"), None)));
+        assert!(filter_invalid_memory(&base("u", Some("user"), Some("myclaw/u/x"))));
+        // Invalid: empty identity fields, bogus scope, user scope without
+        // (or with blank) user_id.
+        assert!(!filter_invalid_memory(&base("", Some("agent"), None)));
+        assert!(!filter_invalid_memory(&base("n", None, None)));
+        assert!(!filter_invalid_memory(&base("n", Some("banana"), None)));
+        assert!(!filter_invalid_memory(&base("n", Some("user"), None)));
+        assert!(!filter_invalid_memory(&base("n", Some("user"), Some("  "))));
+
+        // End-to-end: an agent-dir user-scope entry without user_id cannot
+        // be attributed to any user layer → dropped everywhere instead of
+        // surfacing as an ownerless user entry.
+        let root = layered_layout("invalid");
+        write_file(&root, "orphan-user", "scope: user");
+        assert!(!scan_agent_layer(&root).unwrap().iter().any(|f| f.name == "orphan-user"));
+        assert!(scan_user_layer(&root, ALICE).unwrap().is_empty());
+        assert!(scan_all_user_layers(&root).unwrap().is_empty());
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn user_layer_injection_isolation() {
+        // Regression for the injection leak: alice's inject=always user-layer
+        // entry must never enter bob's merged view.
+        let root = layered_layout("inject");
+        write_file(&user_memory_dir(&root, ALICE), "alice-always", &format!("scope: user\nuser_id: {}\ninject: always", ALICE));
+        let bob_view = scan_merged_for_user(&root, BOB).unwrap();
+        assert!(bob_view.iter().all(|f| f.name != "alice-always"));
+        let alice_view = scan_merged_for_user(&root, ALICE).unwrap();
+        assert!(alice_view.iter().any(|f| f.name == "alice-always"));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn test_parse_layer_prefix() {
+        assert_eq!(parse_layer_prefix("agent:x"), Some(("agent", "x")));
+        assert_eq!(parse_layer_prefix("user:foo-bar"), Some(("user", "foo-bar")));
+        assert_eq!(parse_layer_prefix("x"), None);
+        assert_eq!(parse_layer_prefix("agent:"), None);
+        assert_eq!(strip_layer_prefix("agent:x"), "x");
+        assert_eq!(strip_layer_prefix("user:y"), "y");
+        assert_eq!(strip_layer_prefix("z"), "z");
+    }
+
+    #[test]
+    fn test_extract_links_layer_qualified() {
+        let content = "Body.\n\n## See Also\n- [Same layer](foo.md)\n- [Agent entry](agent:bar.md)\n- [User entry](user:baz.md)";
+        let links = extract_links(content);
+        let targets: Vec<&str> = links.iter().map(|l| l.target.as_str()).collect();
+        assert_eq!(targets, vec!["foo", "agent:bar", "user:baz"]);
+    }
+
+    #[test]
+    fn test_build_backlinks_layer_rules() {
+        let mf = |name: &str, scope: Option<&str>, targets: &[&str]| MemoryFile {
+            name: name.into(),
+            scope: scope.map(|s| s.to_string()),
+            user_id: None,
+            mem_type: "entity".into(),
+            inject: "search".into(),
+            description: String::new(),
+            tags: vec![],
+            created_at: String::new(),
+            updated_at: None,
+            links: targets
+                .iter()
+                .map(|t| LinkRef {
+                    target: t.to_string(),
+                    label: "rel".into(),
+                })
+                .collect(),
+            content: String::new(),
+            path: std::path::PathBuf::new(),
+        };
+        // Only the user layer has an entry named "x".
+        let files = vec![
+            mf("a", Some("agent"), &["x", "user:x"]),
+            mf("u", Some("user"), &["x", "agent:x"]),
+            mf("x", Some("user"), &[]),
+        ];
+        let backlinks = build_backlinks(&files);
+        // Bare "x" from a → same layer (agent) → no agent-layer "x" exists →
+        // no hit. user:x from a → explicit cross-layer → hits user x.
+        // Bare "x" from u → same layer → hits user x. agent:x from u →
+        // explicit → hits agent x? No agent x exists → no hit.
+        assert_eq!(
+            backlinks.get("user:x"),
+            Some(&vec!["agent:a".to_string(), "user:u".to_string()])
+        );
+        assert!(backlinks.get("x").is_none());
+        let _ = fs::remove_dir_all(std::env::temp_dir().join("myclaw_test_layered_dir"));
+    }
+
+    #[test]
+    fn backlinks_same_name_across_layers_do_not_aggregate() {
+        // Regression (PR #211): `agent:foo` and `user:foo` are distinct
+        // entities — their backlink lists must stay separate under
+        // layer-qualified keys, never merged under a bare name.
+        let mf = |name: &str, scope: Option<&str>, targets: &[&str]| MemoryFile {
+            name: name.into(),
+            scope: scope.map(|s| s.to_string()),
+            user_id: None,
+            mem_type: "entity".into(),
+            inject: "search".into(),
+            description: String::new(),
+            tags: vec![],
+            created_at: String::new(),
+            updated_at: None,
+            links: targets
+                .iter()
+                .map(|t| LinkRef {
+                    target: t.to_string(),
+                    label: "rel".into(),
+                })
+                .collect(),
+            content: String::new(),
+            path: std::path::PathBuf::new(),
+        };
+        let files = vec![
+            mf("a", Some("agent"), &["foo", "user:foo"]),
+            mf("u", Some("user"), &["foo", "agent:foo"]),
+            mf("foo", Some("agent"), &[]),
+            mf("foo", Some("user"), &[]),
+        ];
+        let backlinks = build_backlinks(&files);
+        // Bare "foo" from a → same-layer agent:foo. Explicit user:foo from
+        // a → user:foo. Symmetrically for u.
+        assert_eq!(
+            backlinks.get("agent:foo"),
+            Some(&vec!["agent:a".to_string(), "user:u".to_string()])
+        );
+        assert_eq!(
+            backlinks.get("user:foo"),
+            Some(&vec!["agent:a".to_string(), "user:u".to_string()])
+        );
+        // No bare-name key aggregates the two layers.
+        assert!(!backlinks.contains_key("foo"));
     }
 }
