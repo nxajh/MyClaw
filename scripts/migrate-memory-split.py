@@ -11,7 +11,11 @@ Forward run:
   0. Precheck: TSV name set must equal the {base}/memory/*.md disk inventory
      exactly, and no TSV name may already exist under users/{uuid}/memory
      (guards against stacking a second run on top of a finished one).
-  1. Backup every pool file to {base}/backups/memory-split-pre-migration/.
+  1. Backup every pool file to {base}/backups/memory-split-pre-migration/
+     and write manifest.json there recording what this run owns
+     (`owned`: all TSV names, stems) and what it does NOT own
+     (`foreign_user_files`: user-layer .md filenames that predate the run),
+     plus the TSV content hash (`tsv_sha256`) and `created_at`.
   2. Dispatch per TSV final: agent files stay (frontmatter scope normalized to
      unquoted `agent`, user_id line removed), user files move to
      users/{uuid}/memory (scope `user`, user_id set to the operator FQID).
@@ -27,14 +31,20 @@ Forward run:
      zero dangling links, layer/scope attribution consistency, and re-run
      idempotency (a finished pool re-detects as migrated -> full no-op).
 
---rollback restores {base}/memory from the backup (cleared, then copied back),
-empties users/{uuid}/memory, removes the backup, and verifies the restored
-inventory equals the backup inventory. --dry-run prints the full plan without
-touching disk. `.pending` files are never created or consumed by this script.
+--rollback restores {base}/memory from the backup and clears the user memory
+layer — but ONLY for files this migration owns, per the backup manifest:
+owned files are restored to memory/ and removed from the user layer, foreign
+files (recorded in manifest.json) are never touched, and after rollback the
+surviving foreign set is verified against the manifest. A forward run aborts
+if a backup directory already exists with a missing/corrupt manifest.
+--dry-run prints the full plan without touching disk. `.pending` files are
+never created or consumed by this script.
 
 {base} is daemon data, not a git repo — plain filesystem operations only.
 """
 import argparse
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -45,6 +55,7 @@ OPERATOR_UUID = "01a0151d-997f-7980-9ad1-cd9caf893d87"
 OPERATOR_FQID = "myclaw/u/01a0151d-997f-7980-9ad1-cd9caf893d87"
 
 BACKUP_DIRNAME = "memory-split-pre-migration"
+MANIFEST_NAME = "manifest.json"
 
 # The three adjudicated deletions (P4 TSV). Any other `deleted` row is an
 # unimplemented adjudication and aborts the run.
@@ -88,6 +99,14 @@ def read_file(path):
 def write_file(path, text):
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def line_ending(line):
@@ -139,6 +158,54 @@ def parse_md_href(href):
     if stem.startswith("user:") and len(stem) > len("user:"):
         return "user", stem[len("user:"):]
     return None, stem
+
+
+# --------------------------------------------------------------------------- #
+# backup manifest
+# --------------------------------------------------------------------------- #
+
+def manifest_path(backup_dir):
+    return os.path.join(backup_dir, MANIFEST_NAME)
+
+
+def write_manifest(backup_dir, owned, foreign_user_files, tsv_sha256):
+    manifest = {
+        "version": 1,
+        "created_at": date.today().isoformat(),
+        "tsv_sha256": tsv_sha256,
+        # memory names (stems) this run owns — every TSV row's file
+        "owned": sorted(owned),
+        # user-layer filenames this run does NOT own; never touched by it
+        "foreign_user_files": sorted(foreign_user_files),
+    }
+    write_file(manifest_path(backup_dir),
+               json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+    return manifest
+
+
+def load_manifest(backup_dir):
+    """Load and shape-validate the backup manifest; abort on any problem."""
+    path = manifest_path(backup_dir)
+    if not os.path.isfile(path):
+        fail(f"backup dir exists but {MANIFEST_NAME} is missing: {path} — "
+             f"cannot tell owned from foreign files. If the backup contains no "
+             f".md files it is a leftover of an interrupted step 1: inspect and "
+             f"remove it manually, otherwise recover by hand.")
+    try:
+        manifest = json.loads(read_file(path))
+    except ValueError as e:
+        fail(f"backup manifest is corrupt (invalid JSON): {path}: {e}")
+    if not isinstance(manifest, dict):
+        fail(f"backup manifest is corrupt (not a JSON object): {path}")
+    for key in ("owned", "foreign_user_files", "tsv_sha256", "created_at"):
+        if key not in manifest:
+            fail(f"backup manifest is corrupt (missing {key!r}): {path}")
+    for key in ("owned", "foreign_user_files"):
+        if (not isinstance(manifest[key], list)
+                or not all(isinstance(v, str) for v in manifest[key])):
+            fail(f"backup manifest is corrupt ({key!r} must be a list of "
+                 f"strings): {path}")
+    return manifest
 
 
 # --------------------------------------------------------------------------- #
@@ -328,15 +395,18 @@ def run_invariants(final_by_name, agent_dir, user_dir, backup_dir, pre_disk_coun
         c1_errors.append(f"deleted files still on disk: {sorted(deleted & (agent_set | user_set))}")
 
     # 2. zero dangling links across the whole pool (both layers, all files)
+    # owned files only — foreign user-layer files are not this run's output
     inventory = {n: "agent" for n in agent_set}
     inventory.update({n: "user" for n in user_set})
     dangling = []
     for layer, directory in (("agent", agent_dir), ("user", user_dir)):
         for fname in md_files(directory):
+            if fname[:-3] not in final_by_name:
+                continue  # foreign to this migration
             dangling += extract_dangling(read_file(os.path.join(directory, fname)),
                                          fname[:-3], layer, inventory)
 
-    # 3. attribution consistency
+    # 3. attribution consistency (owned files only)
     attr_errors = []
     for fname in md_files(agent_dir):
         fm, _, _, _ = split_frontmatter(read_file(os.path.join(agent_dir, fname)))
@@ -347,6 +417,8 @@ def run_invariants(final_by_name, agent_dir, user_dir, backup_dir, pre_disk_coun
             if key == "user_id":
                 attr_errors.append(f"agent dir: {fname} has user_id")
     for fname in md_files(user_dir):
+        if fname[:-3] not in final_by_name:
+            continue  # foreign to this migration
         fm, _, _, _ = split_frontmatter(read_file(os.path.join(user_dir, fname)))
         uid = next((line.split(":", 1)[1].strip().strip('"') for line in fm or []
                     if fm_key(line) == "user_id"), None)
@@ -376,37 +448,73 @@ def run_invariants(final_by_name, agent_dir, user_dir, backup_dir, pre_disk_coun
 # --------------------------------------------------------------------------- #
 
 def do_rollback(agent_dir, user_dir, backup_dir):
+    """Restore the flat pool from the backup, strictly manifest-scoped:
+    only `owned` files are restored to memory/ and removed from the user
+    layer; `foreign_user_files` are never touched, and the surviving foreign
+    set is verified against the manifest afterwards."""
     if not os.path.isdir(backup_dir):
         print("No backup directory — nothing to rollback.")
         return 0
-    backup_names = md_names(backup_dir)
+    manifest = load_manifest(backup_dir)
+    owned = set(manifest["owned"])
+    foreign_manifest = set(manifest["foreign_user_files"])  # filenames, .md kept
+
+    backup_on_disk = md_names(backup_dir)
+    if backup_on_disk != owned:
+        fail(f"backup integrity: .md inventory != manifest owned set "
+             f"(missing from backup: {sorted(owned - backup_on_disk)}; "
+             f"not owned but present: {sorted(backup_on_disk - owned)})")
+
+    # 1. restore owned files into the flat pool (remove only owned files there)
     os.makedirs(agent_dir, exist_ok=True)
-    # restore the flat pool: clear *.md, copy the backup back
-    for fname in md_files(agent_dir):
-        os.remove(os.path.join(agent_dir, fname))
-    for name in sorted(backup_names):
+    for name in sorted(owned):
+        p = os.path.join(agent_dir, name + ".md")
+        if os.path.isfile(p):
+            os.remove(p)
+    for name in sorted(owned):
         shutil.copy2(os.path.join(backup_dir, name + ".md"),
                      os.path.join(agent_dir, name + ".md"))
-    # empty the user memory layer
+
+    # 2. clear the user layer of owned files ONLY — foreign files stay
     user_removed = 0
     if os.path.isdir(user_dir):
         for fname in md_files(user_dir):
-            os.remove(os.path.join(user_dir, fname))
-            user_removed += 1
+            if fname[:-3] in owned:
+                os.remove(os.path.join(user_dir, fname))
+                user_removed += 1
         try:
-            os.rmdir(user_dir)
+            os.rmdir(user_dir)  # succeeds only when no foreign file remains
         except OSError:
             pass
+
     shutil.rmtree(backup_dir)
+
+    # 3. verification
     restored = md_names(agent_dir)
-    print(f"rollback: restored {len(restored)} files -> {agent_dir}; "
-          f"removed {user_removed} files from user layer; backup deleted.")
-    if restored != backup_names:
-        print(f"VERIFY FAILED: restored inventory != backup inventory: "
-              f"missing={sorted(backup_names - restored)} extra={sorted(restored - backup_names)}",
-              file=sys.stderr)
+    foreign_now = set(md_files(user_dir)) if os.path.isdir(user_dir) else set()
+    problems = []
+    if not owned <= restored:
+        problems.append(f"owned files missing after restore: {sorted(owned - restored)}")
+    missing_foreign = sorted(foreign_manifest - foreign_now)
+    if missing_foreign:
+        problems.append(f"foreign files lost (must never be touched): {missing_foreign}")
+    extra_foreign = sorted(foreign_now - foreign_manifest)
+    extra_agent = sorted(restored - owned)
+
+    print(f"rollback: restored {len(owned)} owned files -> {agent_dir}; "
+          f"removed {user_removed} owned files from user layer; backup deleted.")
+    if extra_agent:
+        print(f"note: {len(extra_agent)} non-owned files in memory/ were left in place: {extra_agent}")
+    if extra_foreign:
+        print(f"note: {len(extra_foreign)} user-layer files appeared after the backup "
+              f"and were left untouched: {extra_foreign}")
+    if problems:
+        for p in problems:
+            print(f"VERIFY FAILED: {p}", file=sys.stderr)
         return 1
-    print("rollback verified: disk inventory == backup inventory.")
+    if foreign_now == foreign_manifest:
+        print("rollback verified: restored inventory == backup owned set; "
+              "foreign user files match the manifest.")
     return 0
 
 
@@ -510,11 +618,20 @@ def main(argv=None):
         os.path.join(base, "memory-migration", "migration-final.tsv")
 
     if args.rollback:
-        return do_rollback(agent_dir, user_dir, backup_dir)
+        try:
+            return do_rollback(agent_dir, user_dir, backup_dir)
+        except MigrationError as e:
+            print(f"ABORT: {e}", file=sys.stderr)
+            return 1
 
     try:
         final_by_name = load_tsv(tsv_path)
         validate_deleted_adjudication(final_by_name)
+
+        # a backup dir without a loadable manifest is unusable for both a
+        # re-run and a later rollback — refuse up front (owned/foreign unknown)
+        if os.path.isdir(backup_dir):
+            load_manifest(backup_dir)
 
         state = detect_state(final_by_name, agent_dir, user_dir, backup_dir)
         if state == "migrated":
@@ -557,13 +674,18 @@ def main(argv=None):
                 print(f"  would {t:11s} {name}: {detail}")
             return 0
 
-        # -- step 1: backup ----------------------------------------------------
+        # -- step 1: backup + manifest -----------------------------------------
         if os.path.exists(backup_dir):
             fail(f"backup dir already exists: {backup_dir} — run --rollback or remove it first")
         os.makedirs(backup_dir)
         for fname in md_files(agent_dir):
             shutil.copy2(os.path.join(agent_dir, fname), os.path.join(backup_dir, fname))
-        print(f"step 1 backup: {len(md_names(backup_dir))} files -> {backup_dir}")
+        foreign = md_names(user_dir) - set(final_by_name)  # recompute at write time
+        manifest = write_manifest(backup_dir, owned=set(final_by_name),
+                                  foreign_user_files=sorted(f + ".md" for f in foreign),
+                                  tsv_sha256=sha256_file(tsv_path))
+        print(f"step 1 backup: {len(md_names(backup_dir))} files -> {backup_dir} "
+              f"(owned={len(manifest['owned'])}, foreign_user_files={len(manifest['foreign_user_files'])})")
 
         # -- steps 2+3 ---------------------------------------------------------
         counts, dead_list, rewrite_list = plan_and_execute(

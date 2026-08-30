@@ -6,8 +6,10 @@
 # 池全部自造，不触碰生产 ~/.myclaw。
 
 import contextlib
+import hashlib
 import importlib.util
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -287,6 +289,67 @@ class MigrateMemorySplitTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("does not implement", err)
         self.assertIn("mystery_entry", err)
+
+    # ------------------------------------------------- backup manifest / rollback safety
+
+    def test_backup_manifest_contents(self):
+        self.write_pool()
+        rc, out, err = self.run_script()
+        self.assertEqual(rc, 0, out + err)
+        manifest = json.loads((self.base / "backups" / M.BACKUP_DIRNAME /
+                               "manifest.json").read_text())
+        self.assertEqual(manifest["owned"], sorted([
+            "alpha_agent", "beta_user", "gamma_user", "placeholder_check",
+            "tmp_view_placeholder", "wechat_mp_history_tracking_workaround",
+            "wechat_mp_draft_period_tracking"]))
+        self.assertEqual(manifest["foreign_user_files"], [])
+        tsv_bytes = (self.base / "memory-migration" / "migration-final.tsv").read_bytes()
+        self.assertEqual(manifest["tsv_sha256"], hashlib.sha256(tsv_bytes).hexdigest())
+        self.assertTrue(manifest["created_at"])
+
+    def test_rollback_preserves_foreign_user_files(self):
+        self.write_pool()
+        udir = self.base / USER_DIR_REL
+        udir.mkdir(parents=True)
+        (udir / "someone_elses_memory.md").write_text(
+            '---\nname: someone_elses_memory\nscope: user\n---\nforeign body\n')
+        (udir / "another_foreign.md").write_text("foreign 2\n")
+        rc, _, _ = self.run_script()
+        self.assertEqual(rc, 0)
+        self.assertIn("someone_elses_memory", (udir / "someone_elses_memory.md").read_text())
+        rc, out, err = self.run_script("--rollback")
+        self.assertEqual(rc, 0, out + err)
+        # foreign files: byte-identical, never touched by migration or rollback
+        self.assertEqual((udir / "someone_elses_memory.md").read_text(),
+                         '---\nname: someone_elses_memory\nscope: user\n---\nforeign body\n')
+        self.assertEqual((udir / "another_foreign.md").read_text(), "foreign 2\n")
+        # owned files: restored to the flat pool, gone from the user layer
+        self.assertTrue((self.base / "memory" / "beta_user.md").exists())
+        self.assertFalse((udir / "beta_user.md").exists())
+        self.assertIn("foreign user files match the manifest", out)
+        self.assertIn("removed 3 owned files from user layer", out)
+
+    def test_forward_aborts_when_backup_manifest_missing(self):
+        self.write_pool()
+        backup = self.base / "backups" / M.BACKUP_DIRNAME
+        backup.mkdir(parents=True)  # interrupted step 1: dir but no manifest
+        rc, out, err = self.run_script()
+        self.assertEqual(rc, 1)
+        self.assertIn("manifest.json is missing", err)
+        # nothing mutated
+        self.assertFalse((self.base / USER_DIR_REL / "beta_user.md").exists())
+        self.assertTrue((self.base / "memory" / "beta_user.md").exists())
+
+    def test_rollback_aborts_when_backup_manifest_missing(self):
+        self.write_pool()
+        rc, _, _ = self.run_script()
+        self.assertEqual(rc, 0)
+        (self.base / "backups" / M.BACKUP_DIRNAME / "manifest.json").unlink()
+        before = self.snapshot()
+        rc, out, err = self.run_script("--rollback")
+        self.assertEqual(rc, 1)
+        self.assertIn("manifest.json is missing", err)
+        self.assertEqual(self.snapshot(), before)  # nothing mutated
 
     def test_pending_files_untouched(self):
         self.write_pool()
