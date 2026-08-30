@@ -119,9 +119,12 @@ impl super::Agent {
                         .push_skill_draft_reminder(backlog.user_layer, backlog.agent_layer);
                 }
                 let memory_root = &runtime.defaults.prompt.memory_root;
+                // P4: merged view (agent layer + this owner's user layer) —
+                // same fix as session_context: no cross-user injection leak.
                 let memory_entries: Vec<crate::memory::IndexEntry> = if !memory_root.is_empty() {
                     let memory_dir = std::path::Path::new(memory_root);
-                    let files = crate::memory::scan_memory_files(memory_dir);
+                    let files =
+                        crate::memory::scan_merged_for_user(memory_dir, &session.owner_fqid);
                     files.iter().map(crate::memory::IndexEntry::from).collect()
                 } else {
                     Vec::new()

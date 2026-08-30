@@ -803,10 +803,14 @@ impl SessionContext {
                     .push_skill_draft_reminder(backlog.user_layer, backlog.agent_layer);
             }
             // Inject user/feedback memory index as system-reminder.
+            // P4 (RFC #101 §6): merged view — the agent layer plus THIS
+            // owner's user layer. The previous full single-pool scan let any
+            // user's inject=always entries leak into every conversation.
             let memory_root = &runtime.defaults.prompt.memory_root;
             let memory_entries: Vec<crate::memory::IndexEntry> = if !memory_root.is_empty() {
                 let memory_dir = std::path::Path::new(memory_root);
-                let files = crate::memory::scan_memory_files(memory_dir);
+                let files =
+                    crate::memory::scan_merged_for_user(memory_dir, &session.owner_fqid);
                 files.iter().map(crate::memory::IndexEntry::from).collect()
             } else {
                 Vec::new()
