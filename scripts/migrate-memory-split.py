@@ -392,16 +392,20 @@ def validate_deleted_adjudication(final_by_name):
              f"{MERGE_SOURCE!r} into it")
 
 
-def precheck_user_ownership(final_by_name, agent_dir, operator_fqid):
-    """Single-operator constraint (PR #212 review r4): every `final=user`
+def precheck_user_ownership(final_by_name, agent_dir, operator_fqid,
+                            ack_single_owner, dry_run=False):
+    """Single-operator constraint (PR #212 review r4/r5): every `final=user`
     row whose flat-pool file declares a frontmatter `user_id` must declare
-    THIS operator's FQID (quotes stripped). Rows without any `user_id`
-    declaration are allowed — those are agent-layer entries the operator
-    signed into their private layer (R-group), with no prior owner to
-    violate. A pool holding another user's private entries must abort
-    before any mutation: this script migrates into ONE user directory and
-    would otherwise reattribute cross-user data."""
-    conflicts = []
+    THIS operator's FQID (quotes stripped) — any conflict aborts. Rows
+    without any `user_id` declaration (R-group: agent-layer entries the
+    operator signed into their private layer) cannot be mechanically
+    verified, so a mutating run over a pool that CONTAINS them requires the
+    explicit `--ack-single-owner` acknowledgement that the operator accepts
+    them as their own per the signed adjudication. A pool holding another
+    user's private entries must abort before any mutation: this script
+    migrates into ONE user directory and would otherwise reattribute
+    cross-user data."""
+    conflicts, undeclared, declared = [], [], 0
     for name in sorted(final_by_name):
         if final_by_name[name] != "user":
             continue
@@ -416,13 +420,28 @@ def precheck_user_ownership(final_by_name, agent_dir, operator_fqid):
             if line.startswith("user_id:"):
                 uid = line.split(":", 1)[1].strip().strip('"').strip("'")
                 break
-        if uid and uid != operator_fqid:
+        if uid is None:
+            undeclared.append(name)
+        elif uid != operator_fqid:
             conflicts.append(f"{name} (declares user_id {uid!r})")
+        else:
+            declared += 1
     if conflicts:
         fail(f"precheck: single-operator constraint violated — these final=user "
              f"entries belong to another user and must NOT be reattributed to "
              f"{operator_fqid!r}: {conflicts}. Migrate each owner's entries "
              f"separately (per-owner TSV runs) or re-adjudicate them.")
+    if undeclared:
+        if dry_run:
+            print(f"single-operator precheck: {declared} final=user entries "
+                  f"declare {operator_fqid!r}; {len(undeclared)} carry no "
+                  f"user_id (R-group, per signed adjudication): {undeclared}")
+        elif not ack_single_owner:
+            fail(f"precheck: {len(undeclared)} final=user entries carry no "
+                 f"user_id declaration ({undeclared}) — their ownership "
+                 f"cannot be verified mechanically. The signed adjudication "
+                 f"assigns them to this operator; if you accept that, rerun "
+                 f"with --ack-single-owner.")
 
 
 # --------------------------------------------------------------------------- #
@@ -832,6 +851,11 @@ def _build_parser():
                              f"SINGLE-OPERATOR constraint: every final=user entry that declares a "
                              f"frontmatter user_id must declare this FQID — mixed-owner pools abort "
                              f"before any mutation (migrate each owner with a separate TSV run)")
+    parser.add_argument("--ack-single-owner", action="store_true",
+                        help="required for a mutating run when any final=user entry "
+                             "carries no user_id declaration (R-group): the operator "
+                             "explicitly accepts the signed adjudication that assigns "
+                             "those entries to them")
     parser.add_argument("--force", action="store_true",
                         help="proceed even if the myclaw daemon appears to be running (risky)")
     return parser
@@ -921,7 +945,9 @@ def _main_impl(argv=None, runner=None):
         if missing_on_disk or not_in_tsv:
             fail(f"precheck: TSV list != disk inventory "
                  f"(missing on disk: {missing_on_disk}; not in TSV: {not_in_tsv})")
-        precheck_user_ownership(final_by_name, agent_dir, operator_fqid)
+        precheck_user_ownership(final_by_name, agent_dir, operator_fqid,
+                                ack_single_owner=args.ack_single_owner,
+                                dry_run=args.dry_run)
         collisions = sorted(set(final_by_name) & md_names(user_dir))
         if collisions:
             fail(f"precheck: names already present in user layer (refusing to stack runs): "

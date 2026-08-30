@@ -170,10 +170,14 @@ class MigrateMemorySplitTest(unittest.TestCase):
         (self.base / "memory-migration" / "migration-final.tsv").write_text(
             "".join("\t".join(r) + "\n" for r in rows))
 
-    def run_script(self, *extra, runner="inactive"):
+    def run_script(self, *extra, runner="inactive", ack=True):
         out, err = io.StringIO(), io.StringIO()
+        argv = ["--base", str(self.base)]
+        if ack:
+            argv.append("--ack-single-owner")
+        argv += list(extra)
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = M.main(["--base", str(self.base), *extra],
+            rc = M.main(argv,
                         runner=None if runner is None else make_runner(runner))
         return rc, out.getvalue(), err.getvalue()
 
@@ -579,6 +583,42 @@ class MigrateMemorySplitTest(unittest.TestCase):
         self.assertFalse((self.base / USER_DIR_REL / "ghost.md.pending").exists())
 
 
+    def test_ack_single_owner_required_for_undeclared(self):
+        # r5 review: R-group (no user_id) entries cannot be mechanically
+        # verified — a mutating run over them needs the explicit
+        # acknowledgement flag; dry-run reports them read-only.
+        self.write_pool()
+        # dry-run: informational only
+        rc, out, err = self.run_script("--dry-run", ack=False)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("carry no user_id", out)
+        self.assertIn("beta_user", out)
+        # mutating run without the flag: abort, zero mutation
+        rc, out, err = self.run_script(ack=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("--ack-single-owner", err)
+        self.assertIn("beta_user", err)
+        self.assertFalse((self.base / "backups").exists())
+        self.assertFalse((self.base / USER_DIR_REL).exists())
+        self.assertTrue((self.base / "memory" / "beta_user.md").exists())
+        # with the flag: proceeds
+        rc, out, err = self.run_script()
+        self.assertEqual(rc, 0, out + err)
+        self.assertTrue((self.base / USER_DIR_REL / "beta_user.md").exists())
+
+    def test_all_declared_needs_no_ack(self):
+        # Every final=user entry declares the operator FQID: mechanically
+        # verified, no human acknowledgement required.
+        self.write_pool()
+        for name in ("beta_user", "gamma_user", "wechat_mp_draft_period_tracking"):
+            f = self.base / "memory" / (name + ".md")
+            f.write_text(f.read_text().replace(
+                'name: "%s"' % name,
+                'name: "%s"\nuser_id: "%s"' % (name, FQID), 1))
+        rc, out, err = self.run_script(ack=False)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("beta_user.md", os.listdir(self.base / USER_DIR_REL))
+
     def test_mixed_owner_pool_aborts_before_mutation(self):
         # r4 review: final=user entries declaring ANOTHER user's FQID must
         # abort before any mutation (single-operator constraint).
@@ -655,7 +695,8 @@ class MigrateMemorySplitTest(unittest.TestCase):
         try:
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                rc = M.main(["--base", str(self.base), "--operator-fqid", M.OPERATOR_FQID])
+                rc = M.main(["--base", str(self.base), "--operator-fqid", M.OPERATOR_FQID,
+                             "--ack-single-owner"])
         finally:
             M.default_command_runner = orig
         self.assertEqual(rc, 0, out.getvalue() + err.getvalue())
