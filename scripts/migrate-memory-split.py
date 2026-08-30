@@ -355,31 +355,53 @@ def extract_dangling(text, src_name, src_layer, inventory):
 # state detection
 # --------------------------------------------------------------------------- #
 
-def detect_state(final_by_name, agent_dir, user_dir, backup_dir):
-    """fresh | migrated | partial. `migrated` = a re-run must be a full no-op."""
+def detect_state(final_by_name, agent_dir, user_dir, backup_dir, manifest=None, tsv_sha256=None):
+    """(state, reasons): fresh | migrated | partial. `migrated` = a re-run
+    must be a full no-op. Owned state must equal the TSV expectation AND the
+    foreign user-layer baseline must be unchanged since the backup manifest
+    was written; anything else (including manifest/TSV drift) is partial."""
     if not os.path.isdir(backup_dir):
-        return "fresh"
+        return "fresh", []
+    if manifest is None:
+        return "partial", ["backup dir exists but manifest.json is missing/corrupt"]
+    reasons = []
     expect_agent = {n for n, f in final_by_name.items() if f == "agent"}
     expect_user = {n for n, f in final_by_name.items() if f == "user"}
-    agent_set, user_set = md_names(agent_dir), md_names(user_dir)
     deleted = {n for n, f in final_by_name.items() if f == "deleted"}
-    if (agent_set == expect_agent
-            and user_set >= expect_user
-            and not (deleted & (agent_set | user_set))):
-        return "migrated"
-    return "partial"
+    owned = set(manifest["owned"])
+    foreign_baseline = {f[:-3] for f in manifest["foreign_user_files"]}
+    agent_set, user_set = md_names(agent_dir), md_names(user_dir)
+
+    if owned != set(final_by_name):
+        reasons.append("manifest owned set != current TSV name set "
+                       "(backup was taken against a different TSV)")
+    if tsv_sha256 is not None and manifest.get("tsv_sha256") != tsv_sha256:
+        reasons.append("manifest tsv_sha256 != current TSV hash (TSV changed after the backup)")
+    if agent_set != expect_agent:
+        reasons.append(f"agent dir != final=agent set "
+                       f"(missing={sorted(expect_agent - agent_set)} extra={sorted(agent_set - expect_agent)})")
+    if user_set != expect_user | foreign_baseline:
+        reasons.append(f"user dir != final=user set + manifest foreign baseline "
+                       f"(unexpected={sorted(user_set - expect_user - foreign_baseline)} "
+                       f"missing={sorted((expect_user | foreign_baseline) - user_set)})")
+    if deleted & (agent_set | user_set):
+        reasons.append(f"deleted files still on disk: {sorted(deleted & (agent_set | user_set))}")
+    return ("migrated" if not reasons else "partial"), reasons
 
 
 # --------------------------------------------------------------------------- #
 # invariants
 # --------------------------------------------------------------------------- #
 
-def run_invariants(final_by_name, agent_dir, user_dir, backup_dir, pre_disk_count):
+def run_invariants(final_by_name, agent_dir, user_dir, backup_dir, pre_disk_count,
+                   manifest):
     """All four Absolute Invariants. Returns (rows, ok) — rows for the report
-    table, ok=False aborts with details on stdout/stderr."""
+    table, ok=False aborts with details on stdout/stderr. Owned state is judged
+    against the TSV expectation; foreign files against the manifest baseline."""
     expect_agent = {n for n, f in final_by_name.items() if f == "agent"}
     expect_user = {n for n, f in final_by_name.items() if f == "user"}
     deleted = {n for n, f in final_by_name.items() if f == "deleted"}
+    foreign_baseline = {f[:-3] for f in manifest["foreign_user_files"]}
 
     # 1. count conservation (self-counted, nothing baked in)
     agent_set, user_set = md_names(agent_dir), md_names(user_dir)
@@ -393,6 +415,11 @@ def run_invariants(final_by_name, agent_dir, user_dir, backup_dir, pre_disk_coun
         c1_errors.append(f"user dir missing final=user files: {sorted(expect_user - user_set)}")
     if deleted & (agent_set | user_set):
         c1_errors.append(f"deleted files still on disk: {sorted(deleted & (agent_set | user_set))}")
+    extra_user = user_set - expect_user
+    if extra_user != foreign_baseline:
+        c1_errors.append(f"user dir extras != manifest foreign baseline: "
+                         f"unexpected={sorted(extra_user - foreign_baseline)} "
+                         f"missing={sorted(foreign_baseline - extra_user)}")
 
     # 2. zero dangling links across the whole pool (both layers, all files)
     # owned files only — foreign user-layer files are not this run's output
@@ -426,7 +453,7 @@ def run_invariants(final_by_name, agent_dir, user_dir, backup_dir, pre_disk_coun
             attr_errors.append(f"user dir: {fname} user_id={uid!r} != operator FQID")
 
     # 4. idempotency — the finished pool must re-detect as fully migrated
-    state = detect_state(final_by_name, agent_dir, user_dir, backup_dir)
+    state, _ = detect_state(final_by_name, agent_dir, user_dir, backup_dir, manifest)
 
     rows = [
         ("1 count conservation", not c1_errors),
@@ -627,17 +654,20 @@ def main(argv=None):
     try:
         final_by_name = load_tsv(tsv_path)
         validate_deleted_adjudication(final_by_name)
+        tsv_sha256 = sha256_file(tsv_path)
 
         # a backup dir without a loadable manifest is unusable for both a
         # re-run and a later rollback — refuse up front (owned/foreign unknown)
-        if os.path.isdir(backup_dir):
-            load_manifest(backup_dir)
+        manifest = load_manifest(backup_dir) if os.path.isdir(backup_dir) else None
 
-        state = detect_state(final_by_name, agent_dir, user_dir, backup_dir)
+        state, reasons = detect_state(final_by_name, agent_dir, user_dir,
+                                      backup_dir, manifest, tsv_sha256)
         if state == "migrated":
-            print("Pool already migrated (backup present, layers match TSV) — no-op; invariants only.")
+            print("Pool already migrated (backup present, layers match TSV, "
+                  "foreign baseline unchanged) — no-op; invariants only.")
             rows, ok, details = run_invariants(final_by_name, agent_dir, user_dir,
-                                               backup_dir, pre_disk_count=len(final_by_name))
+                                               backup_dir, pre_disk_count=len(final_by_name),
+                                               manifest=manifest)
             for label, passed in rows:
                 print(f"  {'PASS' if passed else 'FAIL'}  {label}")
             for d in details:
@@ -645,7 +675,8 @@ def main(argv=None):
             return 0 if ok else 1
         if state == "partial":
             fail("Backup exists but the pool is not in the fully-migrated state — "
-                 "previous run was interrupted. Run with --rollback or inspect manually.")
+                 "previous run interrupted, or the world changed since the backup: "
+                 + "; ".join(reasons) + ". Run --rollback or inspect manually.")
 
         # -- step 0: precheck ------------------------------------------------
         disk = md_names(agent_dir)
@@ -704,7 +735,7 @@ def main(argv=None):
 
         # -- step 4: Absolute Invariants ---------------------------------------
         rows, ok, details = run_invariants(final_by_name, agent_dir, user_dir,
-                                           backup_dir, pre_disk_count)
+                                           backup_dir, pre_disk_count, manifest=manifest)
         print("step 4 invariants:")
         for label, passed in rows:
             print(f"  {'PASS' if passed else 'FAIL'}  {label}")

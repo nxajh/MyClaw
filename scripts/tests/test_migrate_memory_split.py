@@ -351,6 +351,47 @@ class MigrateMemorySplitTest(unittest.TestCase):
         self.assertIn("manifest.json is missing", err)
         self.assertEqual(self.snapshot(), before)  # nothing mutated
 
+    def test_rerun_noop_with_foreign_files_in_user_layer(self):
+        self.write_pool()
+        udir = self.base / USER_DIR_REL
+        udir.mkdir(parents=True)
+        (udir / "someone_elses_memory.md").write_text("foreign body\n")
+        foreign_before = (udir / "someone_elses_memory.md").read_text()
+        rc, out, err = self.run_script()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("someone_elses_memory", out)  # reported as untouched
+        manifest = json.loads((self.base / "backups" / M.BACKUP_DIRNAME /
+                               "manifest.json").read_text())
+        self.assertEqual(manifest["foreign_user_files"], ["someone_elses_memory.md"])
+        before = self.snapshot()
+        rc, out, err = self.run_script()  # re-run must be a full no-op
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("no-op", out)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual((udir / "someone_elses_memory.md").read_text(), foreign_before)
+
+    def test_tsv_changed_after_backup_aborts(self):
+        self.write_pool()
+        rc, _, _ = self.run_script()
+        self.assertEqual(rc, 0)
+        tsv = self.base / "memory-migration" / "migration-final.tsv"
+        tsv.write_text(tsv.read_text().replace("gamma_user\tuser", "gamma_user\tagent"))
+        rc, out, err = self.run_script()
+        self.assertEqual(rc, 1)
+        self.assertIn("TSV changed after the backup", err)
+
+    def test_foreign_baseline_change_aborts(self):
+        self.write_pool()
+        udir = self.base / USER_DIR_REL
+        udir.mkdir(parents=True)
+        (udir / "someone_elses_memory.md").write_text("foreign body\n")
+        rc, _, _ = self.run_script()
+        self.assertEqual(rc, 0)
+        (udir / "someone_elses_memory.md").unlink()  # foreign file vanished
+        rc, out, err = self.run_script()
+        self.assertEqual(rc, 1)
+        self.assertIn("foreign baseline", err)
+
     def test_pending_files_untouched(self):
         self.write_pool()
         pending = self.base / "memory" / "ghost.md.pending"
