@@ -4,8 +4,10 @@ use crate::providers::capability_tool::ToolSpec;
 use crate::providers::ProviderRegistry;
 
 const USER_KEY: &str = "client:default:web-user:default";
-const USER_UID: &str = "myclaw/u/019fe342-test";
-const OTHER_UID: &str = "myclaw/u/019fe342-other";
+// Real uuid-shaped FQIDs: the P4 write gate (PR #211) rejects user-scope
+// writes for identities that are not parseable FQIDs.
+const USER_UID: &str = "myclaw/u/019fe342-1111-4abc-8def-000000000001";
+const OTHER_UID: &str = "myclaw/u/019fe342-2222-4abc-8def-000000000002";
 
 fn mem_body(name: &str, body: &str) -> String {
     // No `scope` field → agent layer (matches legacy agent files).
