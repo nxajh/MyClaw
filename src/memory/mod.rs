@@ -856,6 +856,23 @@ mod tests {
                 scope: None,
                 user_id: None,
             },
+            // build_backlinks only indexes links whose target exists (layer-
+            // qualified matching requires a real counterpart), so gamma must
+            // be present for the assertions below.
+            MemoryFile {
+                name: "gamma".into(),
+                mem_type: "entity".into(),
+                inject: "search".into(),
+                description: String::new(),
+                tags: vec![],
+                created_at: String::new(),
+                updated_at: None,
+                links: vec![],
+                content: String::new(),
+                path: std::path::PathBuf::new(),
+                scope: None,
+                user_id: None,
+            },
         ];
 
         let backlinks = build_backlinks(&files);
@@ -970,10 +987,11 @@ mod tests {
             dir,
             root.parent().unwrap().join("users").join("018f6b2a-4c3d-7b2e-9f01-3a2b4c5d6e7f").join("memory")
         );
-        // Legacy routing keys fall back to the escaped dir_name form.
+        // Legacy routing keys fall back to dir_name (which does not escape
+        // `:` — matches ids::bare_dir_name semantics for legacy keys).
         assert_eq!(
             user_memory_dir(&root, "telegram:123"),
-            root.parent().unwrap().join("users").join("telegram_123").join("memory")
+            root.parent().unwrap().join("users").join("telegram:123").join("memory")
         );
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }
@@ -1097,10 +1115,11 @@ mod tests {
             content: String::new(),
             path: std::path::PathBuf::new(),
         };
-        // Both layers have an entry named "x".
+        // Only the user layer has an entry named "x".
         let files = vec![
             mf("a", Some("agent"), &["x", "user:x"]),
             mf("u", Some("user"), &["x", "agent:x"]),
+            mf("x", Some("user"), &[]),
         ];
         let backlinks = build_backlinks(&files);
         // Bare "x" from a → same layer (agent) → no agent-layer "x" exists →
