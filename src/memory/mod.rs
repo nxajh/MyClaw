@@ -201,9 +201,17 @@ pub fn scan_user_layer(memory_root: &Path, user_id: &str) -> std::io::Result<Vec
         normalize_ownership(f, false, Some(user_id));
     }
     files.retain(filter_invalid_memory);
-    // Transition fallback: single-pool entries not yet migrated.
+    // Transition fallback: single-pool entries not yet migrated. The
+    // physical user directory is authoritative — the flat-pool fallback
+    // only adds names MISSING from it, never duplicates (same name in
+    // both places must not yield two user-layer entries).
+    let present: std::collections::HashSet<String> =
+        files.iter().map(|f| f.name.clone()).collect();
     for mut f in scan_memory_files(memory_root)? {
-        if f.scope.as_deref() == Some("user") && f.user_id.as_deref() == Some(user_id) {
+        if f.scope.as_deref() == Some("user")
+            && f.user_id.as_deref() == Some(user_id)
+            && !present.contains(&f.name)
+        {
             normalize_ownership(&mut f, true, None);
             if filter_invalid_memory(&f) {
                 files.push(f);
@@ -1134,6 +1142,37 @@ mod tests {
         let merged = scan_merged_for_user(&root, ALICE).unwrap();
         assert!(merged.iter().any(|f| f.name == "legacy-user"));
         assert!(merged.iter().any(|f| f.name == "legacy-agent"));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn scan_user_layer_no_duplicate_names_between_dir_and_fallback() {
+        // Physical user dir is authoritative: a same-named pre-migration
+        // leftover in the flat pool must not produce a second user-layer
+        // entry (PR #211 review r4).
+        let root = layered_layout("dedup");
+        let alice_dir = user_memory_dir(&root, ALICE);
+        write_file(&alice_dir, "dup", &format!("scope: user\nuser_id: {}", ALICE));
+        write_file(&alice_dir, "only-dir", &format!("scope: user\nuser_id: {}", ALICE));
+        // Same name in the flat pool (transition leftover) + a name that
+        // exists ONLY in the flat pool (must still surface via fallback).
+        write_file(&root, "dup", &format!("scope: user\nuser_id: {}", ALICE));
+        write_file(&root, "flat-only", &format!("scope: user\nuser_id: {}", ALICE));
+
+        let user = scan_user_layer(&root, ALICE).unwrap();
+        assert_eq!(
+            user.iter().filter(|f| f.name == "dup").count(),
+            1,
+            "dir + fallback same name must yield exactly one entry"
+        );
+        assert!(user.iter().any(|f| f.name == "only-dir"));
+        assert!(
+            user.iter().any(|f| f.name == "flat-only"),
+            "fallback still surfaces names missing from the physical dir"
+        );
+
+        let merged = scan_merged_for_user(&root, ALICE).unwrap();
+        assert_eq!(merged.iter().filter(|f| f.name == "dup").count(), 1);
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 

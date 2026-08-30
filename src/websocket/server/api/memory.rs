@@ -321,18 +321,29 @@ pub(super) fn delete(id: &str, params: &serde_json::Value, ctx: &ApiContext<'_>)
                             "file not found in agent scope",
                         ))
                     }),
-                // Default: user layer first (user>agent shadowing).
-                _ => candidates
-                    .iter()
-                    .find(|f| matches_scope(f, "user"))
-                    .or_else(|| candidates.iter().find(|f| matches_scope(f, "agent")))
-                    .map(|f| std::fs::remove_file(&f.path))
-                    .unwrap_or_else(|| {
+                // Default (no scope): conservative — only the caller's own
+                // user layer. Deleting a shared agent-layer entry requires
+                // an explicit scope: "agent" (same hint semantics as
+                // MemoryManageTool::not_found_error).
+                _ => {
+                    if let Some(f) = candidates.iter().find(|f| matches_scope(f, "user")) {
+                        std::fs::remove_file(&f.path)
+                    } else if candidates.iter().any(|f| matches_scope(f, "agent")) {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            format!(
+                                "memory '{}' lives in the shared agent layer; \
+                                 pass scope: \"agent\" explicitly to delete it",
+                                stem
+                            ),
+                        ))
+                    } else {
                         Err(std::io::Error::new(
                             std::io::ErrorKind::NotFound,
                             "file not found",
                         ))
-                    }),
+                    }
+                }
             };
             match result {
                 Ok(()) => serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string(),
@@ -520,6 +531,52 @@ mod tests {
     }
 
     const OTHER: &str = "myclaw/u/018f6b2a-4c3d-7b2e-9f01-3a2b4c5d6e99";
+
+    #[test]
+    fn delete_unscoped_agent_only_entry_is_rejected() {
+        // r4 review: an unscoped delete must never remove a shared
+        // agent-layer entry. Only the explicit scope: "agent" may.
+        let dir = tempfile::tempdir().unwrap();
+        let memory_root = dir.path().join("memory");
+        write_file(&memory_root, "foo", "scope: agent");
+        let ctx = make_ctx(UID, memory_root.clone());
+
+        let resp = delete("t-del", &serde_json::json!({"name": "foo.md"}), &ctx);
+        assert!(resp.contains("api_error"), "unscoped delete must fail: {}", resp);
+        assert!(
+            resp.contains("agent layer"),
+            "error must point at the explicit scope hint: {}",
+            resp
+        );
+        // File untouched.
+        assert!(memory_root.join("foo.md").exists());
+
+        // Explicit scope deletes it.
+        let resp = delete(
+            "t-del2",
+            &serde_json::json!({"name": "foo.md", "scope": "agent"}),
+            &ctx,
+        );
+        assert!(resp.contains("api_response"), "{}", resp);
+        assert!(!memory_root.join("foo.md").exists());
+    }
+
+    #[test]
+    fn delete_unscoped_prefers_user_layer_leaves_agent_copy() {
+        // Same name in both layers: unscoped delete removes only the user
+        // copy; the agent copy survives until an explicit scope delete.
+        let dir = tempfile::tempdir().unwrap();
+        let memory_root = dir.path().join("memory");
+        write_file(&memory_root, "foo", "scope: agent");
+        let user_dir = memory_scope_dir(dir.path(), "user", UID, Some(&memory_root));
+        write_file(&user_dir, "foo", &format!("scope: user\nuser_id: {}", UID));
+        let ctx = make_ctx(UID, memory_root.clone());
+
+        let resp = delete("t-del", &serde_json::json!({"name": "foo.md"}), &ctx);
+        assert!(resp.contains("api_response"), "{}", resp);
+        assert!(!user_dir.join("foo.md").exists(), "user copy removed");
+        assert!(memory_root.join("foo.md").exists(), "agent copy untouched");
+    }
 
     #[test]
     fn write_attack_forged_user_ownership_yields_pure_agent_entry() {
