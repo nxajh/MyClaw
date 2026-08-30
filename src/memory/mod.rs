@@ -623,6 +623,52 @@ mod tests {
         assert_eq!(links[1].target, "baz");
     }
 
+    // PR #212 review #6: shared link-parser fixture. The same
+    // scripts/tests/fixtures/link_parser_samples.md + link_parser_expected.json
+    // pair is consumed by the Python migration-script tests
+    // (scripts/tests/test_migrate_memory_split.py), so the two parsers are
+    // pinned to one contract. `target` is the raw stem exactly as
+    // LinkRef.target reports it (layer prefixes like agent:/user: are NOT
+    // stripped here); if this test breaks after a parser change, update the
+    // fixture pair deliberately.
+    #[test]
+    fn test_shared_link_parser_fixture() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let samples_path = format!("{root}/scripts/tests/fixtures/link_parser_samples.md");
+        let expected_path = format!("{root}/scripts/tests/fixtures/link_parser_expected.json");
+        let samples = fs::read_to_string(&samples_path)
+            .unwrap_or_else(|e| panic!("read fixture {samples_path}: {e}"));
+        let expected_raw = fs::read_to_string(&expected_path)
+            .unwrap_or_else(|e| panic!("read fixture {expected_path}: {e}"));
+
+        #[derive(serde::Deserialize)]
+        struct ExpectedLink {
+            label: String,
+            target: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Expected {
+            links: Vec<ExpectedLink>,
+        }
+        let expected: Expected = serde_json::from_str(&expected_raw)
+            .unwrap_or_else(|e| panic!("parse fixture {expected_path}: {e}"));
+
+        let links = extract_links(&samples);
+        let got: Vec<(&str, &str)> = links
+            .iter()
+            .map(|l| (l.label.as_str(), l.target.as_str()))
+            .collect();
+        let want: Vec<(&str, &str)> = expected
+            .links
+            .iter()
+            .map(|l| (l.label.as_str(), l.target.as_str()))
+            .collect();
+        assert_eq!(
+            got, want,
+            "Rust extract_links must match the shared link_parser fixture"
+        );
+    }
+
     #[test]
     fn test_parse_md_link_requires_md_suffix() {
         assert!(parse_md_link("- [Related: foo](foo.md)").is_some());

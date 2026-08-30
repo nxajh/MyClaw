@@ -27,6 +27,9 @@ FQID = M.OPERATOR_FQID
 USER_DIR_REL = Path("users") / M.OPERATOR_UUID / "memory"
 
 
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
 def make_runner(mode):
     """Fake command runner for the daemon probe (never shells out).
     Modes: inactive | systemctl_active | pgrep_active | self_pgrep."""
@@ -51,6 +54,60 @@ def md(name, scope="user", extra_fm=None, body="", quoted_scope=False):
     fm += extra_fm if extra_fm is not None else []
     fm.append("---")
     return "\n".join(fm) + "\n" + body
+
+
+def extract_links_rust_mirror(content):
+    """Line-level mirror of Rust src/memory::extract_links over the shared
+    fixture: See Also section gating (any `## ` heading toggles it), one link
+    per line (first match), href validated by parse_md_href. Target is the
+    raw stem with layer prefix kept — exactly Rust LinkRef.target."""
+    in_see_also, out = False, []
+    for line in content.splitlines():
+        t = line.strip()
+        if t.startswith("## "):
+            in_see_also = t.lower() == "## see also"
+            continue
+        if not in_see_also:
+            continue
+        m = M.MD_LINK_RE.search(t)
+        if m is None:
+            continue
+        parsed = M.parse_md_href(m.group(2))
+        if parsed is None:
+            continue
+        prefix, stem = parsed
+        out.append((m.group(1), f"{prefix}:{stem}" if prefix else stem))
+    return out
+
+
+class LinkParserSharedFixtureTest(unittest.TestCase):
+    """scripts/tests/fixtures/link_parser_samples.md + expected json are the
+    shared parser contract: this Python mirror AND the Rust test
+    (src/memory/mod.rs test_shared_link_parser_fixture) both assert against
+    link_parser_expected.json. Change either parser -> update both, knowingly."""
+
+    def test_python_parser_matches_shared_fixture(self):
+        samples = (FIXTURES / "link_parser_samples.md").read_text(encoding="utf-8")
+        expected = json.loads(
+            (FIXTURES / "link_parser_expected.json").read_text(encoding="utf-8"))
+        want = [(e["label"], e["target"]) for e in expected["links"]]
+        self.assertEqual(extract_links_rust_mirror(samples), want)
+
+    def test_fixture_covers_required_sample_classes(self):
+        samples = (FIXTURES / "link_parser_samples.md").read_text(encoding="utf-8")
+        see_also_lines, in_section = [], False
+        for line in samples.splitlines():
+            t = line.strip()
+            if t.startswith("## "):
+                in_section = t.lower() == "## see also"
+                continue
+            if in_section and t.startswith("- "):
+                see_also_lines.append(t)
+        # ≥8 samples: bare, agent:/user: prefix, http, https, anchor, mailto,
+        # bare name, empty target, case variant, path, multi-link line
+        self.assertGreaterEqual(len(see_also_lines), 8)
+        for marker in ("http://", "https://", "#", "mailto:", "()"):
+            self.assertTrue(any(marker in l for l in see_also_lines), marker)
 
 
 class MigrateMemorySplitTest(unittest.TestCase):
