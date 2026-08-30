@@ -164,6 +164,7 @@ fn normalize_ownership(f: &mut MemoryFile, from_agent_dir: bool, dir_owner: Opti
 /// - `scope` outside {agent, user} (cannot happen post-normalize; kept as
 ///   a hard guard so callers can never index a bogus scope);
 /// - user-scope entries without a non-empty `user_id`.
+///
 /// Returns `true` for entries to keep.
 fn filter_invalid_memory(f: &MemoryFile) -> bool {
     if f.name.trim().is_empty() || f.mem_type.trim().is_empty() {
@@ -571,6 +572,7 @@ pub fn layer_qualified_name(f: &MemoryFile) -> String {
 /// - `agent:x` / `user:x` targets match the entry `x` in that layer;
 /// - a bare target only matches a same-layer entry — pointing at another
 ///   layer's same-named entry does NOT count (cross-layer must be explicit).
+///
 /// Same-named entries in different layers never aggregate: their keys
 /// (`agent:foo` vs `user:foo`) are distinct.
 pub fn build_backlinks(files: &[MemoryFile]) -> HashMap<String, Vec<String>> {
