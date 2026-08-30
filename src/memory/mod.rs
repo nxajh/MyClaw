@@ -1165,8 +1165,15 @@ mod tests {
                 "/tmp/myclaw_contract_probe/memory-split-migration.lock"
             ))
         );
-        // Relative memory root (no parent) → None (caller treats as no lock).
-        assert_eq!(migration_lock_path(std::path::Path::new("memory")), None);
+        // Relative memory root resolves relative to cwd (Path::parent of
+        // "memory" is Some("")) — the daemon always passes an absolute
+        // root; this documents the semantics.
+        assert_eq!(
+            migration_lock_path(std::path::Path::new("memory")),
+            Some(std::path::PathBuf::from("memory-split-migration.lock"))
+        );
+        // Root path has no parent → None (caller treats as no lock).
+        assert_eq!(migration_lock_path(std::path::Path::new("/")), None);
     }
 
     #[test]
