@@ -176,7 +176,9 @@ def guard_daemon_stopped(runner, force, dry_run=False):
         return
     if force:
         print(f"WARNING: --force with daemon ACTIVE ({how}) — migrating a live "
-              f"memory pool risks watcher races and lost writes. Proceeding anyway.")
+              f"memory pool risks watcher races, lost runtime writes, and "
+              f"reverting entries written during the migration. The supported "
+              f"path is: stop the daemon, migrate, verify, restart. Proceeding anyway.")
         return
     fail(f"daemon appears ACTIVE ({how}) — the memory pool must not be mutated "
          f"under a running daemon. Stop it first: {DAEMON_STOP_HINT} "
@@ -853,9 +855,11 @@ def _build_parser():
                              f"before any mutation (migrate each owner with a separate TSV run)")
     parser.add_argument("--ack-single-owner", action="store_true",
                         help="required for a mutating run when any final=user entry "
-                             "carries no user_id declaration (R-group): the operator "
-                             "explicitly accepts the signed adjudication that assigns "
-                             "those entries to them")
+                             "carries no user_id declaration (R-group). Semantics: "
+                             "the operator ATTESTS that these otherwise-unverifiable "
+                             "entries belong to the specified operator, per the signed "
+                             "adjudication. This is a human assertion, NOT a machine "
+                             "ownership proof.")
     parser.add_argument("--force", action="store_true",
                         help="proceed even if the myclaw daemon appears to be running (risky)")
     return parser
