@@ -161,7 +161,12 @@ impl SessionBackend for JsonFileBackend {
             .create(true)
             .append(true)
             .open(&path)?;
-        writeln!(f, "{json}")?;
+        // issue #213: `writeln!` performs two separate `write_all` calls
+        // (record body, then "\n"); a process killed between them leaves a
+        // record with no trailing newline, and the next append lands on the
+        // same line, corrupting it. Build the full line first so it's a
+        // single `write_all` call instead.
+        f.write_all(format!("{json}\n").as_bytes())?;
         f.flush()?;
 
         meta.message_count = new_id as usize;

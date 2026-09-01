@@ -166,14 +166,45 @@ impl JsonFileBackend {
             return result;
         };
 
-        let mut result: Vec<(i64, ChatMessage)> = BufReader::new(f)
-            .lines()
-            .map_while(Result::ok)
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| {
-                let msg: ChatMessage = serde_json::from_str(&line).ok()?;
-                Some(self.hydrate(session_id, &msg))
-            })
+        // issue #213: a process killed mid-write can leave a single torn line
+        // (invalid UTF-8, or valid UTF-8 but unparseable JSON). Previously
+        // `.lines().map_while(Result::ok)` stopped reading entirely on the
+        // first such line, silently discarding every line after it. Skip and
+        // warn on bad lines instead, so one torn line costs one message, not
+        // the rest of the file.
+        let mut hydrated = Vec::new();
+        let mut dropped = 0u32;
+        for line_result in BufReader::new(f).lines() {
+            let line = match line_result {
+                Ok(line) => line,
+                Err(err) => {
+                    dropped += 1;
+                    tracing::warn!(
+                        session_id, %err,
+                        "history.jsonl: skipping unreadable line (likely a torn write)"
+                    );
+                    continue;
+                }
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<ChatMessage>(&line) {
+                Ok(msg) => hydrated.push(self.hydrate(session_id, &msg)),
+                Err(err) => {
+                    dropped += 1;
+                    tracing::warn!(
+                        session_id, %err,
+                        "history.jsonl: skipping unparseable line (likely a torn write)"
+                    );
+                }
+            }
+        }
+        if dropped > 0 {
+            tracing::warn!(session_id, dropped, "history.jsonl: dropped corrupted line(s) while loading");
+        }
+        let mut result: Vec<(i64, ChatMessage)> = hydrated
+            .into_iter()
             .enumerate()
             .map(|(i, msg)| (start_id + i as i64, msg))
             .collect();

@@ -187,6 +187,68 @@ fn concurrent_meta_writes_never_corrupt_the_file() {
 }
 
 #[test]
+fn torn_write_drops_only_the_corrupted_line_not_subsequent_history() {
+    // Regression test for issue #213: `read_history_with_ids` used
+    // `.lines().map_while(Result::ok)`, which stops reading entirely the
+    // first time a line fails UTF-8 decoding (e.g. a process killed
+    // mid-write, cutting a multi-byte character in half, followed by
+    // another write landing on the same unterminated line). That silently
+    // discarded every subsequent line, not just the corrupted one.
+    let (_dir, backend, sid) = backend_with_session();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message one"))
+        .unwrap();
+
+    let history_path = backend.history_path(&sid);
+
+    // Simulate: message two's write was interrupted mid multi-byte
+    // character (no trailing newline), and message three's write landed
+    // on the same line right after — the classic torn-write + O_APPEND
+    // concatenation described in the issue.
+    let msg_two_json = serde_json::to_string(&ChatMessage::user_text("测试内容")).unwrap();
+    let torn = {
+        let bytes = msg_two_json.as_bytes();
+        let cut = msg_two_json.find('测').unwrap() + 1; // 1 of 3 bytes of '测'
+        bytes[..cut].to_vec()
+    };
+    let msg_three_json =
+        serde_json::to_string(&ChatMessage::user_text("message three, glued on")).unwrap();
+
+    let mut raw = fs::read(&history_path).unwrap();
+    raw.extend_from_slice(&torn);
+    raw.extend_from_slice(msg_three_json.as_bytes());
+    raw.push(b'\n'); // ends the merged (torn + three) line
+    fs::write(&history_path, &raw).unwrap();
+
+    // A message appended normally afterwards, on its own clean line.
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message four"))
+        .unwrap();
+
+    let loaded = backend.load_messages(&sid);
+    let texts: Vec<String> = loaded
+        .iter()
+        .filter_map(|m| {
+            m.parts.first().and_then(|p| match p {
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+
+    assert!(texts.iter().any(|t| t == "message one"));
+    assert!(
+        texts.iter().any(|t| t == "message four"),
+        "a line after the corrupted one must still be loaded, got: {texts:?}"
+    );
+    assert_eq!(
+        texts.len(),
+        2,
+        "only the torn line should be dropped, got: {texts:?}"
+    );
+}
+
+#[test]
 fn rotate_uses_computed_start_id_not_survivor_in_memory_id() {
     let (_dir, backend, sid) = backend_with_session();
     backend
