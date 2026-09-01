@@ -399,17 +399,7 @@ impl JsonFileBackend {
             return;
         };
         for entry in entries.filter_map(|e| e.ok()) {
-            let Ok(f) = fs::File::open(entry.path()) else {
-                continue;
-            };
-            for line in BufReader::new(f).lines().map_while(Result::ok) {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let Ok(msg) = serde_json::from_str::<ChatMessage>(line) else {
-                    continue;
-                };
+            for msg in scan_jsonl_messages(&entry.path()) {
                 collect_blob_hashes(&msg, blob_hashes);
             }
         }
@@ -552,6 +542,33 @@ impl JsonFileBackend {
         }
         Ok(migrated)
     }
+}
+
+/// Read a JSONL file, returning every line that parses as a `ChatMessage`.
+///
+/// issue #217: a torn line (invalid UTF-8, or valid UTF-8 but unparseable
+/// JSON) — the same failure mode fixed in #213's `read_history_with_ids` —
+/// is skipped rather than aborting the whole scan, so one corrupted line in
+/// an archive segment doesn't drop every message after it out of the
+/// caller's live set.
+pub(super) fn scan_jsonl_messages(path: &Path) -> Vec<ChatMessage> {
+    let Ok(f) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut messages = Vec::new();
+    for line_result in BufReader::new(f).lines() {
+        let Ok(line) = line_result else {
+            continue;
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(msg) = serde_json::from_str::<ChatMessage>(line) {
+            messages.push(msg);
+        }
+    }
+    messages
 }
 
 /// Path-only history has no inline media blobs to track.
