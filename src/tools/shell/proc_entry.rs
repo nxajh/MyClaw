@@ -425,10 +425,7 @@ pub async fn adopt_after_restart(
             };
 
             if entry.state != "running" {
-                let age_secs = (now - entry.spawned_at_ms) / 1000;
-                if age_secs > ENTRY_RETENTION_SECS {
-                    remove_entry_disk(Some(sessions_dir), &entry);
-                }
+                sweep_if_stale(sessions_dir, &entry, now);
                 continue;
             }
 
@@ -472,6 +469,50 @@ pub async fn adopt_after_restart(
                     "shell process not recoverable after restart"
                 );
             }
+        }
+    }
+}
+
+/// Remove a terminal (non-`running`) entry's on-disk files once it's older
+/// than `ENTRY_RETENTION_SECS`. Shared by `adopt_after_restart`'s startup
+/// sweep and `sweep_terminal_entries`'s periodic one.
+fn sweep_if_stale(sessions_dir: &Path, entry: &ProcEntry, now_ms: i64) {
+    if entry.state == "running" {
+        return;
+    }
+    let age_secs = (now_ms - entry.spawned_at_ms) / 1000;
+    if age_secs > ENTRY_RETENTION_SECS {
+        remove_entry_disk(Some(sessions_dir), entry);
+    }
+}
+
+/// issue #214: `adopt_after_restart` only sweeps `.shell_procs/` once, at
+/// daemon startup — a long-lived daemon that never restarts never sweeps at
+/// all, so terminal entries' `.json`/`.out` files accumulate without bound
+/// (1000+ `.out` files observed over 3 days in one report). Call this
+/// periodically too so retention actually holds for a daemon that stays up.
+pub async fn sweep_terminal_entries(sessions_dir: &Path) {
+    let Ok(session_dirs) = std::fs::read_dir(sessions_dir) else {
+        return;
+    };
+    let now = now_ms();
+    for session_dir in session_dirs.flatten() {
+        let procs_dir = session_dir.path().join(".shell_procs");
+        let Ok(files) = std::fs::read_dir(&procs_dir) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let path = f.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(entry) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<ProcEntry>(&s).ok())
+            else {
+                continue;
+            };
+            sweep_if_stale(sessions_dir, &entry, now);
         }
     }
 }

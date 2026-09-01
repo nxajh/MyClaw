@@ -24,6 +24,25 @@ use crate::agents::{
 };
 use crate::api::message::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 
+/// issue #214: a "lost on restart" shell completion whose output file is
+/// older than this is suppressed from the recovery notice (still finalized,
+/// just not surfaced) — see `recover_suspension`.
+const STALE_LOST_NOTICE_AFTER_SECS: u64 = 3600; // 1h
+
+/// Whether `output_path`'s mtime indicates its completion is too old to be
+/// worth surfacing in a restart-recovery notice. Measured off the output
+/// file's mtime (updated when the process actually finished writing), not
+/// the process's spawn time — a long-running background command can have an
+/// old spawn time even for a completion that just happened. Fails open
+/// (not stale) when the file's mtime can't be read, matching prior behavior.
+fn is_stale_lost_notice(output_path: &str) -> bool {
+    std::fs::metadata(output_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age.as_secs() > STALE_LOST_NOTICE_AFTER_SECS)
+}
+
 /// Where a recovered sub-agent turn's output goes.
 enum CompletionSink {
     /// Sub-agent session: emit `DelegationEvent::Completed` to wake the parent.
@@ -704,13 +723,24 @@ async fn recover_suspension(
     let mut failed: Vec<String> = Vec::new();
     for id in snapshot.pending.iter() {
         if crate::tools::shell::is_shell_process_id(id) {
-            let still_running = match &ctx.shell_registry {
-                Some(registry) => registry.read().await.get(id).is_some_and(|e| e.is_running()),
-                None => false,
+            let entry_snapshot = match &ctx.shell_registry {
+                Some(registry) => registry.read().await.get(id).cloned(),
+                None => None,
             };
-            if still_running {
+            if entry_snapshot.as_ref().is_some_and(|e| e.is_running()) {
                 continue;
             }
+
+            // issue #214: a completion this stale isn't worth surfacing —
+            // it's an orphaned subprocess from one or more restarts ago
+            // that only just got reaped, and injecting it now would just
+            // be a confusing "archaeological" notice about something the
+            // user hasn't asked about since. Still finalized either way
+            // (via `record_terminal` below) so it doesn't linger forever.
+            let is_stale = entry_snapshot
+                .as_ref()
+                .is_some_and(|e| is_stale_lost_notice(&e.output_path));
+
             let content = match &ctx.shell_registry {
                 Some(registry) => crate::tools::shell::recovery_lost_content(registry, id).await,
                 None => format!(
@@ -719,7 +749,16 @@ async fn recover_suspension(
                 ),
             };
             match session_ctx.record_terminal(id.clone(), SubStatus::Failed, content.clone(), 0) {
-                TerminalRecord::Recorded(_) => failed.push(content),
+                TerminalRecord::Recorded(_) => {
+                    if is_stale {
+                        tracing::debug!(
+                            process_id = %id,
+                            "recover_suspension: shell entry stale, finalizing without notice"
+                        );
+                    } else {
+                        failed.push(content);
+                    }
+                }
                 TerminalRecord::Duplicate | TerminalRecord::NoSuspension => {
                     tracing::debug!(
                         process_id = %id,
@@ -1106,6 +1145,64 @@ mod tests {
         assert_eq!(r.status, SubStatus::Failed);
         assert!(r.content.contains("后台命令"), "must use shell wording, not sub-agent wording: {}", r.content);
         assert!(!r.content.contains("子代理"), "must NOT use sub-agent wording: {}", r.content);
+        assert!(snap.pending.is_empty());
+    }
+
+    /// issue #214: `is_stale_lost_notice` is the pure predicate deciding
+    /// whether a recovered shell completion is too old to surface — tested
+    /// directly since driving the full `recover_suspension` + notice-routing
+    /// path can't easily observe whether a notice was suppressed vs. sent.
+    #[test]
+    fn is_stale_lost_notice_flags_old_output_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        assert!(
+            !is_stale_lost_notice(path),
+            "a freshly-written file must not be stale"
+        );
+
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        tmp.as_file().set_modified(old).unwrap();
+        assert!(
+            is_stale_lost_notice(path),
+            "a 2h-old output file must be flagged stale"
+        );
+    }
+
+    #[test]
+    fn is_stale_lost_notice_fails_open_when_file_missing() {
+        // Matches prior (pre-#214) behavior for a missing output file: don't
+        // suppress the notice just because staleness can't be determined.
+        assert!(!is_stale_lost_notice("/nonexistent/path/for/test"));
+    }
+
+    /// issue #214: a shell entry whose output file is stale still gets
+    /// finalized via `record_terminal` (cleared from `pending`, so it can't
+    /// loop forever) — only the *notice* is suppressed, not the bookkeeping.
+    #[tokio::test]
+    async fn recover_suspension_finalizes_stale_shell_entry() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        tmp.as_file().set_modified(old).unwrap();
+
+        let registry: crate::tools::shell::ShellRegistry =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let mut ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        let sid = sctx.session_id.clone();
+        sctx.add_pending_task("sh_stale".to_string());
+        let mut entry = crate::tools::shell::test_proc_entry("sh_stale", &sid, "lost_on_restart");
+        entry.output_path = tmp.path().to_str().unwrap().to_string();
+        registry.write().await.insert("sh_stale".to_string(), entry);
+        ctx.shell_registry = Some(registry);
+        let ctx = Arc::new(ctx);
+
+        let covered: HashSet<String> = [].into_iter().collect();
+        recover_suspension(&ctx, sctx.clone(), &covered).await;
+
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert_eq!(snap.results.len(), 1, "stale entry must still be finalized");
+        assert_eq!(snap.results[0].sub_session_id, "sh_stale");
         assert!(snap.pending.is_empty());
     }
 
