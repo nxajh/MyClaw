@@ -32,7 +32,7 @@ pub(crate) mod shell_tool;
 pub(crate) mod poll_tool;
 pub(crate) mod kill_tool;
 
-pub use proc_entry::{ProcEntry, ProcSummary, ShellRegistry, is_shell_process_id, recovery_lost_content, adopt_after_restart, kill_processes_for_session, latest_entry_summary};
+pub use proc_entry::{ProcEntry, ProcSummary, ShellRegistry, is_shell_process_id, recovery_lost_content, adopt_after_restart, sweep_terminal_entries, kill_processes_for_session, latest_entry_summary};
 pub use shell_tool::ShellTool;
 pub(crate) use shell_tool::format_unknown_process_listing;
 pub(crate) use proc_entry::*;
@@ -270,6 +270,60 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(entry_json_path(&pdir, &entry.process_id)).unwrap())
                 .unwrap();
         assert_eq!(on_disk.state, "exited");
+    }
+
+    /// issue #214: `sweep_terminal_entries` is the periodic counterpart of
+    /// `adopt_after_restart`'s startup-only retention sweep — a terminal
+    /// entry past `ENTRY_RETENTION_SECS` gets both its `.json` and `.out`
+    /// removed, so a long-lived daemon that never restarts doesn't
+    /// accumulate `.shell_procs/` files without bound.
+    #[tokio::test]
+    async fn sweep_terminal_entries_removes_stale_entries_outside_retention() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut old = test_entry("exited");
+        old.exit_code = Some(0);
+        old.spawned_at_ms = now_ms() - (ENTRY_RETENTION_SECS + 3600) * 1000;
+        let pdir = entry_dir(tmp.path(), &old.session_id);
+        let out_path = entry_output_path(&pdir, &old.process_id);
+        old.output_path = out_path.to_string_lossy().to_string();
+        write_entry_disk(Some(tmp.path()), &old);
+        std::fs::write(&out_path, b"stale output").unwrap();
+
+        sweep_terminal_entries(tmp.path()).await;
+
+        assert!(
+            !entry_json_path(&pdir, &old.process_id).exists(),
+            "stale entry's .json must be removed"
+        );
+        assert!(!out_path.exists(), "stale entry's .out must be removed");
+    }
+
+    #[tokio::test]
+    async fn sweep_terminal_entries_leaves_fresh_and_running_entries_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Fresh terminal entry — within the retention window.
+        let fresh = test_entry("exited");
+        write_entry_disk(Some(tmp.path()), &fresh);
+
+        // Old but still `running` — must never be swept regardless of age;
+        // it might still be adopted/watched.
+        let mut running = test_entry("running");
+        running.process_id = "sh_test_running".to_string();
+        running.spawned_at_ms = now_ms() - (ENTRY_RETENTION_SECS + 3600) * 1000;
+        write_entry_disk(Some(tmp.path()), &running);
+
+        sweep_terminal_entries(tmp.path()).await;
+
+        let pdir = entry_dir(tmp.path(), &fresh.session_id);
+        assert!(
+            entry_json_path(&pdir, &fresh.process_id).exists(),
+            "fresh terminal entry must survive the sweep"
+        );
+        assert!(
+            entry_json_path(&pdir, &running.process_id).exists(),
+            "running entry must survive the sweep regardless of age"
+        );
     }
 
     /// issue #129: a `background: true` process still running across a hot

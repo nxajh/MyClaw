@@ -362,6 +362,22 @@ pub(crate) async fn build_tools(
     )
     .await;
 
+    // issue #214: `adopt_after_restart` only sweeps `.shell_procs/` retention
+    // at startup — a daemon that stays up for days without restarting never
+    // sweeps again, so terminal entries accumulate without bound. Re-run the
+    // same sweep periodically for the whole process lifetime.
+    {
+        let sessions_dir = config.sessions_root();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            interval.tick().await; // skip immediate first tick — adopt_after_restart just swept
+            loop {
+                interval.tick().await;
+                crate::tools::shell::sweep_terminal_entries(&sessions_dir).await;
+            }
+        });
+    }
+
     // AskUserTool resolves the channel via `Session::resolve_channel()` at
     // execute time — no per-tool channels map. Bound to the shared
     // `AskRouter` so Orchestrator's inbound dispatch can fulfill its waits
