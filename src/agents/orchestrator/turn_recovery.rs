@@ -43,6 +43,19 @@ fn is_stale_lost_notice(output_path: &str) -> bool {
         .is_some_and(|age| age.as_secs() > STALE_LOST_NOTICE_AFTER_SECS)
 }
 
+/// issue #222: same staleness suppression as `is_stale_lost_notice`, applied
+/// to `recover_completion_queue`'s replay of persisted delegation/shell
+/// completion notices. Unlike a shell entry's output file, a
+/// `CompletionNoticeEntry` already carries its own `enqueued_at` timestamp,
+/// so no filesystem lookup is needed. Without this, a daemon restarting
+/// repeatedly (e.g. a deploy day with frequent hot-switches) re-delivers
+/// every still-`Pending` entry every time, no matter how old — observed in
+/// practice replaying the same multi-day-old entries on every restart.
+fn is_stale_completion_notice(enqueued_at: u64) -> bool {
+    let now = chrono::Utc::now().timestamp() as u64;
+    now.saturating_sub(enqueued_at) > STALE_LOST_NOTICE_AFTER_SECS
+}
+
 /// Where a recovered sub-agent turn's output goes.
 enum CompletionSink {
     /// Sub-agent session: emit `DelegationEvent::Completed` to wake the parent.
@@ -616,6 +629,22 @@ fn recover_completion_queue(ctx: &Arc<OrchestratorCtx>) {
     tracing::info!(count = pending.len(), "recovering persisted completion notices");
 
     for entry in pending {
+        // issue #222: a stale entry is finalized without being surfaced —
+        // still marked delivered (so it doesn't linger and keep getting
+        // replayed), just not re-delivered/re-drained through either path
+        // below.
+        if is_stale_completion_notice(entry.enqueued_at) {
+            tracing::debug!(
+                notice_id = %entry.id,
+                enqueued_at = entry.enqueued_at,
+                "completion queue: stale entry, finalizing without redelivery"
+            );
+            if let Err(e) = store.mark_delivered(&entry.id) {
+                tracing::warn!(notice_id = %entry.id, err = %e, "completion queue: stale-entry mark failed");
+            }
+            continue;
+        }
+
         let session_id = entry.parent_session_id.clone();
 
         // Dead-letter: the parent session vanished — drop the entry.
@@ -937,7 +966,11 @@ mod tests {
                 content: "notice".to_string(),
                 silenced_override: None,
                 sent_message_count: 0,
-                enqueued_at: 0,
+                // issue #222: fresh, not stale — this test exercises the
+                // dead-letter path specifically, which must still run before
+                // the (unrelated) staleness short-circuit would otherwise
+                // silently absorb it.
+                enqueued_at: chrono::Utc::now().timestamp() as u64,
                 delivery_state: crate::agents::orchestrator::DeliveryState::Pending,
             })
             .unwrap();
@@ -980,7 +1013,11 @@ mod tests {
                 content: "notice".to_string(),
                 silenced_override: None,
                 sent_message_count: 0,
-                enqueued_at: 0,
+                // issue #222: fresh, not stale — this test exercises the
+                // "turn fails, entry stays Pending" non-active path, which
+                // must still run before the staleness short-circuit would
+                // otherwise silently absorb it.
+                enqueued_at: chrono::Utc::now().timestamp() as u64,
                 delivery_state: crate::agents::orchestrator::DeliveryState::Pending,
             })
             .unwrap();
@@ -989,6 +1026,71 @@ mod tests {
             store.pending().len(),
             1,
             "failed turn must keep the entry Pending (at-least-once)"
+        );
+    }
+
+    #[test]
+    fn is_stale_completion_notice_flags_old_entries() {
+        let now = chrono::Utc::now().timestamp() as u64;
+        assert!(
+            !is_stale_completion_notice(now),
+            "a just-enqueued entry must not be stale"
+        );
+        assert!(
+            !is_stale_completion_notice(now - 3599),
+            "an entry just under 1h old must not be stale"
+        );
+        assert!(
+            is_stale_completion_notice(now - 3601),
+            "an entry just over 1h old must be flagged stale"
+        );
+        assert!(
+            is_stale_completion_notice(0),
+            "a multi-day-old entry must be flagged stale"
+        );
+    }
+
+    /// issue #222: a stale entry (older than 1h) must be finalized (marked
+    /// delivered, removed from the store) WITHOUT going through either
+    /// redelivery path — proven here by pointing it at a parent session with
+    /// no channel, which would otherwise route it through the non-active
+    /// `process_non_active` path and (per `recovery_keeps_pending_when_turn_fails`)
+    /// leave it Pending on the test runtime's failing turn. A stale entry
+    /// must never reach that path at all.
+    #[tokio::test]
+    async fn recover_completion_queue_finalizes_stale_entry_without_redelivery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
+        );
+        let mut ctx = test_ctx(vec![]);
+        ctx.completion_queue = Some(Arc::clone(&store));
+        let session = ctx.sessions.get_or_create("mock:default:u1");
+        let sid = session.id.clone();
+        store
+            .append(crate::agents::orchestrator::CompletionNoticeEntry {
+                seq: 0,
+                id: "shell:sh_stale".to_string(),
+                sub_session_id: "sh_stale".to_string(),
+                parent_session_id: sid,
+                status: Some("completed".to_string()),
+                content: "notice".to_string(),
+                silenced_override: None,
+                sent_message_count: 0,
+                enqueued_at: 0, // multi-day-old by any real clock
+                delivery_state: crate::agents::orchestrator::DeliveryState::Pending,
+            })
+            .unwrap();
+
+        recover_completion_queue(&Arc::new(ctx));
+
+        assert!(
+            store.pending().is_empty(),
+            "stale entry must be finalized (marked delivered), not left Pending"
+        );
+        assert!(
+            !tmp.path().join("queue").join("1.json").exists(),
+            "stale entry's file must be removed"
         );
     }
 
