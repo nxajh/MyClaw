@@ -267,11 +267,28 @@ pub async fn recovery_lost_content(registry: &ShellRegistry, process_id: &str) -
                 &crate::str_utils::neutralize_spoofing(&raw),
                 Path::new(&e.output_path),
             );
+            // issue #228: `state` already tells us which case this is —
+            // `lost_on_restart` only happens on a non-hot-switch restart
+            // (`adopt_after_restart`), which reclaims the whole process
+            // group, so completion is definitively ruled out, not merely
+            // possible. Any other terminal state here only occurs via a
+            // hot-switch adoption whose real exit could not be observed
+            // (see `spawn_adopted_reaper`) — genuinely unknown, unlike the
+            // lost_on_restart case.
+            let cause = if e.state == "lost_on_restart" {
+                "非热切换重启（进程组被整体回收），确定未执行完成。若仍需要这次任务的结果，可以放心重新执行——不存在与旧进程冲突的风险，但请自行确认该命令是否幂等（是否包含写入/提交/发送请求等副作用），避免重复".to_string()
+            } else {
+                format!(
+                    "经历了一次部署热切换重启，因跨进程收养无法确认真实执行结果（state: {}）。请先查看下方 output 判断是否成功，必要时重新执行",
+                    e.state
+                )
+            };
             format!(
-                "[系统通知] 后台命令已中断 (process_id: {}, state: {}, exit_code: {}): daemon 重启，该进程未能存活（可能已完成但未及记录，也可能被中止）。\noutput_path: {}\n\noutput{}:\n{}",
+                "[系统通知] 后台命令已结束 (process_id: {}, state: {}, exit_code: {}): {}。\noutput_path: {}\n\noutput{}:\n{}",
                 process_id,
                 e.state,
                 e.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),
+                cause,
                 e.output_path,
                 if output_truncated { "（已截断）" } else { "" },
                 display
@@ -560,7 +577,16 @@ pub async fn kill_processes_for_session(registry: &ShellRegistry, session_id: &s
 /// `adopt_after_restart` resolved every entry's post-restart state at
 /// daemon startup. Call this *after* `adopt_after_restart` has run, or a
 /// `running` entry might still be from before restart-classification.
-pub fn latest_entry_summary(sessions_dir: &Path, session_id: &str) -> Option<String> {
+///
+/// issue #228: the entry's `state` already encodes whether the process
+/// survived (`running`/`exited`, only reachable when this restart was a
+/// hot-switch — see `adopt_after_restart`) or was guaranteed killed
+/// alongside the daemon (`lost_on_restart`, non-hot-switch, whole cgroup
+/// reclaimed) — no separate `is_hot_switch()` check is needed here, the
+/// state field already IS that distinction. Returns `(message, is_error)`
+/// so the caller can set the synthesized tool result's error flag from the
+/// real outcome instead of hardcoding it.
+pub fn latest_entry_summary(sessions_dir: &Path, session_id: &str) -> Option<(String, bool)> {
     let pdir = entry_dir(sessions_dir, session_id);
     let mut entries: Vec<ProcEntry> = std::fs::read_dir(&pdir)
         .ok()?
@@ -576,23 +602,151 @@ pub fn latest_entry_summary(sessions_dir: &Path, session_id: &str) -> Option<Str
     let entry = entries.pop()?;
 
     Some(match entry.state.as_str() {
-        "running" => format!(
-            "This shell command is still running (process_id={}, command={:?}) — it \
-             survived the restart and was NOT re-executed to avoid running it twice. \
-             Call sessions_yield to suspend and be woken when it finishes, shell_poll for \
-             an instant peek, or shell_kill to stop it.",
-            entry.process_id, entry.command
+        "running" => (
+            format!(
+                "This shell command is still running (process_id={}, command={:?}) — it \
+                 survived a deployment hot-switch restart and was NOT re-executed to avoid \
+                 running it twice. Call sessions_yield to suspend and be woken when it \
+                 finishes, shell_poll for an instant peek, or shell_kill to stop it.",
+                entry.process_id, entry.command
+            ),
+            false,
         ),
-        "lost_on_restart" => format!(
-            "This shell command's process did not survive the restart (process_id={}, \
-             command={:?}) — it may have partially or fully completed. Check the current \
-             state before deciding whether to re-run it.",
-            entry.process_id, entry.command
+        "lost_on_restart" => (
+            format!(
+                "This shell command's process was terminated together with the previous \
+                 daemon process (a non-hot-switch restart reclaims the whole process group) \
+                 — it is confirmed to NOT have completed, and there is no captured output \
+                 (process_id={}, command={:?}, output_path={}). If you still need this, it's \
+                 safe to re-run — there is no risk of a second copy already running — just \
+                 make sure re-running it is idempotent (won't duplicate side effects such as \
+                 a commit or a request that may already have gone out from a prior part of \
+                 the same command).",
+                entry.process_id, entry.command, entry.output_path
+            ),
+            true,
         ),
-        _ => format!(
-            "This shell command already finished (state={}, exit_code={:?}, \
-             process_id={}, command={:?}). Use shell_poll to see its captured output.",
-            entry.state, entry.exit_code, entry.process_id, entry.command
+        other => (
+            format!(
+                "This shell command's process is no longer running (state={}, exit_code={:?}, \
+                 process_id={}, command={:?}, output_path={}) — it was adopted across a \
+                 deployment hot-switch restart, so its real exit code could not be captured. \
+                 Check the output before deciding whether to re-run it.",
+                other, entry.exit_code, entry.process_id, entry.command, entry.output_path
+            ),
+            true,
         ),
     })
+}
+
+#[cfg(test)]
+mod recovery_wording_tests {
+    use super::*;
+
+    fn write_entry(sessions_dir: &Path, entry: &ProcEntry) {
+        let dir = entry_dir(sessions_dir, &entry.session_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            entry_json_path(&dir, &entry.process_id),
+            serde_json::to_string(entry).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn sample_entry(
+        session_id: &str,
+        process_id: &str,
+        state: &str,
+        exit_code: Option<i32>,
+    ) -> ProcEntry {
+        ProcEntry {
+            process_id: process_id.to_string(),
+            session_id: session_id.to_string(),
+            command: "myclaw update".to_string(),
+            workdir: None,
+            pid: 12345,
+            pid_start_ticks: None,
+            spawned_at_ms: now_ms(),
+            output_path: "/tmp/myclaw-test-does-not-exist.out".to_string(),
+            state: state.to_string(),
+            exit_code,
+            notify_on_exit: false,
+        }
+    }
+
+    /// issue #228: `lost_on_restart` only ever occurs on a non-hot-switch
+    /// restart (`adopt_after_restart` reclaims the whole cgroup instead of
+    /// probing), so completion is definitively ruled out — the wording must
+    /// say so plainly, not hedge with "may have completed".
+    #[test]
+    fn latest_entry_summary_lost_on_restart_is_definite_not_hedging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = sample_entry("sess-1", "sh_abc", "lost_on_restart", None);
+        write_entry(tmp.path(), &entry);
+
+        let (msg, is_error) = latest_entry_summary(tmp.path(), "sess-1").unwrap();
+        assert!(is_error, "lost_on_restart must be reported as an error result");
+        assert!(
+            !msg.to_lowercase().contains("may have"),
+            "must not hedge — a non-hot-switch restart guarantees the process did not \
+             survive: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("confirmed"),
+            "must state definitively that it did not complete: {msg}"
+        );
+    }
+
+    #[test]
+    fn latest_entry_summary_running_is_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = sample_entry("sess-2", "sh_def", "running", None);
+        write_entry(tmp.path(), &entry);
+
+        let (msg, is_error) = latest_entry_summary(tmp.path(), "sess-2").unwrap();
+        assert!(!is_error, "a still-running survived process is not an error outcome");
+        assert!(msg.contains("still running"));
+    }
+
+    /// An adopted orphan whose exit could not be reaped (`exited` with no
+    /// exit_code) is genuinely unknown, not a confirmed non-completion —
+    /// must not reuse the `lost_on_restart` wording.
+    #[test]
+    fn latest_entry_summary_exited_reports_uncertainty_not_definite_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = sample_entry("sess-3", "sh_ghi", "exited", None);
+        write_entry(tmp.path(), &entry);
+
+        let (msg, is_error) = latest_entry_summary(tmp.path(), "sess-3").unwrap();
+        assert!(is_error);
+        assert!(
+            !msg.to_lowercase().contains("confirmed"),
+            "an adopted-orphan exit is genuinely unknown, not a confirmed outcome: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_lost_content_distinguishes_lost_on_restart_from_exited() {
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let lost = sample_entry("sess-4", "sh_lost", "lost_on_restart", None);
+        registry.write().await.insert(lost.process_id.clone(), lost.clone());
+
+        let content = recovery_lost_content(&registry, &lost.process_id).await;
+        assert!(content.contains("确定未执行完成"), "got: {content}");
+        assert!(!content.contains("可能已完成"), "must not hedge for a confirmed-dead entry: {content}");
+    }
+
+    #[tokio::test]
+    async fn recovery_lost_content_exited_keeps_genuine_uncertainty() {
+        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let exited = sample_entry("sess-5", "sh_exited", "exited", None);
+        registry.write().await.insert(exited.process_id.clone(), exited.clone());
+
+        let content = recovery_lost_content(&registry, &exited.process_id).await;
+        assert!(content.contains("热切换"), "got: {content}");
+        assert!(
+            !content.contains("确定未执行完成"),
+            "an adopted-orphan exit isn't a confirmed non-completion: {content}"
+        );
+    }
 }
