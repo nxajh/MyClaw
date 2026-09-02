@@ -634,10 +634,18 @@ fn recover_completion_queue(ctx: &Arc<OrchestratorCtx>) {
         // replayed), just not re-delivered/re-drained through either path
         // below.
         if is_stale_completion_notice(entry.enqueued_at) {
-            tracing::debug!(
+            // review finding on #223 (xiaoer-bot): unlike #216's shell-notice
+            // suppression (always a *redundant* copy of something already
+            // delivered once), a stale completion-queue entry may represent
+            // content that was NEVER shown to the user at all (persisted
+            // before delivery, per the at-least-once contract, then the
+            // channel/session never came back before this entry aged out).
+            // Silently dropping that at `debug!` would make "where did
+            // notice X go?" unanswerable from the journal — `warn!` instead.
+            tracing::warn!(
                 notice_id = %entry.id,
                 enqueued_at = entry.enqueued_at,
-                "completion queue: stale entry, finalizing without redelivery"
+                "completion queue: stale entry, finalizing without redelivery — its content may never have reached the user"
             );
             if let Err(e) = store.mark_delivered(&entry.id) {
                 tracing::warn!(notice_id = %entry.id, err = %e, "completion queue: stale-entry mark failed");
