@@ -56,6 +56,23 @@ fn is_stale_completion_notice(enqueued_at: u64) -> bool {
     now.saturating_sub(enqueued_at) > STALE_LOST_NOTICE_AFTER_SECS
 }
 
+/// issue #228: `recover_suspension`'s merged failure notice, header only.
+/// `merged` mixes shell entries whose own line already states the real,
+/// cause-specific outcome (confirmed not completed vs. genuinely unknown
+/// after a hot-switch adoption — see `recovery_lost_content`) with
+/// sub-agent entries that never survive any restart. A blanket "已中断"
+/// header here contradicted a shell entry's own "已结束" line when that
+/// process had actually run to completion across a deployment hot-switch.
+/// The header now just introduces the list; each entry's own line carries
+/// the semantics. Extracted as a pure function so the wording is testable
+/// without driving the full `recover_suspension` + `route_notice` path.
+fn suspension_recovery_notice(suspended_secs: i64, merged: &str) -> String {
+    format!(
+        "[系统通知] daemon 重启，以下挂起中的后台任务处理结果如下（挂起时长约 {}s）：\n{}",
+        suspended_secs, merged
+    )
+}
+
 /// Where a recovered sub-agent turn's output goes.
 enum CompletionSink {
     /// Sub-agent session: emit `DelegationEvent::Completed` to wake the parent.
@@ -866,10 +883,7 @@ async fn recover_suspension(
     let suspended_secs = chrono::Utc::now()
         .timestamp()
         .saturating_sub(snapshot.suspended_at as i64);
-    let notice = format!(
-        "[系统通知] daemon 重启，以下后台任务已中断（挂起时长约 {}s）：\n{}",
-        suspended_secs, merged
-    );
+    let notice = suspension_recovery_notice(suspended_secs, &merged);
     route_notice(
         ctx,
         &session_ctx.session_id,
@@ -1256,6 +1270,21 @@ mod tests {
         assert!(r.content.contains("后台命令"), "must use shell wording, not sub-agent wording: {}", r.content);
         assert!(!r.content.contains("子代理"), "must NOT use sub-agent wording: {}", r.content);
         assert!(snap.pending.is_empty());
+    }
+
+    /// issue #228: the merged suspension-recovery notice header must not
+    /// presuppose an accident ("已中断") when the per-entry lines it wraps
+    /// may already state a definite, non-accident outcome (e.g. a shell
+    /// command that ran to completion across a deployment hot-switch).
+    #[test]
+    fn suspension_recovery_notice_header_does_not_presuppose_interruption() {
+        let notice = suspension_recovery_notice(42, "- some entry line\n");
+        assert!(
+            !notice.contains("已中断"),
+            "header must not blanket-label pending tasks as interrupted: {notice}"
+        );
+        assert!(notice.contains("some entry line"), "must still include the entries: {notice}");
+        assert!(notice.contains("42s"), "must still include the suspension duration: {notice}");
     }
 
     /// issue #214: `is_stale_lost_notice` is the pure predicate deciding
