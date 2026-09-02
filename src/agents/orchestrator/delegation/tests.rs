@@ -1,5 +1,6 @@
 use super::super::test_support::{test_ctx, MockChannel};
 use super::*;
+use crate::agents::session_context::TerminalRecord;
 use crate::agents::{AgentMessage, DelegationNotice, SessionContext};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -447,6 +448,73 @@ async fn silence_guidance_appended_while_pending_remains() {
     assert!(content.contains("绝不轮询"));
     assert!(!content.contains("不得输出最终结论"));
     assert!(!content.contains("不会终结"));
+}
+
+/// Regression test for issue #224: `record_terminal`'s duplicate check only
+/// works while `turn_suspension` still exists — the `s.results` scan lives
+/// inside the `Some(s)` branch. Once cleared (routine, as soon as every
+/// pending task is collected), a repeat call for the same sub_session_id
+/// used to fall through to `NoSuspension` instead of `Duplicate` — and
+/// `route_shell_completion` deliberately treats `NoSuspension` as "route it
+/// anyway" (#129: every notify-armed process gets a notice), turning a
+/// repeat call into a repeat delivery to the user.
+#[tokio::test]
+async fn record_terminal_dedupes_after_suspension_clears() {
+    let ctx = test_ctx(vec![]);
+    let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+    sctx.add_pending_task("t1".to_string());
+
+    let first = sctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0);
+    assert!(
+        matches!(first, TerminalRecord::Recorded(_)),
+        "expected Recorded, got {first:?}"
+    );
+
+    sctx.clear_suspension_if_collected();
+    assert!(
+        sctx.suspension_snapshot().is_none(),
+        "suspension must be cleared once its only pending task is collected"
+    );
+
+    // A repeat call for the same id, after suspension clears, must now be
+    // recognized as a duplicate — not fall through as NoSuspension.
+    let second = sctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0);
+    assert!(
+        matches!(second, TerminalRecord::Duplicate),
+        "expected Duplicate, got {second:?}"
+    );
+}
+
+/// Companion to the test above: the dedup window is bounded, not
+/// unbounded (issue #224's stated design goal — avoid the same
+/// unbounded-growth class of issue #214/#222 in a long-lived session). Once
+/// an entry ages out of the window, a repeat call for that id falls through
+/// to `NoSuspension` again, exactly as it did before this fix.
+#[tokio::test]
+async fn record_terminal_repeat_after_window_expires_is_not_deduped() {
+    let ctx = test_ctx(vec![]);
+    let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+    sctx.add_pending_task("t1".to_string());
+    let first = sctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0);
+    assert!(matches!(first, TerminalRecord::Recorded(_)));
+    sctx.clear_suspension_if_collected();
+
+    // Backdate the recorded entry past the dedup window.
+    {
+        let mut recent = sctx
+            .recently_recorded_terminals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (_, recorded_at) in recent.iter_mut() {
+            *recorded_at = std::time::Instant::now() - std::time::Duration::from_secs(3601);
+        }
+    }
+
+    let second = sctx.record_terminal("t1".into(), SubStatus::Completed, "done again".into(), 0);
+    assert!(
+        matches!(second, TerminalRecord::NoSuspension),
+        "expected NoSuspension once the window has passed, got {second:?}"
+    );
 }
 
 #[tokio::test]
