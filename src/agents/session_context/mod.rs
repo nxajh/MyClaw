@@ -98,7 +98,27 @@ pub struct SessionContext {
     /// Per-turn cancel token. Recreated each turn by `process_turn`.
     /// `/stop` fires this to cancel the in-flight turn without locking `session`.
     pub turn_cancel: std::sync::Mutex<tokio_util::sync::CancellationToken>,
+    /// issue #224: sub_session_ids `record_terminal` has recorded recently,
+    /// kept for a bounded time window so a repeat call for the same id
+    /// after `turn_suspension` clears (routine — happens as soon as every
+    /// pending task is collected) still gets caught as a duplicate.
+    /// `record_terminal`'s own in-`TurnSuspension` `results` dedup only
+    /// works while suspension state still exists; once cleared, the
+    /// suspension-based check is bypassed entirely (`NoSuspension`), and
+    /// that path is a deliberate fall-through for the "session reloaded
+    /// while running" case (#129) — so it cannot simply be made stricter.
+    /// Runtime-only (not persisted — a restart's dedup is #220/#223's
+    /// concern, not this one) and time-bounded rather than unbounded, to
+    /// avoid the same unbounded-growth class of issue #214/#222 already
+    /// hit elsewhere in a long-lived session.
+    pub(crate) recently_recorded_terminals: std::sync::Mutex<Vec<(String, std::time::Instant)>>,
 }
+
+/// issue #224: how long a `record_terminal`'d sub_session_id is remembered
+/// for duplicate detection after `turn_suspension` clears. Matches the 1h
+/// convention already established by `STALE_LOST_NOTICE_AFTER_SECS`
+/// (#216/#222) elsewhere in this series.
+const RECENTLY_RECORDED_TERMINAL_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// P1 (2026-08-13, RFC delegation-notice-queue §4): a delegation completion
 /// notice enqueued while the session's `turn_lock` is busy (a user turn or
@@ -177,6 +197,7 @@ impl SessionContext {
             delegation_notice_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             user_profile: Arc::new(UserProfile::default()),
+            recently_recorded_terminals: std::sync::Mutex::new(Vec::new()),
         };
         ctx.restore_suspension();
         ctx
@@ -198,6 +219,7 @@ impl SessionContext {
             delegation_notice_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             user_profile: profile,
+            recently_recorded_terminals: std::sync::Mutex::new(Vec::new()),
         };
         ctx.restore_suspension();
         ctx
@@ -426,6 +448,30 @@ impl SessionContext {
         content: String,
         sent_message_count: u64,
     ) -> TerminalRecord {
+        // issue #224: this bounded, suspension-independent check runs FIRST
+        // because the check below (inside the `Some(s)` branch) only
+        // protects while `turn_suspension` still exists — as soon as every
+        // pending task is collected, `clear_suspension_if_collected` drops
+        // it back to `None`, and a call for an id already recorded minutes
+        // (or seconds) earlier would otherwise hit the `guard.as_mut() ==
+        // None` branch below and return `NoSuspension` — which
+        // `route_shell_completion` deliberately treats as "route it anyway"
+        // (#129: every notify-armed process gets a notice), turning a
+        // repeat call into a repeat delivery. Pruned lazily to the window.
+        {
+            let mut recent = self
+                .recently_recorded_terminals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let now = std::time::Instant::now();
+            recent.retain(|(_, recorded_at)| {
+                now.duration_since(*recorded_at) <= RECENTLY_RECORDED_TERMINAL_WINDOW
+            });
+            if recent.iter().any(|(id, _)| id == &sub_session_id) {
+                return TerminalRecord::Duplicate;
+            }
+        }
+
         let snapshot = {
             let mut guard = self
                 .turn_suspension
@@ -451,7 +497,7 @@ impl SessionContext {
                 .remove(&sub_session_id)
                 .unwrap_or_default();
             s.results.push(SubResult {
-                sub_session_id,
+                sub_session_id: sub_session_id.clone(),
                 status,
                 content,
                 sent_message_count,
@@ -464,6 +510,10 @@ impl SessionContext {
         // Persist after the guard drops — persist_suspension re-locks the
         // same std Mutex (not reentrant).
         self.persist_suspension();
+        self.recently_recorded_terminals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((sub_session_id, std::time::Instant::now()));
         TerminalRecord::Recorded(Box::new(snapshot))
     }
 
