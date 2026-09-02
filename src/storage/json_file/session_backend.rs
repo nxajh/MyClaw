@@ -224,7 +224,13 @@ impl SessionBackend for JsonFileBackend {
 
     fn delete_message_by_id(&self, session_id: &str, message_id: i64) -> std::io::Result<bool> {
         let path = self.history_path(session_id);
-        let Ok(content) = fs::read_to_string(&path) else {
+        // issue #219: read raw bytes rather than `read_to_string` — the
+        // latter fails wholesale if *any* line in the file is invalid UTF-8
+        // (a torn write elsewhere in the file's history), silently no-opping
+        // this call. Removing one line by position doesn't require decoding
+        // any line's content, torn or not (same fix shape as #217's
+        // `remove_last_message`).
+        let Ok(content) = fs::read(&path) else {
             return Ok(false);
         };
 
@@ -235,7 +241,7 @@ impl SessionBackend for JsonFileBackend {
             .and_then(|m| m.segments.iter().find(|s| s.segment == m.segment));
         let start_id = active_seg.map(|s| s.start_id).unwrap_or(1);
 
-        let mut lines: Vec<&str> = content.split('\n').collect();
+        let mut lines: Vec<&[u8]> = content.split(|&b| b == b'\n').collect();
         // Remove trailing empty line if present
         if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
             lines.pop();
@@ -251,9 +257,11 @@ impl SessionBackend for JsonFileBackend {
         lines.remove(idx);
 
         let new_content = if lines.is_empty() {
-            String::new()
+            Vec::new()
         } else {
-            lines.join("\n") + "\n"
+            let mut buf = lines.join(&b'\n');
+            buf.push(b'\n');
+            buf
         };
         fs::write(&path, new_content)?;
 
@@ -276,7 +284,11 @@ impl SessionBackend for JsonFileBackend {
         message: &ChatMessage,
     ) -> std::io::Result<bool> {
         let path = self.history_path(session_id);
-        let Ok(content) = fs::read_to_string(&path) else {
+        // issue #219: same rationale as `delete_message_by_id` — replacing
+        // one line by position doesn't require decoding any other line's
+        // content, so raw bytes avoid the wholesale-failure-on-any-torn-line
+        // shape of `read_to_string`.
+        let Ok(content) = fs::read(&path) else {
             return Ok(false);
         };
 
@@ -287,7 +299,12 @@ impl SessionBackend for JsonFileBackend {
             .and_then(|m| m.segments.iter().find(|s| s.segment == m.segment));
         let start_id = active_seg.map(|s| s.start_id).unwrap_or(1);
 
-        let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let mut lines: Vec<&[u8]> = content.split(|&b| b == b'\n').collect();
+        // `str::lines()` never yields a trailing empty element for a
+        // string ending in '\n' — match that on the byte split.
+        if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
         if message_id < start_id {
             return Ok(false);
         }
@@ -297,9 +314,12 @@ impl SessionBackend for JsonFileBackend {
         }
         let externalized = self.externalize(session_id, message)?;
         let json = serde_json::to_string(&externalized).map_err(std::io::Error::other)?;
-        lines[idx] = json;
+        let json_bytes = json.into_bytes();
+        lines[idx] = &json_bytes;
 
-        fs::write(&path, lines.join("\n") + "\n")?;
+        let mut new_content = lines.join(&b'\n');
+        new_content.push(b'\n');
+        fs::write(&path, new_content)?;
 
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.last_activity = Utc::now();
@@ -311,24 +331,38 @@ impl SessionBackend for JsonFileBackend {
 
     fn truncate_messages(&self, session_id: &str, keep_count: usize) -> std::io::Result<()> {
         let path = self.history_path(session_id);
-        let Ok(content) = fs::read_to_string(&path) else {
+        // issue #219: raw bytes rather than `read_to_string` — the file-wide
+        // read was the only wholesale-failure point here (the GC loop below
+        // already tolerates an unparseable kept line via `if let Ok(msg)`).
+        let Ok(content) = fs::read(&path) else {
             return Ok(());
         };
-        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&[u8]> = content
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
         if keep_count >= lines.len() {
             return Ok(()); // nothing to truncate
         }
-        let kept: Vec<&str> = lines.into_iter().take(keep_count).collect();
+        let kept: Vec<&[u8]> = lines.into_iter().take(keep_count).collect();
         let new_content = if keep_count == 0 {
-            String::new()
+            Vec::new()
         } else {
-            kept.join("\n") + "\n"
+            let mut buf = kept.join(&b'\n');
+            buf.push(b'\n');
+            buf
         };
         fs::write(&path, new_content)?;
 
         // Mark-and-sweep blob GC over the surviving (kept) lines + archives.
+        // Only the individual kept line needs to be valid UTF-8/JSON to
+        // contribute a hash — an unparseable one (torn or otherwise) is
+        // silently skipped, same tolerance as before this fix.
         let mut live_hashes: HashSet<String> = HashSet::new();
         for line in &kept {
+            let Ok(line) = std::str::from_utf8(line) else {
+                continue;
+            };
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -674,13 +708,17 @@ impl SessionBackend for JsonFileBackend {
                 .join(format!("history.{:04}.jsonl", seg.segment))
         };
 
-        // Read the specific line by segment-relative index.
+        // Read the specific line by segment-relative index. issue #219: raw
+        // bytes rather than `read_to_string` — only the target line needs to
+        // be valid UTF-8/JSON; a torn line elsewhere in the file no longer
+        // has to block reaching it.
         let line_idx = (message_id - seg.start_id) as usize;
-        let content = fs::read_to_string(&file_path).ok()?;
+        let content = fs::read(&file_path).ok()?;
         let line = content
-            .lines()
+            .split(|&b| b == b'\n')
             .filter(|l| !l.is_empty())
             .nth(line_idx)?;
+        let line = std::str::from_utf8(line).ok()?;
 
         let msg: ChatMessage = serde_json::from_str(line).ok()?;
         let text = msg.text_content();
