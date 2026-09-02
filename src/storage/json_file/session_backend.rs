@@ -250,10 +250,17 @@ impl SessionBackend for JsonFileBackend {
         if message_id < start_id {
             return Ok(false);
         }
-        let idx = (message_id - start_id) as usize;
-        if idx >= lines.len() {
+        // issue #225: `message_id - start_id` is an index into the sequence
+        // of successfully-parsed messages — the same indexing
+        // `read_history_with_ids` uses (a torn line is skipped, not counted).
+        // Indexing directly into the raw `\n`-split lines (as #217/#219 did)
+        // silently operates on the wrong line whenever an independent torn
+        // line sits before the target: e.g. `[m1, torn, m3]`, `id=2` (m3)
+        // maps to raw index 1, which is the torn line, not m3.
+        let seq_idx = (message_id - start_id) as usize;
+        let Some(idx) = nth_parseable_line_index(&lines, seq_idx) else {
             return Ok(false);
-        }
+        };
         lines.remove(idx);
 
         let new_content = if lines.is_empty() {
@@ -308,10 +315,13 @@ impl SessionBackend for JsonFileBackend {
         if message_id < start_id {
             return Ok(false);
         }
-        let idx = (message_id - start_id) as usize;
-        if idx >= lines.len() {
+        // issue #225: same positional-alignment fix as `delete_message_by_id`
+        // — map the message-id-derived sequence index through the
+        // successfully-parsed-lines view, not the raw line array.
+        let seq_idx = (message_id - start_id) as usize;
+        let Some(idx) = nth_parseable_line_index(&lines, seq_idx) else {
             return Ok(false);
-        }
+        };
         let externalized = self.externalize(session_id, message)?;
         let json = serde_json::to_string(&externalized).map_err(std::io::Error::other)?;
         let json_bytes = json.into_bytes();
@@ -720,13 +730,18 @@ impl SessionBackend for JsonFileBackend {
         // bytes rather than `read_to_string` — only the target line needs to
         // be valid UTF-8/JSON; a torn line elsewhere in the file no longer
         // has to block reaching it.
-        let line_idx = (message_id - seg.start_id) as usize;
+        //
+        // issue #225: `.filter(|l| !l.is_empty())` alone still counted a
+        // non-empty-but-unparseable (torn) line as occupying a sequence
+        // slot, misaligning `line_idx` against `read_history_with_ids`'
+        // skip-unparseable-lines indexing the same way #217/#219's
+        // position-based writes did. Route through the same
+        // `nth_parseable_line_index` used there instead.
+        let seq_idx = (message_id - seg.start_id) as usize;
         let content = fs::read(&file_path).ok()?;
-        let line = content
-            .split(|&b| b == b'\n')
-            .filter(|l| !l.is_empty())
-            .nth(line_idx)?;
-        let line = std::str::from_utf8(line).ok()?;
+        let lines: Vec<&[u8]> = content.split(|&b| b == b'\n').collect();
+        let idx = nth_parseable_line_index(&lines, seq_idx)?;
+        let line = std::str::from_utf8(lines[idx]).ok()?;
 
         let msg: ChatMessage = serde_json::from_str(line).ok()?;
         let text = msg.text_content();
@@ -737,4 +752,37 @@ impl SessionBackend for JsonFileBackend {
         };
         Some((msg.role, preview))
     }
+}
+
+/// issue #225: map a "parsed-message sequence index" — the same indexing
+/// `read_history_with_ids` uses, where only a line that decodes as UTF-8,
+/// isn't blank, and parses as a valid `ChatMessage` occupies a slot — to its
+/// underlying raw `\n`-split line index within `lines`. A torn or otherwise
+/// unparseable line is skipped and does not consume a slot, so a
+/// message-id-derived index (`message_id - start_id`) lands on the correct
+/// raw line even when an earlier independent torn line exists. Returns
+/// `None` when `seq_idx` is out of range.
+///
+/// Shared by `delete_message_by_id`, `update_message`, and `query_message` —
+/// all three used to index `lines` directly by `seq_idx`, silently operating
+/// on (or reading) the wrong raw line whenever a torn line preceded the
+/// target.
+fn nth_parseable_line_index(lines: &[&[u8]], seq_idx: usize) -> Option<usize> {
+    let mut seen = 0usize;
+    for (raw_idx, line) in lines.iter().enumerate() {
+        let Ok(text) = std::str::from_utf8(line) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        if serde_json::from_str::<ChatMessage>(text).is_err() {
+            continue;
+        }
+        if seen == seq_idx {
+            return Some(raw_idx);
+        }
+        seen += 1;
+    }
+    None
 }
