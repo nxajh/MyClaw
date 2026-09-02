@@ -1,4 +1,5 @@
 use super::*;
+use super::backend::scan_jsonl_messages;
 use crate::providers::{ChatMessage, ContentPart};
 use crate::storage::json_file::records::SessionMeta;
 
@@ -245,6 +246,94 @@ fn torn_write_drops_only_the_corrupted_line_not_subsequent_history() {
         texts.len(),
         2,
         "only the torn line should be dropped, got: {texts:?}"
+    );
+}
+
+#[test]
+fn scan_jsonl_messages_skips_torn_line_and_keeps_reading() {
+    // Regression test for issue #217: `extend_archived_live_sets` used
+    // `.lines().map_while(Result::ok)` — the same anti-pattern fixed for
+    // the active history in #213 — to scan archive segments for legacy
+    // blob-hash refs. One torn line stopped the scan entirely, silently
+    // dropping every message (and thus every live blob hash) after it.
+    // `scan_jsonl_messages` is the extracted, independently-testable read
+    // loop backing that scan; `collect_blob_hashes` is currently a no-op
+    // stub, so this is tested at the scan level rather than through
+    // `extend_archived_live_sets` itself.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("segment.jsonl");
+
+    let msg_one = serde_json::to_string(&ChatMessage::user_text("first")).unwrap();
+    let msg_three = serde_json::to_string(&ChatMessage::user_text("third")).unwrap();
+    let torn = "测试".as_bytes()[..1].to_vec(); // 1 of 3 bytes of '测' — invalid UTF-8 alone
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(msg_one.as_bytes());
+    raw.push(b'\n');
+    raw.extend_from_slice(&torn);
+    raw.push(b'\n');
+    raw.extend_from_slice(msg_three.as_bytes());
+    raw.push(b'\n');
+    fs::write(&path, &raw).unwrap();
+
+    let messages = scan_jsonl_messages(&path);
+    let texts: Vec<String> = messages
+        .iter()
+        .filter_map(|m| {
+            m.parts.first().and_then(|p| match p {
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+
+    assert_eq!(
+        texts,
+        vec!["first".to_string(), "third".to_string()],
+        "the torn line must be skipped without dropping the line after it, got: {texts:?}"
+    );
+}
+
+#[test]
+fn remove_last_message_survives_torn_line_earlier_in_file() {
+    // Regression test for issue #217: `remove_last_message` used
+    // `fs::read_to_string`, which fails wholesale if *any* line in the
+    // file contains invalid UTF-8 (e.g. an earlier torn write elsewhere in
+    // the session's history) — silently no-opping the removal (`Ok(false)`)
+    // instead of just dropping the last line, which doesn't actually
+    // require decoding the rest of the file.
+    let (_dir, backend, sid) = backend_with_session();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message one"))
+        .unwrap();
+
+    let history_path = backend.history_path(&sid);
+    let torn = "测试".as_bytes()[..1].to_vec(); // invalid UTF-8 on its own
+    let mut raw = fs::read(&history_path).unwrap();
+    raw.extend_from_slice(&torn);
+    raw.push(b'\n');
+    fs::write(&history_path, &raw).unwrap();
+
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message two"))
+        .unwrap();
+
+    let removed = backend.remove_last_message(&sid).unwrap();
+    assert!(
+        removed,
+        "remove_last_message must succeed despite an earlier torn line, not silently no-op"
+    );
+
+    let final_raw = fs::read(&history_path).unwrap();
+    let mut expected = serde_json::to_string(&ChatMessage::user_text("message one"))
+        .unwrap()
+        .into_bytes();
+    expected.push(b'\n');
+    expected.extend_from_slice(&torn);
+    expected.push(b'\n');
+    assert_eq!(
+        final_raw, expected,
+        "only the last line should be removed; the earlier torn line must survive byte-for-byte"
     );
 }
 

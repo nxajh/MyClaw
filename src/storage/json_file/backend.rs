@@ -399,17 +399,7 @@ impl JsonFileBackend {
             return;
         };
         for entry in entries.filter_map(|e| e.ok()) {
-            let Ok(f) = fs::File::open(entry.path()) else {
-                continue;
-            };
-            for line in BufReader::new(f).lines().map_while(Result::ok) {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let Ok(msg) = serde_json::from_str::<ChatMessage>(line) else {
-                    continue;
-                };
+            for msg in scan_jsonl_messages(&entry.path()) {
                 collect_blob_hashes(&msg, blob_hashes);
             }
         }
@@ -552,6 +542,59 @@ impl JsonFileBackend {
         }
         Ok(migrated)
     }
+}
+
+/// Read a JSONL file, returning every line that parses as a `ChatMessage`.
+///
+/// issue #217: a torn line (invalid UTF-8, or valid UTF-8 but unparseable
+/// JSON) — the same failure mode fixed in #213's `read_history_with_ids` —
+/// is skipped rather than aborting the whole scan, so one corrupted line in
+/// an archive segment doesn't drop every message after it out of the
+/// caller's live set. Skipped lines are logged (review finding on #218,
+/// xiaoer-bot) — silently dropping them here would be the same class of
+/// hard-to-debug data loss #213's fix moved away from, and this scan feeds
+/// the mark-and-sweep blob GC's live set, where a silent drop could mean an
+/// a still-referenced blob quietly gets swept.
+pub(super) fn scan_jsonl_messages(path: &Path) -> Vec<ChatMessage> {
+    let Ok(f) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut messages = Vec::new();
+    let mut dropped = 0u32;
+    for line_result in BufReader::new(f).lines() {
+        let line = match line_result {
+            Ok(line) => line,
+            Err(err) => {
+                dropped += 1;
+                tracing::warn!(
+                    path = %path.display(), %err,
+                    "scan_jsonl_messages: skipping unreadable line (likely a torn write)"
+                );
+                continue;
+            }
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<ChatMessage>(line) {
+            Ok(msg) => messages.push(msg),
+            Err(err) => {
+                dropped += 1;
+                tracing::warn!(
+                    path = %path.display(), %err,
+                    "scan_jsonl_messages: skipping unparseable line (likely a torn write)"
+                );
+            }
+        }
+    }
+    if dropped > 0 {
+        tracing::warn!(
+            path = %path.display(), dropped,
+            "scan_jsonl_messages: dropped corrupted line(s) while scanning"
+        );
+    }
+    messages
 }
 
 /// Path-only history has no inline media blobs to track.

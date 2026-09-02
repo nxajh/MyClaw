@@ -182,11 +182,16 @@ impl SessionBackend for JsonFileBackend {
 
     fn remove_last_message(&self, session_id: &str) -> std::io::Result<bool> {
         let path = self.history_path(session_id);
-        let Ok(content) = fs::read_to_string(&path) else {
+        // issue #217: read raw bytes rather than `read_to_string` — the latter
+        // fails wholesale if *any* line in the file is invalid UTF-8 (a torn
+        // write elsewhere in the file's history), silently no-opping this
+        // call. Dropping the trailing line only requires finding the last
+        // `\n`-delimited byte range, not decoding the file as UTF-8.
+        let Ok(content) = fs::read(&path) else {
             return Ok(false);
         };
 
-        let mut lines: Vec<&str> = content.split('\n').collect();
+        let mut lines: Vec<&[u8]> = content.split(|&b| b == b'\n').collect();
         if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
             lines.pop();
         }
@@ -196,9 +201,11 @@ impl SessionBackend for JsonFileBackend {
         lines.pop();
 
         let new_content = if lines.is_empty() {
-            String::new()
+            Vec::new()
         } else {
-            lines.join("\n") + "\n"
+            let mut buf = lines.join(&b'\n');
+            buf.push(b'\n');
+            buf
         };
         fs::write(&path, new_content)?;
 
