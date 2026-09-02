@@ -490,6 +490,112 @@ fn query_message_survives_torn_line_elsewhere_in_file() {
     );
 }
 
+/// Shared setup for issue #225's regression tests: a session whose
+/// `history.jsonl` is `[m1, TORN, m3]` — an INDEPENDENT torn line sitting
+/// between two real messages (not glued to either, unlike #213's O_APPEND
+/// scenario). `m1` gets global id 1, `m3` gets global id 2 — the torn line
+/// is skipped and does not consume an id, exactly like
+/// `read_history_with_ids` already treats it. Returns the raw torn bytes too
+/// (needed to assert they survive byte-for-byte).
+fn session_with_torn_line_between_two_messages() -> (tempfile::TempDir, JsonFileBackend, String, Vec<u8>) {
+    let (dir, backend, sid) = backend_with_session();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("m1"))
+        .unwrap();
+
+    let history_path = backend.history_path(&sid);
+    let torn = "测试".as_bytes()[..1].to_vec();
+    let mut raw = fs::read(&history_path).unwrap();
+    raw.extend_from_slice(&torn);
+    raw.push(b'\n');
+    fs::write(&history_path, &raw).unwrap();
+
+    backend
+        .append_message(&sid, &ChatMessage::user_text("m3"))
+        .unwrap();
+
+    (dir, backend, sid, torn)
+}
+
+#[test]
+fn delete_message_by_id_targets_the_correct_message_around_an_independent_torn_line() {
+    // Regression test for issue #225: `delete_message_by_id` computed
+    // `idx = message_id - start_id` and indexed straight into the raw
+    // `\n`-split lines — but `read_history_with_ids` assigns ids by
+    // position in the sequence of SUCCESSFULLY PARSED messages (a torn
+    // line is skipped, not counted). With an independent torn line between
+    // two real messages (`[m1, torn, m3]`), global id 2 is `m3`, but the
+    // old code's raw-position `idx` of 1 pointed at the torn line instead —
+    // deleting the torn junk, leaving `m3` untouched, and falsely reporting
+    // success.
+    let (_dir, backend, sid, torn) = session_with_torn_line_between_two_messages();
+
+    let deleted = backend.delete_message_by_id(&sid, 2).unwrap();
+    assert!(deleted, "delete_message_by_id(id=2) must report success");
+
+    let history_path = backend.history_path(&sid);
+    let final_raw = fs::read(&history_path).unwrap();
+    let mut expected = serde_json::to_string(&ChatMessage::user_text("m1"))
+        .unwrap()
+        .into_bytes();
+    expected.push(b'\n');
+    expected.extend_from_slice(&torn);
+    expected.push(b'\n');
+    assert_eq!(
+        final_raw, expected,
+        "id=2 (m3) must be the line actually removed; m1 and the torn line must survive"
+    );
+}
+
+#[test]
+fn update_message_targets_the_correct_message_around_an_independent_torn_line() {
+    // Regression test for issue #225: same misalignment as
+    // `delete_message_by_id`, but for `update_message` — the old code
+    // would overwrite the TORN line's raw position instead of `m3`'s.
+    let (_dir, backend, sid, torn) = session_with_torn_line_between_two_messages();
+
+    let updated = backend
+        .update_message(&sid, 2, &ChatMessage::user_text("m3, edited"))
+        .unwrap();
+    assert!(updated, "update_message(id=2) must report success");
+
+    let history_path = backend.history_path(&sid);
+    let final_raw = fs::read(&history_path).unwrap();
+    let mut expected = serde_json::to_string(&ChatMessage::user_text("m1"))
+        .unwrap()
+        .into_bytes();
+    expected.push(b'\n');
+    expected.extend_from_slice(&torn);
+    expected.push(b'\n');
+    expected.extend_from_slice(
+        &serde_json::to_string(&ChatMessage::user_text("m3, edited"))
+            .unwrap()
+            .into_bytes(),
+    );
+    expected.push(b'\n');
+    assert_eq!(
+        final_raw, expected,
+        "id=2 (m3) must be the line actually edited; m1 and the torn line must survive unchanged"
+    );
+}
+
+#[test]
+fn query_message_targets_the_correct_message_around_an_independent_torn_line() {
+    // Regression test for issue #225: `query_message` only filtered empty
+    // lines (`.filter(|l| !l.is_empty())`), so a non-empty-but-unparseable
+    // (torn) line still consumed a sequence slot — misaligning `line_idx`
+    // against `read_history_with_ids`'s indexing the same way the write
+    // paths were misaligned.
+    let (_dir, backend, sid, _torn) = session_with_torn_line_between_two_messages();
+
+    let result = backend.query_message(&sid, 2);
+    assert_eq!(
+        result,
+        Some(("user".to_string(), "m3".to_string())),
+        "id=2 must resolve to m3, not the torn line or a false not-found"
+    );
+}
+
 #[test]
 fn rotate_uses_computed_start_id_not_survivor_in_memory_id() {
     let (_dir, backend, sid) = backend_with_session();
