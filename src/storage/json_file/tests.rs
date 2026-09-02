@@ -338,6 +338,159 @@ fn remove_last_message_survives_torn_line_earlier_in_file() {
 }
 
 #[test]
+fn delete_message_by_id_survives_torn_line_elsewhere_in_file() {
+    // Regression test for issue #219: `delete_message_by_id` used
+    // `fs::read_to_string`, which fails wholesale on any invalid-UTF-8 byte
+    // anywhere in the file — a torn line trailing the file made it silently
+    // no-op (`Ok(false)`) even for a perfectly fine earlier message.
+    let (_dir, backend, sid) = backend_with_session();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message one"))
+        .unwrap();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message two"))
+        .unwrap();
+
+    let history_path = backend.history_path(&sid);
+    let torn = "测试".as_bytes()[..1].to_vec();
+    let mut raw = fs::read(&history_path).unwrap();
+    raw.extend_from_slice(&torn);
+    raw.push(b'\n');
+    fs::write(&history_path, &raw).unwrap();
+
+    let deleted = backend.delete_message_by_id(&sid, 1).unwrap();
+    assert!(
+        deleted,
+        "delete_message_by_id must succeed despite a trailing torn line"
+    );
+
+    let final_raw = fs::read(&history_path).unwrap();
+    let mut expected = serde_json::to_string(&ChatMessage::user_text("message two"))
+        .unwrap()
+        .into_bytes();
+    expected.push(b'\n');
+    expected.extend_from_slice(&torn);
+    expected.push(b'\n');
+    assert_eq!(
+        final_raw, expected,
+        "message one removed; message two and the torn line survive"
+    );
+}
+
+#[test]
+fn update_message_survives_torn_line_elsewhere_in_file() {
+    // Regression test for issue #219: `update_message` used
+    // `fs::read_to_string`, silently no-opping on a torn line anywhere in
+    // the file instead of just replacing the target line by position.
+    let (_dir, backend, sid) = backend_with_session();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message one"))
+        .unwrap();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message two"))
+        .unwrap();
+
+    let history_path = backend.history_path(&sid);
+    let torn = "测试".as_bytes()[..1].to_vec();
+    let mut raw = fs::read(&history_path).unwrap();
+    raw.extend_from_slice(&torn);
+    raw.push(b'\n');
+    fs::write(&history_path, &raw).unwrap();
+
+    let updated = backend
+        .update_message(&sid, 1, &ChatMessage::user_text("message one, edited"))
+        .unwrap();
+    assert!(
+        updated,
+        "update_message must succeed despite a trailing torn line"
+    );
+
+    let final_raw = fs::read(&history_path).unwrap();
+    let mut expected = serde_json::to_string(&ChatMessage::user_text("message one, edited"))
+        .unwrap()
+        .into_bytes();
+    expected.push(b'\n');
+    expected.extend_from_slice(
+        &serde_json::to_string(&ChatMessage::user_text("message two"))
+            .unwrap()
+            .into_bytes(),
+    );
+    expected.push(b'\n');
+    expected.extend_from_slice(&torn);
+    expected.push(b'\n');
+    assert_eq!(
+        final_raw, expected,
+        "message one edited in place; message two and the torn line survive"
+    );
+}
+
+#[test]
+fn truncate_messages_survives_torn_line_in_discarded_portion() {
+    // Regression test for issue #219: `truncate_messages` used
+    // `fs::read_to_string`, silently no-opping (leaving the file untouched)
+    // whenever any line was torn — even one entirely within the portion
+    // being discarded.
+    let (_dir, backend, sid) = backend_with_session();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message one"))
+        .unwrap();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message two"))
+        .unwrap();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message three"))
+        .unwrap();
+
+    let history_path = backend.history_path(&sid);
+    let torn = "测试".as_bytes()[..1].to_vec();
+    let mut raw = fs::read(&history_path).unwrap();
+    raw.extend_from_slice(&torn);
+    raw.push(b'\n');
+    fs::write(&history_path, &raw).unwrap();
+
+    backend.truncate_messages(&sid, 1).unwrap();
+
+    let final_raw = fs::read(&history_path).unwrap();
+    let mut expected = serde_json::to_string(&ChatMessage::user_text("message one"))
+        .unwrap()
+        .into_bytes();
+    expected.push(b'\n');
+    assert_eq!(
+        final_raw, expected,
+        "truncate must succeed despite a torn line in the discarded tail"
+    );
+}
+
+#[test]
+fn query_message_survives_torn_line_elsewhere_in_file() {
+    // Regression test for issue #219: `query_message` used
+    // `fs::read_to_string`, silently returning `None` whenever any line in
+    // the file was torn — even for a query targeting a perfectly fine
+    // earlier message.
+    let (_dir, backend, sid) = backend_with_session();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message one"))
+        .unwrap();
+    backend
+        .append_message(&sid, &ChatMessage::user_text("message two"))
+        .unwrap();
+
+    let history_path = backend.history_path(&sid);
+    let torn = "测试".as_bytes()[..1].to_vec();
+    let mut raw = fs::read(&history_path).unwrap();
+    raw.extend_from_slice(&torn);
+    raw.push(b'\n');
+    fs::write(&history_path, &raw).unwrap();
+
+    let result = backend.query_message(&sid, 1);
+    assert_eq!(
+        result,
+        Some(("user".to_string(), "message one".to_string())),
+        "query_message must succeed despite a trailing torn line"
+    );
+}
+
+#[test]
 fn rotate_uses_computed_start_id_not_survivor_in_memory_id() {
     let (_dir, backend, sid) = backend_with_session();
     backend
