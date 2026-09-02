@@ -361,6 +361,14 @@ impl SessionBackend for JsonFileBackend {
         let mut live_hashes: HashSet<String> = HashSet::new();
         for line in &kept {
             let Ok(line) = std::str::from_utf8(line) else {
+                // review finding on #221 (xiaoer-bot): warn on this the same
+                // way #218's `scan_jsonl_messages` does — this feeds the
+                // mark-and-sweep blob GC's live set, where a silent drop is
+                // exactly the kind of hard-to-debug data loss worth logging.
+                tracing::warn!(
+                    session_id,
+                    "truncate_messages: skipping unreadable kept line while collecting blob hashes (likely a torn write)"
+                );
                 continue;
             };
             let line = line.trim();
