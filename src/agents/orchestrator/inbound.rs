@@ -527,6 +527,42 @@ pub(super) async fn dispatch_turn(
     dispatch_turn_spawn(ctx, key, msg, Vec::new());
 }
 
+/// Mark every notice id in a successfully-delivered turn's batch delivered
+/// in the completion queue (issue #210).
+///
+/// This used to filter to only `id.starts_with("delegation")` before calling
+/// `mark_delivered` — a hardcoded allowlist written 2026-08-13, before
+/// `route_shell_completion` (issue #129, 2026-08-22) started persisting
+/// `"shell:{process_id}"`-prefixed entries into the very same store. That
+/// filter silently skipped every `"shell:"` id from that point on: a shell
+/// background command's completion notice, delivered while its session was
+/// active, would show up to the user correctly but never get marked
+/// delivered on disk — the entry stayed `Pending` forever and
+/// `recover_completion_queue` re-delivered it on every subsequent daemon
+/// restart.
+///
+/// `mark_delivered` already treats an id it doesn't recognize as a safe
+/// no-op (`Ok(false)`, not an error — see `completion_queue.rs`), so there is
+/// no need to pre-filter by prefix at all: an ordinary user-message id or a
+/// `recovery:`-synthesized id was never appended to the store in the first
+/// place and costs nothing beyond a lookup. Trying every id unconditionally
+/// means a future notice source doesn't need to remember to extend an
+/// allowlist here to get cleaned up correctly.
+fn mark_notice_ids_delivered<'a>(
+    store: &crate::agents::orchestrator::CompletionNoticeStore,
+    ids: impl Iterator<Item = &'a String>,
+) {
+    for id in ids {
+        if let Err(e) = store.mark_delivered(id) {
+            tracing::warn!(
+                notice_id = %id,
+                err = %e,
+                "completion queue: mark delivered failed"
+            );
+        }
+    }
+}
+
 /// Synchronous core of `dispatch_turn` — the body has NO awaits (it records
 /// the inbound message and spawns the turn task). `drain_delegation_notices`
 /// calls this directly instead of awaiting `dispatch_turn`: awaiting the
@@ -652,26 +688,21 @@ pub(super) fn dispatch_turn_spawn(
             .await;
         // P2 (2026-08-13, RFC delegation-notice-queue §5.3): the turn
         // persisted its content to session history (Ok) — mark the persisted
-        // entry delivered so a restart does not re-deliver it. Only
-        // `delegation*` synthetic ids are tracked; `recovery:` and channel
-        // user-message ids are never persisted (mark returns false — no-op).
+        // entry delivered so a restart does not re-deliver it. `recovery:`
+        // and ordinary channel user-message ids were never persisted to the
+        // store in the first place (mark returns `Ok(false)` — a safe
+        // no-op), so every id in the batch is tried unconditionally; see
+        // `mark_notice_ids_delivered`'s doc comment (issue #210) for why a
+        // hardcoded prefix allowlist here is the wrong tool.
         // Err keeps the entry Pending (at-least-once re-delivery) for ALL
         // ids in the batch — a partially-delivered batch is not possible
         // since they share one turn (one process_turn Ok/Err outcome).
         if result.is_ok() {
             if let Some(store) = &ctx.completion_queue {
-                for id in std::iter::once(&notice_id).chain(extra_notice_ids.iter()) {
-                    if !id.starts_with("delegation") {
-                        continue;
-                    }
-                    if let Err(e) = store.mark_delivered(id) {
-                        tracing::warn!(
-                            notice_id = %id,
-                            err = %e,
-                            "completion queue: mark delivered failed"
-                        );
-                    }
-                }
+                mark_notice_ids_delivered(
+                    store,
+                    std::iter::once(&notice_id).chain(extra_notice_ids.iter()),
+                );
             }
         }
         // P1 (2026-08-13, RFC delegation-notice-queue §4): after the turn
@@ -834,6 +865,55 @@ mod tests {
                 "mention_preparse",
                 "dispatch_turn",
             ]
+        );
+    }
+
+    // ── issue #210: shell notice ids must actually get marked delivered ───
+
+    /// Regression test for issue #210: `mark_notice_ids_delivered` used to
+    /// filter to only `id.starts_with("delegation")` before calling
+    /// `mark_delivered` — a filter written 2026-08-13, before
+    /// `route_shell_completion` (issue #129, 2026-08-22) started persisting
+    /// `"shell:{process_id}"`-prefixed entries into the same store. That
+    /// silently skipped every shell-completion notice: the entry stayed
+    /// `Pending` on disk forever and was re-delivered on every daemon
+    /// restart even though it had already reached the user.
+    #[test]
+    fn mark_notice_ids_delivered_clears_shell_prefixed_ids_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::agents::orchestrator::CompletionNoticeStore::open(
+            dir.path().join("queue"),
+        )
+        .unwrap();
+
+        let entry = |id: &str| crate::agents::orchestrator::CompletionNoticeEntry {
+            seq: 0,
+            id: id.to_string(),
+            sub_session_id: "sub".to_string(),
+            parent_session_id: "parent".to_string(),
+            status: Some("completed".to_string()),
+            content: "notice".to_string(),
+            silenced_override: Some(false),
+            sent_message_count: 0,
+            enqueued_at: 0,
+            delivery_state: crate::agents::orchestrator::DeliveryState::Pending,
+        };
+        store.append(entry("shell:sh_abc123")).unwrap();
+        store.append(entry("delegation:sub1")).unwrap();
+        assert_eq!(store.len(), 2);
+
+        // The third id was never persisted (e.g. an ordinary user-message
+        // id) — must be a harmless no-op, not a panic or error.
+        let ids = vec![
+            "shell:sh_abc123".to_string(),
+            "delegation:sub1".to_string(),
+            "delegation:never-appended".to_string(),
+        ];
+        mark_notice_ids_delivered(&store, ids.iter());
+
+        assert!(
+            store.is_empty(),
+            "both persisted entries must be marked delivered, including the shell: one"
         );
     }
 
