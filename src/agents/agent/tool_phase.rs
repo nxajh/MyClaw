@@ -135,17 +135,23 @@ impl Agent {
                 &call.id,
             );
 
-            let result = tool_executor
-                .execute(call, session, Some(permission_mode), allowed_tools)
-                .await;
-
-            // Clear the marker now that execute() returned — the tool
-            // completed (or errored), so re-execution by recovery is
-            // no longer the concern. Guard ensures cleanup on any path.
+            // Guard constructed BEFORE the execute().await, not after: if
+            // the task running this loop is itself cancelled while
+            // execute() is in flight (e.g. an outer delegation timeout, or
+            // a suspending shell background-spawn boundary), the guard
+            // must already exist so its Drop still clears the marker.
+            // Constructing it only after the await returned left a gap
+            // where such a cancellation skipped construction entirely and
+            // stranded `.exec_marker` with no corresponding daemon
+            // restart (issue #232).
             let _marker_guard = ExecMarkerGuard {
                 sessions_dir: runtime.sessions_dir.clone(),
                 session_id: session.id.clone(),
             };
+
+            let result = tool_executor
+                .execute(call, session, Some(permission_mode), allowed_tools)
+                .await;
 
             let (result_content, is_error) = match &result {
                 Ok(r) => {
@@ -319,5 +325,120 @@ impl Agent {
         }
 
         Ok(ToolBatchOutcome::Continue)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::agents::agent::exec_marker::exec_marker_read;
+    use crate::agents::agent::tests::{bailing_runtime, empty_config};
+    use crate::agents::session::Session;
+    use crate::agents::LoopBreakerConfig;
+    use crate::config::agent::PermissionMode;
+    use crate::providers::capability_chat::ToolCall;
+    use crate::providers::{Tool, ToolResult};
+
+    /// A tool whose `execute()` never returns within the test's timeout —
+    /// stands in for any long-running tool call (delegation, shell, http)
+    /// that an outer cancellation (delegation timeout, task abort) can cut
+    /// off mid-flight.
+    struct SlowTool;
+
+    #[async_trait]
+    impl Tool for SlowTool {
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn description(&self) -> &str {
+            "slow"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::api::tool::ToolContext,
+        ) -> anyhow::Result<ToolResult> {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Ok(ToolResult {
+                success: true,
+                output: String::new(),
+                error: None,
+            })
+        }
+    }
+
+    /// issue #232: `.exec_marker` must be cleared even when the task
+    /// running `execute_tool_batch` is cancelled WHILE `tool_executor
+    /// .execute()` is still in flight — not just after it returns
+    /// normally. Before the fix, `ExecMarkerGuard` was constructed only
+    /// after the `execute().await` resolved, so a cancellation during that
+    /// await skipped guard construction entirely and stranded
+    /// `.exec_marker` forever, even with no daemon restart in sight.
+    #[tokio::test]
+    async fn exec_marker_cleared_when_cancelled_mid_execute() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path().to_path_buf();
+        let session_id = "test_cancel_mid_execute".to_string();
+        std::fs::create_dir_all(
+            sessions_dir.join(crate::ids::bare_dir_name(&session_id)),
+        )
+        .unwrap();
+
+        let mut session = Session::new(session_id.clone());
+        let runtime = bailing_runtime().with_sessions_dir(sessions_dir.clone());
+        let agent = Agent::new(empty_config());
+
+        let response = CollectedResponse {
+            text: String::new(),
+            reasoning_content: None,
+            thinking_signature: None,
+            tool_calls: vec![ToolCall {
+                id: "call_1".into(),
+                name: "slow".into(),
+                arguments: "{}".into(),
+            }],
+            tool_call_events: 1,
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+            actual_model: None,
+        };
+        let mut messages: Vec<ChatMessage> = Vec::new();
+        let allowed_tools: Vec<Arc<dyn crate::providers::Tool>> = vec![Arc::new(SlowTool)];
+        let mut turn_state = TurnState::default();
+        let mut loop_breaker = LoopBreakerCounter::new(LoopBreakerConfig::default());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            agent.execute_tool_batch(
+                &mut session,
+                &response,
+                &mut messages,
+                &runtime,
+                "test-model",
+                &PermissionMode::Full,
+                &allowed_tools,
+                &[],
+                &mut turn_state,
+                &mut loop_breaker,
+            ),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "expected the timeout to cut execute_tool_batch off mid-tool-execution"
+        );
+        assert!(
+            exec_marker_read(Some(&sessions_dir), &session_id).is_none(),
+            "exec_marker must be cleared even when the batch is cancelled while \
+             the tool call is still executing, not only when execute() returns"
+        );
     }
 }
