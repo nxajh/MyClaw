@@ -242,8 +242,15 @@ fn close_interrupted_tool_rounds(history: &mut Vec<ChatMessage>) {
 
         // Google maps tool results to role=user; a real user message right after
         // tools becomes adjacent user roles → 400. Insert a closing model turn.
+        //
+        // issue #230: this fires on ANY unfulfilled-round shape, including a
+        // live async-delegation wait with no restart/abort in sight — it has
+        // no context on why the round is open, so the placeholder text must
+        // stay neutral. "（已中断）" reads as an accident and gets picked up
+        // as the model's own prior utterance on every later turn, which can
+        // surface in the model's own narration to the user.
         if j < history.len() && history[j].role == "user" {
-            history.insert(j, ChatMessage::assistant_text("（已中断）"));
+            history.insert(j, ChatMessage::assistant_text("（继续）"));
             tracing::warn!("inserted placeholder assistant between tool results and user");
             i = j + 2;
             continue;
@@ -428,6 +435,31 @@ mod tests {
                 "tool directly followed by user"
             );
         }
+    }
+
+    /// issue #230: the closing placeholder fires on any unfulfilled-round
+    /// shape — including a live async-delegation wait with no restart or
+    /// abort involved — so it must not read as an accident ("已中断"), which
+    /// can surface in the model's own narration to the user on an unrelated
+    /// turn.
+    #[test]
+    fn closed_round_placeholder_does_not_say_interrupted() {
+        let mut history = vec![
+            ChatMessage::user_text("hi"),
+            asst_tools(&["t1"]),
+            tool("t1"),
+            ChatMessage::user_text("again"),
+        ];
+        sanitize_history(&mut history);
+        let placeholder = history
+            .iter()
+            .find(|m| m.role == "assistant" && m.tool_calls.is_none())
+            .expect("placeholder assistant message must be inserted");
+        assert!(
+            !placeholder.text_content().contains("已中断"),
+            "placeholder must not read as an accident: {:?}",
+            placeholder.text_content()
+        );
     }
 
     #[test]
