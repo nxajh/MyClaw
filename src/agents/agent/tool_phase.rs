@@ -144,14 +144,27 @@ impl Agent {
             // where such a cancellation skipped construction entirely and
             // stranded `.exec_marker` with no corresponding daemon
             // restart (issue #232).
-            let _marker_guard = ExecMarkerGuard {
-                sessions_dir: runtime.sessions_dir.clone(),
-                session_id: session.id.clone(),
+            //
+            // Scoped to a block that ends the instant execute() returns —
+            // not the whole loop body — so the guard's Drop (and the
+            // marker clear it performs) happens immediately, before the
+            // result-processing/persist/event-notification code below runs.
+            // A wider scope left a "call already completed but marker still
+            // present" window: if the daemon died anywhere in that stretch
+            // (e.g. a std::process::exit from hot-switch's drain timeout,
+            // which can fire on another thread at any instant, not just at
+            // an await point), the marker would outlive the call it
+            // described and could later be misattributed to a different,
+            // unrelated orphan call in a future crash (issue #232).
+            let result = {
+                let _marker_guard = ExecMarkerGuard {
+                    sessions_dir: runtime.sessions_dir.clone(),
+                    session_id: session.id.clone(),
+                };
+                tool_executor
+                    .execute(call, session, Some(permission_mode), allowed_tools)
+                    .await
             };
-
-            let result = tool_executor
-                .execute(call, session, Some(permission_mode), allowed_tools)
-                .await;
 
             let (result_content, is_error) = match &result {
                 Ok(r) => {
@@ -439,6 +452,144 @@ mod tests {
             exec_marker_read(Some(&sessions_dir), &session_id).is_none(),
             "exec_marker must be cleared even when the batch is cancelled while \
              the tool call is still executing, not only when execute() returns"
+        );
+    }
+
+    /// A `PersistHook` that records, at the moment `persist_message` is
+    /// called for a `tool`-role message, whether `.exec_marker` was still
+    /// present on disk — used to prove the guard's Drop (and the marker
+    /// clear it performs) happens before persistence, not after.
+    struct MarkerObservingPersistHook {
+        sessions_dir: std::path::PathBuf,
+        marker_present_at_tool_persist: std::sync::Mutex<Option<bool>>,
+    }
+
+    impl crate::agents::session::backend::PersistHook for MarkerObservingPersistHook {
+        fn persist_message(
+            &self,
+            session_id: &str,
+            message: &ChatMessage,
+        ) -> Option<i64> {
+            if message.role == "tool" {
+                let present = exec_marker_read(Some(&self.sessions_dir), session_id).is_some();
+                *self.marker_present_at_tool_persist.lock().unwrap() = Some(present);
+            }
+            None
+        }
+        fn save_file(
+            &self,
+            _session_id: &str,
+            _preferred_name: Option<&str>,
+            _bytes: &[u8],
+            _mime_type: Option<&str>,
+        ) -> Option<crate::storage::SavedSessionFile> {
+            None
+        }
+        fn save_compaction(&self, _session_id: &str, _summary: &crate::storage::SummaryRecord) {}
+        fn rotate_history(&self, _session_id: &str, _surviving: &[(i64, ChatMessage)]) {}
+        fn save_token_count(&self, _session_id: &str, _total: u64) {}
+        fn save_session_override(&self, _session_id: &str, _override_json: &str) {}
+        fn save_last_message(
+            &self,
+            _session_id: &str,
+            _msg: &crate::api::message::PersistedChannelMessage,
+        ) {
+        }
+        fn truncate_messages(&self, _session_id: &str, _keep_count: usize) {}
+    }
+
+    /// issue #232: the exec-marker guard must be scoped to end the instant
+    /// `execute()` returns, not the whole loop body — otherwise a call that
+    /// has already completed (its side effect done) still leaves the marker
+    /// on disk through result-processing and persistence, which could later
+    /// misattribute that marker to a different, unrelated orphan call if the
+    /// daemon dies before this loop iteration's scope naturally closes.
+    #[tokio::test]
+    async fn exec_marker_cleared_before_result_is_persisted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path().to_path_buf();
+        let session_id = "test_marker_before_persist".to_string();
+        std::fs::create_dir_all(
+            sessions_dir.join(crate::ids::bare_dir_name(&session_id)),
+        )
+        .unwrap();
+
+        let mut session = Session::new(session_id.clone());
+        let hook = Arc::new(MarkerObservingPersistHook {
+            sessions_dir: sessions_dir.clone(),
+            marker_present_at_tool_persist: std::sync::Mutex::new(None),
+        });
+        session.persist = Some(hook.clone());
+
+        let runtime = bailing_runtime().with_sessions_dir(sessions_dir.clone());
+        let agent = Agent::new(empty_config());
+
+        let response = CollectedResponse {
+            text: String::new(),
+            reasoning_content: None,
+            thinking_signature: None,
+            tool_calls: vec![ToolCall {
+                id: "call_persist_order".into(),
+                name: "instant".into(),
+                arguments: "{}".into(),
+            }],
+            tool_call_events: 1,
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+            actual_model: None,
+        };
+        let mut messages: Vec<ChatMessage> = Vec::new();
+
+        struct InstantTool;
+        #[async_trait]
+        impl Tool for InstantTool {
+            fn name(&self) -> &str {
+                "instant"
+            }
+            fn description(&self) -> &str {
+                "instant"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _args: serde_json::Value,
+                _ctx: &crate::api::tool::ToolContext,
+            ) -> anyhow::Result<ToolResult> {
+                Ok(ToolResult {
+                    success: true,
+                    output: String::new(),
+                    error: None,
+                })
+            }
+        }
+
+        let allowed_tools: Vec<Arc<dyn crate::providers::Tool>> = vec![Arc::new(InstantTool)];
+        let mut turn_state = TurnState::default();
+        let mut loop_breaker = LoopBreakerCounter::new(LoopBreakerConfig::default());
+
+        agent
+            .execute_tool_batch(
+                &mut session,
+                &response,
+                &mut messages,
+                &runtime,
+                "test-model",
+                &PermissionMode::Full,
+                &allowed_tools,
+                &[],
+                &mut turn_state,
+                &mut loop_breaker,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *hook.marker_present_at_tool_persist.lock().unwrap(),
+            Some(false),
+            "exec_marker must already be cleared by the time the tool result is \
+             persisted — a wide guard scope would still show it present here"
         );
     }
 }
