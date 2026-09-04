@@ -101,6 +101,143 @@ async fn active_wake_queues_event_for_pending_yield() {
     assert!(queued[0].content.contains("queued summary"));
 }
 
+fn has_cjk(s: &str) -> bool {
+    s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+}
+
+/// issue #240 (item 3, review follow-up): every destination `wake` can
+/// route a delegation notice to — the queue path (what ultimately fills a
+/// `sessions_yield` tool_result) AND the persisted suspension record — must
+/// get English content now, matching #237's "structured content fed to the
+/// model" convention. An earlier version of this fix kept the suspension
+/// record (and the message-injection fallbacks) in a separate Chinese
+/// rendering; review found no destination actually displays this text to
+/// the user directly, so there was no real audience split to preserve —
+/// collapsed back to one English string used everywhere. Covers all four
+/// `DelegationEvent` variants in one pass since they share the same
+/// content-rendering shape in `wake`.
+#[tokio::test]
+async fn wake_content_is_english_everywhere() {
+    let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
+
+    // Completed (sent_message_count == 0): full summary inlined.
+    {
+        let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                summary: "did the thing".to_string(),
+                duration_secs: 5,
+                sent_message_count: 0,
+            },
+        )
+        .await;
+        let queued = sctx.take_pending_yield_events();
+        assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
+        assert!(queued[0].content.contains("did the thing"));
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert!(
+            !has_cjk(&snap.results[0].content),
+            "suspension record must be English too: {}",
+            snap.results[0].content
+        );
+        assert_eq!(
+            queued[0].content, snap.results[0].content,
+            "both destinations now render the same single string"
+        );
+    }
+
+    // Completed (sent_message_count > 0): degraded metadata-only note.
+    {
+        let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                summary: "duplicate summary".to_string(),
+                duration_secs: 3,
+                sent_message_count: 3,
+            },
+        )
+        .await;
+        let queued = sctx.take_pending_yield_events();
+        assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
+        assert!(!queued[0].content.contains("duplicate summary"), "must still degrade to metadata-only");
+    }
+
+    // Failed.
+    {
+        let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Failed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                error: "boom".to_string(),
+            },
+        )
+        .await;
+        let queued = sctx.take_pending_yield_events();
+        assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
+        assert!(queued[0].content.contains("boom"));
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert!(!has_cjk(&snap.results[0].content), "suspension record must be English too");
+    }
+
+    // TimedOut.
+    {
+        let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::TimedOut {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                timeout_secs: 600,
+                duration_secs: 600,
+            },
+        )
+        .await;
+        let queued = sctx.take_pending_yield_events();
+        assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
+        assert!(queued[0].content.contains("agent_resume"));
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert!(!has_cjk(&snap.results[0].content), "suspension record must be English too");
+    }
+
+    // Message (not a terminal event — no suspension record to compare).
+    {
+        let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Message(AgentMessage {
+                msg_id: "m1".to_string(),
+                sender_name: "coder".to_string(),
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                text: "hello from sub-agent".to_string(),
+                kind: MessageKind::Final,
+            }),
+        )
+        .await;
+        let queued = sctx.take_pending_yield_events();
+        assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
+        assert!(queued[0].content.contains("hello from sub-agent"));
+    }
+}
+
 /// issue #129/#140/#238: `route_shell_completion` reuses `route_notice`
 /// wholesale for a shell background completion — this session never called
 /// `add_pending_task` for this process_id, so `record_terminal` resolves
@@ -271,7 +408,7 @@ async fn completed_with_messages_degrades_summary() {
     let snap = sctx.suspension_snapshot().unwrap();
     let r = &snap.results[0];
     assert!(!r.content.contains("duplicate summary"));
-    assert!(r.content.contains("实时同步"));
+    assert!(r.content.contains("streamed via sub-agent messages"));
     assert_eq!(r.sent_message_count, 3);
 }
 
@@ -313,7 +450,7 @@ async fn timed_out_collects_timeout_note() {
     let snap = sctx.suspension_snapshot().unwrap();
     let r = &snap.results[0];
     assert_eq!(r.status, SubStatus::TimedOut);
-    assert!(r.content.contains("超时"));
+    assert!(r.content.contains("timed out"));
 }
 
 #[tokio::test]
