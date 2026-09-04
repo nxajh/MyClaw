@@ -91,7 +91,7 @@ mod suspension_tests {
         let ctx = suspended();
         assert!(ctx.has_pending_async_work());
         assert_eq!(ctx.suspension_snapshot().unwrap().pending, vec!["t1"]);
-        ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0);
+        ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0, "test");
         assert!(!ctx.has_pending_async_work());
         assert!(ctx.suspension_snapshot().is_some(), "collected result keeps the suspension until clear");
     }
@@ -114,7 +114,7 @@ mod suspension_tests {
         ctx.add_progress("t1", "working on it");
         ctx.add_progress("t1", "still going");
         let snap = match ctx
-            .record_terminal("t1".into(), SubStatus::Completed, "summary text".into(), 0)
+            .record_terminal("t1".into(), SubStatus::Completed, "summary text".into(), 0, "test")
         {
             TerminalRecord::Recorded(s) => s,
             other => panic!("expected Recorded, got {other:?}"),
@@ -136,9 +136,9 @@ mod suspension_tests {
         ctx.add_pending_task("t1".to_string());
         ctx.add_pending_task("t2".to_string());
         ctx.add_pending_task("t3".to_string());
-        ctx.record_terminal("t3".into(), SubStatus::Failed, "e3".into(), 0);
-        ctx.record_terminal("t1".into(), SubStatus::Completed, "c1".into(), 0);
-        ctx.record_terminal("t2".into(), SubStatus::TimedOut, "t2".into(), 0);
+        ctx.record_terminal("t3".into(), SubStatus::Failed, "e3".into(), 0, "test");
+        ctx.record_terminal("t1".into(), SubStatus::Completed, "c1".into(), 0, "test");
+        ctx.record_terminal("t2".into(), SubStatus::TimedOut, "t2".into(), 0, "test");
         let snap = ctx.suspension_snapshot().unwrap();
         let order: Vec<&str> = snap.results.iter().map(|r| r.sub_session_id.as_str()).collect();
         assert_eq!(order, vec!["t3", "t1", "t2"]);
@@ -152,7 +152,7 @@ mod suspension_tests {
         let (ctx, _m) = make_ctx();
         assert!(ctx.suspension_snapshot().is_none());
         assert!(!ctx.has_pending_async_work());
-        let rec = ctx.record_terminal("t9".into(), SubStatus::Completed, "x".into(), 0);
+        let rec = ctx.record_terminal("t9".into(), SubStatus::Completed, "x".into(), 0, "test");
         assert!(matches!(rec, TerminalRecord::NoSuspension));
         assert!(ctx.suspension_snapshot().is_none());
     }
@@ -163,10 +163,10 @@ mod suspension_tests {
     fn record_terminal_second_call_is_duplicate() {
         let ctx = suspended();
         ctx.add_pending_task("t2".to_string()); // keep suspension alive after t1
-        let first = ctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0);
+        let first = ctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0, "test");
         assert!(matches!(first, TerminalRecord::Recorded(_)));
         // Second call: t1 is no longer pending and already in results → Duplicate
-        let second = ctx.record_terminal("t1".into(), SubStatus::Completed, "again".into(), 0);
+        let second = ctx.record_terminal("t1".into(), SubStatus::Completed, "again".into(), 0, "test");
         assert!(matches!(second, TerminalRecord::Duplicate));
         // Results unchanged — no duplicate entry added
         let snap = ctx.suspension_snapshot().unwrap();
@@ -183,14 +183,14 @@ mod suspension_tests {
         let ctx = manager.get_or_create_context("mock:default:u1");
         ctx.add_pending_task("t1".to_string());
         ctx.add_pending_task("t2".to_string()); // keep suspension alive
-        let first = ctx.record_terminal("t1".into(), SubStatus::Completed, "pre-crash".into(), 0);
+        let first = ctx.record_terminal("t1".into(), SubStatus::Completed, "pre-crash".into(), 0, "test");
         assert!(matches!(first, TerminalRecord::Recorded(_)));
 
         // Simulate restart: drop the context and re-create from the backend.
         manager.drop_context("mock:default:u1");
         let ctx2 = manager.get_or_create_context("mock:default:u1");
         // t1 is already in results (persisted) → second call is Duplicate
-        let replayed = ctx2.record_terminal("t1".into(), SubStatus::Completed, "post-crash".into(), 0);
+        let replayed = ctx2.record_terminal("t1".into(), SubStatus::Completed, "post-crash".into(), 0, "test");
         assert!(matches!(replayed, TerminalRecord::Duplicate));
         let snap = ctx2.suspension_snapshot().unwrap();
         assert_eq!(snap.results.len(), 1);
@@ -203,12 +203,12 @@ mod suspension_tests {
         ctx.add_pending_task("t1".to_string());
         ctx.add_pending_task("t2".to_string());
         // pending non-empty → suspension retained
-        ctx.record_terminal("t1".into(), SubStatus::Completed, "c1".into(), 0);
+        ctx.record_terminal("t1".into(), SubStatus::Completed, "c1".into(), 0, "test");
         ctx.clear_suspension_if_collected();
         let snap = ctx.suspension_snapshot().unwrap();
         assert_eq!(snap.pending, vec!["t2"]);
         // pending empty → suspension cleared
-        ctx.record_terminal("t2".into(), SubStatus::Completed, "c2".into(), 0);
+        ctx.record_terminal("t2".into(), SubStatus::Completed, "c2".into(), 0, "test");
         ctx.clear_suspension_if_collected();
         assert!(ctx.suspension_snapshot().is_none());
         // idempotent
@@ -228,7 +228,7 @@ mod suspension_tests {
         ctx.bump_notice_turn(); // wake burst dispatched a notice (counter=1)
         // Wake burst collects the only terminal → pending empty, but the
         // notice turn has not run yet → suspension must survive.
-        let _ = ctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0);
+        let _ = ctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0, "test");
         ctx.clear_suspension_if_collected();
         let snap = ctx.suspension_snapshot().expect("suspension kept while notice in flight");
         assert!(snap.pending.is_empty());
@@ -292,6 +292,7 @@ mod suspension_tests {
                     SubStatus::Completed,
                     format!("r{}", i),
                     i as u64,
+                "test",
                 );
             }));
         }
@@ -316,7 +317,7 @@ mod suspension_tests {
         let ctx = manager.get_or_create_context("mock:default:u1");
         ctx.add_pending_task("t1".to_string());
         ctx.add_progress("t1", "halfway");
-        ctx.record_terminal("t1".into(), SubStatus::Completed, "final summary".into(), 2);
+        ctx.record_terminal("t1".into(), SubStatus::Completed, "final summary".into(), 2, "test");
         let sid = ctx.session_id.clone();
         assert_eq!(ctx.suspension_snapshot().unwrap().results.len(), 1);
 
@@ -382,14 +383,14 @@ mod suspension_tests {
 
         // wake-1 (t1 terminal): collected while t2 still pending → the
         // route-time intent says "intermediate notice".
-        let _ = ctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0);
+        let _ = ctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0, "test");
         let live_with_t2 = ctx.suspension_snapshot();
         assert!(decide_silenced(Some(true), live_with_t2.clone()));
 
         // Race: t2's terminal lands BEFORE wake-1's turn starts — the live
         // snapshot is now empty (would mark the turn loud), but the
         // wake-time intent keeps the intermediate notice silenced.
-        let _ = ctx.record_terminal("t2".into(), SubStatus::Completed, "t2 done".into(), 0);
+        let _ = ctx.record_terminal("t2".into(), SubStatus::Completed, "t2 done".into(), 0, "test");
         let live_empty = ctx.suspension_snapshot();
         assert!(live_empty.as_ref().unwrap().pending.is_empty());
         assert!(decide_silenced(Some(true), live_empty.clone()));
@@ -417,7 +418,7 @@ mod suspension_tests {
         ctx.add_pending_task("t1".to_string());
         assert!(!decide_silenced(None, ctx.suspension_snapshot()));
         // Suspended but fully collected → loud either way.
-        ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0);
+        ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0, "test");
         assert!(!decide_silenced(None, ctx.suspension_snapshot()));
     }
 

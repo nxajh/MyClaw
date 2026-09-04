@@ -440,13 +440,15 @@ impl SessionContext {
     /// [`TerminalRecord::Recorded`] on first collection (callers send the
     /// notice), [`TerminalRecord::Duplicate`] on an idempotent hit (skip the
     /// notice), or [`TerminalRecord::NoSuspension`] when no suspension is
-    /// active.
+    /// active. `source` tags the caller (issue #224 probe telemetry) so the
+    /// duplicate-hit warning can attribute which path attempted the re-route.
     pub fn record_terminal(
         &self,
         sub_session_id: String,
         status: SubStatus,
         content: String,
         sent_message_count: u64,
+        source: &'static str,
     ) -> TerminalRecord {
         // issue #224: this bounded, suspension-independent check runs FIRST
         // because the check below (inside the `Some(s)` branch) only
@@ -468,6 +470,15 @@ impl SessionContext {
                 now.duration_since(*recorded_at) <= RECENTLY_RECORDED_TERMINAL_WINDOW
             });
             if recent.iter().any(|(id, _)| id == &sub_session_id) {
+                // issue #224 probe: log (warn-level) when the bounded dedup
+                // actually fires in a running process, to observe whether
+                // duplicate routing (re-routes) really occurs in production.
+                tracing::warn!(
+                    sub_session_id = %sub_session_id,
+                    recent_count = recent.len(),
+                    source,
+                    "record_terminal: duplicate hit on recently_recorded_terminals (possible re-route, issue #224 probe)"
+                );
                 return TerminalRecord::Duplicate;
             }
         }

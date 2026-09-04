@@ -242,6 +242,7 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 status,
                 content.clone(),
                 sent_message_count,
+                "delegation_notice",
             ) {
                 TerminalRecord::Recorded(snap) => {
                     // RFC §2.3: suppressed progress reports surface as part of
@@ -352,7 +353,13 @@ pub(crate) async fn route_shell_completion(
         .registered_context_by_session_id(&sc.session_id)
         .or_else(|| ctx.sessions.load_context_by_session_id(&sc.session_id));
     if let Some(sctx) = &sctx {
-        match sctx.record_terminal(sc.process_id.clone(), status, sc.content.clone(), 0) {
+        match sctx.record_terminal(
+            sc.process_id.clone(),
+            status,
+            sc.content.clone(),
+            0,
+            "shell_completion",
+        ) {
             TerminalRecord::Recorded(_) => {}
             TerminalRecord::Duplicate => {
                 tracing::debug!(

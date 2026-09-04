@@ -464,7 +464,7 @@ async fn record_terminal_dedupes_after_suspension_clears() {
     let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
     sctx.add_pending_task("t1".to_string());
 
-    let first = sctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0);
+    let first = sctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0, "test");
     assert!(
         matches!(first, TerminalRecord::Recorded(_)),
         "expected Recorded, got {first:?}"
@@ -478,7 +478,7 @@ async fn record_terminal_dedupes_after_suspension_clears() {
 
     // A repeat call for the same id, after suspension clears, must now be
     // recognized as a duplicate — not fall through as NoSuspension.
-    let second = sctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0);
+    let second = sctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0, "test");
     assert!(
         matches!(second, TerminalRecord::Duplicate),
         "expected Duplicate, got {second:?}"
@@ -495,7 +495,7 @@ async fn record_terminal_repeat_after_window_expires_is_not_deduped() {
     let ctx = test_ctx(vec![]);
     let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
     sctx.add_pending_task("t1".to_string());
-    let first = sctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0);
+    let first = sctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0, "test");
     assert!(matches!(first, TerminalRecord::Recorded(_)));
     sctx.clear_suspension_if_collected();
 
@@ -510,7 +510,7 @@ async fn record_terminal_repeat_after_window_expires_is_not_deduped() {
         }
     }
 
-    let second = sctx.record_terminal("t1".into(), SubStatus::Completed, "done again".into(), 0);
+    let second = sctx.record_terminal("t1".into(), SubStatus::Completed, "done again".into(), 0, "test");
     assert!(
         matches!(second, TerminalRecord::NoSuspension),
         "expected NoSuspension once the window has passed, got {second:?}"
@@ -529,6 +529,7 @@ async fn silence_guidance_omitted_when_last_terminal_lands() {
         SubStatus::Completed,
         "done".to_string(),
         0,
+    "test",
     );
     let mut content = "[系统通知] 子代理已完成后台任务 (session_id: t1)".to_string();
     maybe_append_silence_guidance(&sctx, &mut content);
@@ -561,13 +562,13 @@ async fn silence_intent_captured_at_wake_time_survives_late_collection() {
     // wake-1 (t1 terminal): record_terminal runs first, then route_notice
     // derives the intent from `has_pending_async_work()` — t2 remains →
     // intermediate notice.
-    let _ = sctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0);
+    let _ = sctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0, "test");
     let intent_t1 = Some(sctx.has_pending_async_work());
     assert_eq!(intent_t1, Some(true));
 
     // Race: t2's terminal lands BEFORE wake-1's turn runs — live pending
     // is now empty, but wake-1's intent (Some(true)) keeps it silenced.
-    let _ = sctx.record_terminal("t2".into(), SubStatus::Completed, "t2 done".into(), 0);
+    let _ = sctx.record_terminal("t2".into(), SubStatus::Completed, "t2 done".into(), 0, "test");
     let live = sctx.suspension_snapshot();
     assert!(live.as_ref().unwrap().pending.is_empty());
     assert!(crate::agents::session_context::decide_silenced(intent_t1, live.clone()));
@@ -766,6 +767,7 @@ async fn undrained_notices_keep_suspension_alive() {
         SubStatus::Completed,
         "done".to_string(),
         0,
+    "test",
     );
     // ...but a notice is still waiting for a drain — suspension survives.
     sctx.enqueue_delegation_notice(DelegationNotice {

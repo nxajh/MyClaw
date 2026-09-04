@@ -802,7 +802,13 @@ async fn recover_suspension(
                     id
                 ),
             };
-            match session_ctx.record_terminal(id.clone(), SubStatus::Failed, content.clone(), 0) {
+            match session_ctx.record_terminal(
+                id.clone(),
+                SubStatus::Failed,
+                content.clone(),
+                0,
+                "recover_suspension_shell",
+            ) {
                 TerminalRecord::Recorded(_) => {
                     if is_stale {
                         tracing::debug!(
@@ -852,6 +858,7 @@ async fn recover_suspension(
             SubStatus::Failed,
             content.clone(),
             0,
+            "recover_suspension_sub_agent",
         ) {
             TerminalRecord::Recorded(_) => {
                 failed.push(content);
@@ -1383,6 +1390,7 @@ mod tests {
             SubStatus::Completed,
             "done by sub-agent".into(),
             0,
+        "test",
         );
         // Re-add s1 to pending — simulates recover_suspension's snapshot
         // having captured s1 before the terminal event collected it.
