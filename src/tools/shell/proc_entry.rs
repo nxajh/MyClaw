@@ -275,27 +275,38 @@ pub async fn recovery_lost_content(registry: &ShellRegistry, process_id: &str) -
             // hot-switch adoption whose real exit could not be observed
             // (see `spawn_adopted_reaper`) — genuinely unknown, unlike the
             // lost_on_restart case.
+            // PR #237 review (xiaoer-bot): unlike `latest_entry_summary`
+            // (fed back to the model as a tool_result mid-task, where the
+            // model's own later reply — not this text — is what the user
+            // sees), this string is merged by `recover_suspension` together
+            // with the still-Chinese sub-agent notice (`turn_recovery.rs`,
+            // the "子代理后台任务中断" branch) into ONE synthetic inbound
+            // turn delivered straight to the user's channel. Translating
+            // only this half would put two languages in the same merged
+            // notice — reintroducing the exact split this PR set out to
+            // fix, one level up. Stays Chinese until both halves of
+            // `recover_suspension`'s merge are unified together.
             let cause = if e.state == "lost_on_restart" {
-                "a non-hot-switch restart (the whole process group was reclaimed), confirmed to NOT have completed. If you still need this task's result, it's safe to re-run — no risk of conflicting with the old process — but confirm yourself whether the command is idempotent (writes/commits/requests as side effects) to avoid duplicating it".to_string()
+                "非热切换重启（进程组被整体回收），确定未执行完成。若仍需要这次任务的结果，可以放心重新执行——不存在与旧进程冲突的风险，但请自行确认该命令是否幂等（是否包含写入/提交/发送请求等副作用），避免重复".to_string()
             } else {
                 format!(
-                    "adopted across a deployment hot-switch restart; its real execution result could not be confirmed due to cross-process adoption (state: {}). Check the output below to judge success before deciding whether to re-run",
+                    "经历了一次部署热切换重启，因跨进程收养无法确认真实执行结果（state: {}）。请先查看下方 output 判断是否成功，必要时重新执行",
                     e.state
                 )
             };
             format!(
-                "[System notice] Background command ended (process_id: {}, state: {}, exit_code: {}): {}.\noutput_path: {}\n\noutput{}:\n{}",
+                "[系统通知] 后台命令已结束 (process_id: {}, state: {}, exit_code: {}): {}。\noutput_path: {}\n\noutput{}:\n{}",
                 process_id,
                 e.state,
                 e.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),
                 cause,
                 e.output_path,
-                if output_truncated { " (truncated)" } else { "" },
+                if output_truncated { "（已截断）" } else { "" },
                 display
             )
         }
         None => format!(
-            "[System notice] Background command status unknown (process_id: {}): the daemon restarted and this process's record is no longer available (may have been cleaned up). If you still need this task's result, please re-run it.",
+            "[系统通知] 后台命令状态未知 (process_id: {}): daemon 重启，该进程记录已不可查（可能已被清理）。若仍需要这次任务的结果，请重新执行。",
             process_id
         ),
     }
@@ -756,11 +767,8 @@ mod recovery_wording_tests {
         registry.write().await.insert(lost.process_id.clone(), lost.clone());
 
         let content = recovery_lost_content(&registry, &lost.process_id).await;
-        assert!(content.contains("confirmed to NOT have completed"), "got: {content}");
-        assert!(
-            !content.to_lowercase().contains("may have"),
-            "must not hedge for a confirmed-dead entry: {content}"
-        );
+        assert!(content.contains("确定未执行完成"), "got: {content}");
+        assert!(!content.contains("可能已完成"), "must not hedge for a confirmed-dead entry: {content}");
     }
 
     #[tokio::test]
@@ -770,30 +778,10 @@ mod recovery_wording_tests {
         registry.write().await.insert(exited.process_id.clone(), exited.clone());
 
         let content = recovery_lost_content(&registry, &exited.process_id).await;
-        assert!(content.contains("hot-switch"), "got: {content}");
+        assert!(content.contains("热切换"), "got: {content}");
         assert!(
-            !content.contains("confirmed to NOT have completed"),
+            !content.contains("确定未执行完成"),
             "an adopted-orphan exit isn't a confirmed non-completion: {content}"
-        );
-    }
-
-    /// issue #230: `recovery_lost_content` and `latest_entry_summary` are
-    /// the same recovery domain (both feed `run_recovery`'s synthesized
-    /// tool results) and had drifted into different languages by historical
-    /// accident (`latest_entry_summary` English since #216,
-    /// `recovery_lost_content` Chinese since #229). Structured content fed
-    /// back to the model is now unified to English; the model paraphrases
-    /// to the user in their own language on its next turn either way.
-    #[tokio::test]
-    async fn recovery_lost_content_is_english_not_chinese() {
-        let registry: ShellRegistry = Arc::new(RwLock::new(HashMap::new()));
-        let lost = sample_entry("sess-6", "sh_lang", "lost_on_restart", None);
-        registry.write().await.insert(lost.process_id.clone(), lost.clone());
-
-        let content = recovery_lost_content(&registry, &lost.process_id).await;
-        assert!(
-            !content.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
-            "must not contain Chinese characters: {content}"
         );
     }
 }
