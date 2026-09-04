@@ -204,6 +204,28 @@ pub struct Session {
     /// A clone lives on `SessionContext::turn_cancel` so `/stop` can trigger it
     /// without locking the session. Never persisted; reset on clone.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// issue #238: set while this session has an outstanding `sessions_yield`
+    /// tool_call with no persisted result yet — the framework deliberately
+    /// does NOT write a `{"status": "yielded"}` result for it (see
+    /// `tool_phase.rs`), so whatever happens next (sub-agent/shell
+    /// completion, a new user message) can be delivered as ITS tool_result
+    /// instead of a synthesized `[user]` message. In-memory convenience only
+    /// — the real signal is the unfulfilled tool_call sitting in `history`,
+    /// which `identify_breakpoint` already recognizes across restarts (a
+    /// restart before this field is reconstructed just falls back to the
+    /// ordinary orphan-tool-call handling in `run_recovery`'s Case A).
+    /// Never persisted; not carried across clone/snapshot.
+    pub pending_yield: Option<PendingYield>,
+}
+
+/// issue #238: see `Session::pending_yield`.
+#[derive(Debug, Clone)]
+pub struct PendingYield {
+    pub tool_call_id: String,
+    /// True when the framework synthesized this yield itself (the model
+    /// ended its turn with async work outstanding but never called
+    /// `sessions_yield`) rather than the model calling it explicitly.
+    pub implicit: bool,
 }
 
 // `Session` cannot derive `Clone` because `Box<dyn TurnStream>` is not
@@ -237,6 +259,7 @@ impl Clone for Session {
             turn_silenced: self.turn_silenced,
             turn_tool_allowlist: self.turn_tool_allowlist.clone(),
             cancel_token: None,
+            pending_yield: self.pending_yield.clone(),
         }
     }
 }
@@ -263,6 +286,7 @@ impl std::fmt::Debug for Session {
             .field("has_sub_agent_inbox", &self.sub_agent_inbox.is_some())
             .field("turn_silenced", &self.turn_silenced)
             .field("turn_tool_allowlist", &self.turn_tool_allowlist)
+            .field("pending_yield", &self.pending_yield.is_some())
             .finish()
     }
 }
@@ -295,6 +319,7 @@ impl Session {
             turn_silenced: false,
             turn_tool_allowlist: None,
             cancel_token: None,
+            pending_yield: None,
         }
     }
 

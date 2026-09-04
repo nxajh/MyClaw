@@ -300,6 +300,7 @@ impl SessionManager {
             turn_silenced: false,
             turn_tool_allowlist: None,
             cancel_token: None,
+            pending_yield: None,
         };
         // Breakpoints are detected purely for the incomplete-turn flag below;
         // recovery itself is handled by `Agent::run_recovery` (which re-reads

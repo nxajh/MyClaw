@@ -12,4 +12,4 @@ pub use backend::{BackendPersistHook, InMemoryBackend, PersistHook};
 pub use manager::{SessionManager, SessionNotOwned};
 pub use breakpoint_detect::{BreakpointItem, detect_incomplete_turn, identify_breakpoint};
 pub use session_override::{SessionOverride, sanitize_history};
-pub use types::{DelegationDeadline, Session, SummaryMetadata};
+pub use types::{DelegationDeadline, PendingYield, Session, SummaryMetadata};
