@@ -31,6 +31,7 @@ pub(crate) async fn run_scheduled_turn(
     // on the synthetic message below (turn-scoped). Writing it here poisoned
     // the user's session when an Inject-mode cron reused it.
     let model_for_init = model_override.clone();
+    let is_new = orch.sessions.get_context(session_key).is_none();
     let session_ctx = orch
         .sessions
         .get_or_create_context_with(session_key, move |session| {
@@ -38,6 +39,19 @@ pub(crate) async fn run_scheduled_turn(
                 session.session_override.model = Some(m);
             }
         });
+    if is_new {
+        // issue #240: same eager redelivery check as
+        // `OrchestratorCtx::session_context_for` — a freshly materialized
+        // SessionContext may have just restored both a persisted
+        // `pending_yield_events` queue and a reconstructed
+        // `Session.pending_yield` from disk (daemon-restart recovery of a
+        // cron/scheduled session that had an outstanding `sessions_yield`).
+        let sctx2 = Arc::clone(&session_ctx);
+        let runtime = orch.runtime.clone();
+        tokio::spawn(async move {
+            sctx2.try_fill_pending_yield(runtime).await;
+        });
+    }
     if let Some(ref m) = model_override {
         let mut session = session_ctx.session.lock().await;
         session.session_override.model = Some(m.clone());

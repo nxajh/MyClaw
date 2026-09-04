@@ -189,8 +189,32 @@ impl OrchestratorCtx {
     /// First call loads the Session from SessionManager (restoring from
     /// backend), wraps it in a `SessionContext`, and caches it; later calls
     /// return the same `Arc`.
+    ///
+    /// issue #240: a freshly materialized `SessionContext` has just restored
+    /// both `pending_yield_events` (from `pending_yield_events.json`) and
+    /// `Session.pending_yield` (reconstructed from a `sessions_yield`
+    /// breakpoint, if any) from disk in one shot — see
+    /// `SessionContext::restore_pending_yield_events` and
+    /// `SessionManager::load_session`. Across a daemon restart both pieces
+    /// land at once, and nothing else would notice the match until some
+    /// unrelated event next touched this session — so a cache-miss here
+    /// tries the fill eagerly, before the caller (e.g. startup recovery's
+    /// `recover_active_session`) goes on to run `run_recovery` against the
+    /// same context. That ordering is why `run_recovery`'s Case A only ever
+    /// needs to handle the plain "still waiting, nothing queued" shape of a
+    /// `sessions_yield` breakpoint, never one with events already sitting
+    /// behind it.
     pub fn session_context_for(&self, sk: &str) -> Arc<SessionContext> {
-        self.sessions.get_or_create_context(sk)
+        let is_new = self.sessions.get_context(sk).is_none();
+        let sctx = self.sessions.get_or_create_context(sk);
+        if is_new {
+            let sctx2 = Arc::clone(&sctx);
+            let runtime = self.runtime.clone();
+            tokio::spawn(async move {
+                sctx2.try_fill_pending_yield(runtime).await;
+            });
+        }
+        sctx
     }
 
     /// Look up a channel by its (channel_type, account_id) pair.

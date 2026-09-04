@@ -117,14 +117,19 @@ pub struct SessionContext {
     /// outstanding `sessions_yield` tool_call to deliver them to. Drained in
     /// one batch by `try_fill_pending_yield`, never one-at-a-time — see the
     /// #238 discussion for why streaming consumption was rejected (token
-    /// blowup, intermediate-state hallucination risk). Runtime-only, not
-    /// persisted (a restart's unfulfilled `sessions_yield` falls back to
-    /// ordinary orphan-tool-call handling in `run_recovery`'s Case A).
+    /// blowup, intermediate-state hallucination risk). issue #240: persisted
+    /// to `sessions/<sid>/pending_yield_events.json` via the same
+    /// `PersistHook` clone used for `turn_suspension` (`suspension_persist`)
+    /// — every mutation (`enqueue_pending_yield_event`,
+    /// `take_pending_yield_events`) re-persists the queue, and it is
+    /// restored at `SessionContext` construction, so a daemon restart no
+    /// longer drops events that arrived before the outstanding
+    /// `sessions_yield` was filled.
     pub pending_yield_events: std::sync::Mutex<std::collections::VecDeque<PendingYieldEvent>>,
 }
 
 /// issue #238: see `SessionContext::pending_yield_events`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingYieldEvent {
     pub content: String,
 }
@@ -266,6 +271,7 @@ impl SessionContext {
             pending_yield_events: std::sync::Mutex::new(std::collections::VecDeque::new()),
         };
         ctx.restore_suspension();
+        ctx.restore_pending_yield_events();
         ctx
     }
 
@@ -289,7 +295,73 @@ impl SessionContext {
             pending_yield_events: std::sync::Mutex::new(std::collections::VecDeque::new()),
         };
         ctx.restore_suspension();
+        ctx.restore_pending_yield_events();
         ctx
+    }
+
+    /// Shared restore skeleton for a per-session persisted JSON field, used
+    /// by both `restore_suspension` and `restore_pending_yield_events` (the
+    /// two share an identical shape: no hook installed → no-op, nothing
+    /// persisted yet → no-op, corrupt JSON → warn and ignore, fail open
+    /// rather than blocking session load). `load` fetches the raw JSON via
+    /// the installed hook; `apply` installs the parsed value into the
+    /// caller's own mutex-guarded field and does its own success logging
+    /// (the two callers use different field names — `pending` vs `count` —
+    /// so that part stays caller-specific rather than being forced generic).
+    /// `field` names the file for the corrupt-JSON warning.
+    fn restore_persisted_field<T, L, A>(&self, field: &'static str, load: L, apply: A)
+    where
+        T: serde::de::DeserializeOwned,
+        L: FnOnce(&dyn PersistHook, &str) -> Option<String>,
+        A: FnOnce(T),
+    {
+        let Some(hook) = &self.suspension_persist else {
+            return;
+        };
+        let Some(json) = load(hook.as_ref(), &self.session_id) else {
+            return;
+        };
+        if json.trim().is_empty() {
+            return;
+        }
+        match serde_json::from_str::<T>(&json) {
+            Ok(value) => apply(value),
+            Err(e) => {
+                tracing::warn!(
+                    session = %self.session_id,
+                    field,
+                    err = %e,
+                    "persisted field corrupt; ignoring"
+                );
+            }
+        }
+    }
+
+    /// Write-side counterpart of `restore_persisted_field`, shared by
+    /// `persist_suspension` and `persist_pending_yield_events`. `value` is
+    /// the current in-memory state — `None` (or, for the queue, an empty
+    /// collection mapped to `None` by the caller) persists as `""`, the
+    /// file backend's convention for "delete the file". No-op without a
+    /// persist hook.
+    fn persist_persisted_field<T, S>(&self, value: Option<&T>, save: S)
+    where
+        T: serde::Serialize,
+        S: FnOnce(&dyn PersistHook, &str, &str),
+    {
+        let Some(hook) = &self.suspension_persist else {
+            return;
+        };
+        let json = match value {
+            Some(v) => match serde_json::to_string(v) {
+                Ok(j) => j,
+                Err(e) => {
+                    tracing::warn!(session = %self.session_id, err = %e, "serialize persisted field failed");
+                    return;
+                }
+            },
+            None => String::new(),
+        };
+        save(hook.as_ref(), &self.session_id, &json);
     }
 
     /// 方案 C (RFC §5): hydrate `turn_suspension` from
@@ -297,17 +369,10 @@ impl SessionContext {
     /// recovery). Corrupt JSON is warned about and ignored — the session
     /// just starts loud like an unsuspended one.
     fn restore_suspension(&self) {
-        let Some(hook) = &self.suspension_persist else {
-            return;
-        };
-        let Some(json) = hook.load_suspension(&self.session_id) else {
-            return;
-        };
-        if json.trim().is_empty() {
-            return;
-        }
-        match serde_json::from_str::<TurnSuspension>(&json) {
-            Ok(s) => {
+        self.restore_persisted_field::<TurnSuspension, _, _>(
+            "suspension.json",
+            |hook, sid| hook.load_suspension(sid),
+            |s| {
                 let pending = s.pending.len();
                 *self
                     .turn_suspension
@@ -318,15 +383,8 @@ impl SessionContext {
                     pending = pending,
                     "restored suspended turn from disk"
                 );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    session = %self.session_id,
-                    err = %e,
-                    "suspension.json corrupt; ignoring"
-                );
-            }
-        }
+            },
+        );
     }
 
     /// 方案 C (RFC §5): write the current `turn_suspension` to
@@ -334,25 +392,57 @@ impl SessionContext {
     /// deleted). No-op without a persist hook. Called after every mutation
     /// point so a crash/restart never loses collected progress.
     fn persist_suspension(&self) {
-        let Some(hook) = &self.suspension_persist else {
-            return;
-        };
-        let json = match self
+        let guard = self
             .turn_suspension
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            Some(s) => match serde_json::to_string(s) {
-                Ok(j) => j,
-                Err(e) => {
-                    tracing::warn!(session = %self.session_id, err = %e, "serialize suspension failed");
-                    return;
-                }
+            .unwrap_or_else(|e| e.into_inner());
+        self.persist_persisted_field(guard.as_ref(), |hook, sid, json| {
+            hook.save_suspension(sid, json)
+        });
+    }
+
+    /// issue #240: hydrate `pending_yield_events` from
+    /// `sessions/<sid>/pending_yield_events.json` at construction
+    /// (daemon-restart recovery), mirroring `restore_suspension`. Corrupt
+    /// JSON is warned about and ignored — the session just starts with an
+    /// empty queue.
+    fn restore_pending_yield_events(&self) {
+        self.restore_persisted_field::<Vec<PendingYieldEvent>, _, _>(
+            "pending_yield_events.json",
+            |hook, sid| hook.load_pending_yield_events(sid),
+            |events| {
+                let count = events.len();
+                *self
+                    .pending_yield_events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = events.into_iter().collect();
+                tracing::info!(
+                    session = %self.session_id,
+                    count = count,
+                    "restored pending yield events from disk"
+                );
             },
-            None => String::new(),
-        };
-        hook.save_suspension(&self.session_id, &json);
+        );
+    }
+
+    /// issue #240: write the current `pending_yield_events` queue to
+    /// `sessions/<sid>/pending_yield_events.json`; an empty queue clears the
+    /// file. No-op without a persist hook. Called after every mutation
+    /// (`enqueue_pending_yield_event`, `take_pending_yield_events`) so a
+    /// crash/restart never loses events queued before the outstanding
+    /// `sessions_yield` was filled.
+    fn persist_pending_yield_events(&self) {
+        let events: Vec<PendingYieldEvent> = self
+            .pending_yield_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        let arg = if events.is_empty() { None } else { Some(&events) };
+        self.persist_persisted_field(arg, |hook, sid, json| {
+            hook.save_pending_yield_events(sid, json)
+        });
     }
 
     /// Snapshot the session for read-only consumers (e.g., /status commands).
@@ -471,19 +561,25 @@ impl SessionContext {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(event);
+        self.persist_pending_yield_events();
     }
 
     /// issue #238: take the whole queue (FIFO order) for one fill. Events
-    /// enqueued DURING the fill stay for the next one.
+    /// enqueued DURING the fill stay for the next one. issue #240: the
+    /// queue is empty on disk either way once this returns (whether the
+    /// caller consumes the events or restores `pending_yield` untouched),
+    /// so persisting unconditionally here keeps the file in sync.
     pub fn take_pending_yield_events(&self) -> Vec<PendingYieldEvent> {
-        std::mem::take(
+        let taken: Vec<PendingYieldEvent> = std::mem::take(
             &mut *self
                 .pending_yield_events
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()),
         )
         .into_iter()
-        .collect()
+        .collect();
+        self.persist_pending_yield_events();
+        taken
     }
 
     /// issue #238: attempt to fill this session's pending `sessions_yield`
@@ -1668,5 +1764,75 @@ mod pending_yield_tests {
         assert!(text.contains("result B"), "got: {text}");
         assert_eq!(filled[0].name.as_deref(), Some("sessions_yield"));
         assert_eq!(filled[0].is_error, Some(false));
+    }
+
+    /// issue #240: a queued event must survive a daemon restart — enqueue,
+    /// simulate restart (drop + re-materialize the SessionContext from the
+    /// same backend), and confirm the event is still there for the next
+    /// fill.
+    #[tokio::test]
+    async fn enqueued_event_survives_restart() {
+        let manager = Arc::new(SessionManager::in_memory());
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        ctx.enqueue_pending_yield_event(PendingYieldEvent {
+            content: "sub-agent A done".to_string(),
+        });
+
+        manager.drop_context("mock:default:u1");
+        let ctx2 = manager.get_or_create_context("mock:default:u1");
+
+        let events = ctx2.take_pending_yield_events();
+        assert_eq!(events.len(), 1, "queued event must survive the restart");
+        assert_eq!(events[0].content, "sub-agent A done");
+    }
+
+    /// issue #240: multiple queued events must round-trip in FIFO order —
+    /// the on-disk representation is a JSON array, and a naive
+    /// implementation could reverse or reorder it.
+    #[tokio::test]
+    async fn multiple_queued_events_survive_restart_in_order() {
+        let manager = Arc::new(SessionManager::in_memory());
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        ctx.enqueue_pending_yield_event(PendingYieldEvent {
+            content: "first".to_string(),
+        });
+        ctx.enqueue_pending_yield_event(PendingYieldEvent {
+            content: "second".to_string(),
+        });
+
+        manager.drop_context("mock:default:u1");
+        let ctx2 = manager.get_or_create_context("mock:default:u1");
+
+        let events = ctx2.take_pending_yield_events();
+        let contents: Vec<&str> = events.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(contents, vec!["first", "second"]);
+    }
+
+    /// issue #240: once a fill consumes the queue, the on-disk copy must be
+    /// cleared too — otherwise a restart right after a fill would resurrect
+    /// already-delivered events and double-deliver them.
+    #[tokio::test]
+    async fn filled_queue_does_not_resurrect_after_restart() {
+        let manager = Arc::new(SessionManager::in_memory());
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        {
+            let mut session = ctx.session.lock().await;
+            session.pending_yield = Some(PendingYield {
+                tool_call_id: "call_y3".to_string(),
+                implicit: false,
+            });
+        }
+        ctx.enqueue_pending_yield_event(PendingYieldEvent {
+            content: "sub-agent A done".to_string(),
+        });
+        ctx.try_fill_pending_yield(bailing_runtime()).await;
+
+        manager.drop_context("mock:default:u1");
+        let ctx2 = manager.get_or_create_context("mock:default:u1");
+
+        assert!(
+            ctx2.take_pending_yield_events().is_empty(),
+            "a delivered event must not come back after a restart"
+        );
     }
 }

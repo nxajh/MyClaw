@@ -77,6 +77,45 @@ impl Agent {
             return Ok(None);
         }
 
+        // issue #240: a `sessions_yield` orphan whose tool_call_id still
+        // matches `session.pending_yield` is a deliberately deferred yield
+        // (see `tool_phase.rs`'s `is_deferred_yield` branch), not a genuine
+        // mid-turn crash — the #238 mechanism is intentionally waiting to
+        // fill its result with whatever completes next (a sub-agent/shell
+        // notice, eventually a user interjection), not a synthesized
+        // "interrupted" message.
+        //
+        // `SessionContext::try_fill_pending_yield` already had first crack
+        // at it: `OrchestratorCtx::session_context_for` runs it eagerly the
+        // moment a `SessionContext` is (re)materialized, specifically so
+        // this runs before recovery reaches this point. If anything was
+        // already queued (e.g. a sub-agent finished while the daemon was
+        // down), that pass already appended the real result — the
+        // breakpoint disappears once the tool_call has a result, so
+        // `pending_calls` above would no longer contain it and this branch
+        // is never reached. Reaching here means genuinely nothing was
+        // queued yet (or the eager pass hasn't won the race for the session
+        // lock — either way the outcome is the same: nothing to fill it
+        // with right now): leave the tool_call unresolved and hand back
+        // `Ok(None)`. Recovery has nothing to do; the turn is still waiting
+        // exactly like it was before the restart, and whichever of the two
+        // tasks reaches the lock second is a no-op against the other's
+        // result.
+        if pending_calls.len() == 1
+            && pending_calls[0].name == "sessions_yield"
+            && session
+                .pending_yield
+                .as_ref()
+                .is_some_and(|p| p.tool_call_id == pending_calls[0].id)
+        {
+            tracing::debug!(
+                session = %session.id,
+                tool_call_id = %pending_calls[0].id,
+                "recovery: sessions_yield still genuinely pending (nothing queued) — leaving it unresolved"
+            );
+            return Ok(None);
+        }
+
         // Case A: close out orphan tool_calls so history ends well-formed.
         //
         // issue #232: this used to re-execute (blindly replay) any orphan
@@ -535,5 +574,98 @@ mod tests {
             std::fs::read_to_string(marker_dir.join(".exec_marker")).is_err(),
             "a matched marker must be cleared once consumed"
         );
+    }
+
+    fn session_with_orphan_sessions_yield(session_id: &str, call_id: &str) -> Session {
+        let mut session = Session::new(session_id.to_string());
+        session.add_user("do something async".to_string());
+        session.add_assistant_with_tools(
+            String::new(),
+            vec![ToolCall {
+                id: call_id.to_string(),
+                name: "sessions_yield".to_string(),
+                arguments: "{}".to_string(),
+            }],
+            None,
+            None,
+            None,
+            None,
+        );
+        session
+    }
+
+    /// issue #240: a `sessions_yield` orphan whose id matches
+    /// `session.pending_yield` (nothing was queued for it yet — the eager
+    /// redelivery pass had nothing to fill it with) must be left genuinely
+    /// unresolved: no synthesized "[recovery] ..." result, and no
+    /// `run_inner` call that would send malformed history (an unresolved
+    /// tool_call) to the LLM.
+    #[tokio::test]
+    async fn sessions_yield_with_matching_pending_yield_is_left_unresolved() {
+        let session_id = "sess-yield-pending";
+        let call_id = "call_y1";
+        let mut session = session_with_orphan_sessions_yield(session_id, call_id);
+        session.pending_yield = Some(crate::agents::session::PendingYield {
+            tool_call_id: call_id.to_string(),
+            implicit: false,
+        });
+        let agent = Agent::new(empty_config());
+        let runtime = bailing_runtime();
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Default,
+            run_mode: RunMode::Interactive,
+        };
+
+        let result = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+
+        assert!(
+            matches!(result, Ok(None)),
+            "must report nothing-to-recover, not a synthesized turn result"
+        );
+        assert!(
+            !session
+                .history
+                .iter()
+                .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id)),
+            "must not synthesize a tool_result for a deliberately deferred yield"
+        );
+        assert!(
+            session.pending_yield.is_some(),
+            "pending_yield must survive recovery untouched, ready for a real delivery"
+        );
+    }
+
+    /// A `sessions_yield` orphan with NO matching `pending_yield` (e.g. it
+    /// was part of a mixed breakpoint on load, so `Session::manager`
+    /// deliberately left `pending_yield` `None`) is a genuine mid-turn
+    /// crash for this call too — it must fall through to the ordinary
+    /// generic Case A handling, exactly like any other tool.
+    #[tokio::test]
+    async fn sessions_yield_without_matching_pending_yield_falls_back_to_generic_case_a() {
+        let session_id = "sess-yield-no-pending";
+        let call_id = "call_y2";
+        let mut session = session_with_orphan_sessions_yield(session_id, call_id);
+        // Deliberately no `session.pending_yield` set.
+        let agent = Agent::new(empty_config());
+        let runtime = bailing_runtime();
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Default,
+            run_mode: RunMode::Interactive,
+        };
+
+        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+
+        let tool_msg = session
+            .history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id))
+            .expect("without a matching pending_yield, the orphan must be closed out like any other");
+        assert_eq!(tool_msg.is_error, Some(true));
     }
 }

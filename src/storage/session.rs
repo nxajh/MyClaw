@@ -336,6 +336,20 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// issue #240: persist the `pending_yield_events` queue (a JSON array)
+    /// to `sessions/<sid>/pending_yield_events.json` so events that arrive
+    /// before an outstanding `sessions_yield` is filled survive a daemon
+    /// restart. Empty `json` deletes the file. Default no-op for backends
+    /// without a per-session file layer.
+    fn save_pending_yield_events(&self, _session_id: &str, _json: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// issue #240: load the persisted `pending_yield_events` queue.
+    fn load_pending_yield_events(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+
     /// Persist the agent_name owning this session ("main" for top-level, or
     /// the sub-agent name for delegate-spawned sessions).
     fn save_agent_name(&self, _session_id: &str, _name: &str) -> std::io::Result<()> {

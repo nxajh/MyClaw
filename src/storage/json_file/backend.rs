@@ -65,6 +65,12 @@ impl JsonFileBackend {
         self.session_dir(session_id).join("suspension.json")
     }
 
+    /// issue #240: persisted `pending_yield_events` queue, independent of
+    /// meta.json and suspension.json.
+    pub(super) fn pending_yield_events_path(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("pending_yield_events.json")
+    }
+
     /// Durable delegation checkpoint file: `{session_dir(sub)}/delegation.json`
     /// (P1: checkpoint 依附宿主 sub-session 目录，脐带与宿主同生共死)。
     pub(super) fn delegation_checkpoint_path(&self, sub_session_id: &str) -> PathBuf {

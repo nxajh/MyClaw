@@ -22,6 +22,7 @@ pub struct InMemoryBackend {
     summaries: RwLock<HashMap<String, Vec<SummaryRecord>>>,
     active: RwLock<HashMap<String, String>>,
     suspensions: RwLock<HashMap<String, String>>,
+    pending_yield_events: RwLock<HashMap<String, String>>,
     parents: RwLock<HashMap<String, String>>,
     checkpoints: RwLock<HashMap<String, crate::storage::DelegationCheckpoint>>,
     namespace: String,
@@ -40,6 +41,7 @@ impl InMemoryBackend {
             summaries: RwLock::new(HashMap::new()),
             active: RwLock::new(HashMap::new()),
             suspensions: RwLock::new(HashMap::new()),
+            pending_yield_events: RwLock::new(HashMap::new()),
             parents: RwLock::new(HashMap::new()),
             checkpoints: RwLock::new(HashMap::new()),
             namespace: namespace.to_string(),
@@ -301,6 +303,22 @@ impl SessionBackend for InMemoryBackend {
         self.suspensions.read().get(session_id).cloned()
     }
 
+    // issue #240: keep the pending_yield_events queue in-memory so tests
+    // can round-trip it like the file backend does on disk.
+    fn save_pending_yield_events(&self, session_id: &str, json: &str) -> std::io::Result<()> {
+        let mut map = self.pending_yield_events.write();
+        if json.is_empty() {
+            map.remove(session_id);
+        } else {
+            map.insert(session_id.to_string(), json.to_string());
+        }
+        Ok(())
+    }
+
+    fn load_pending_yield_events(&self, session_id: &str) -> Option<String> {
+        self.pending_yield_events.read().get(session_id).cloned()
+    }
+
     // Round-trip `parent_session_id` like JsonFileBackend does via meta.json
     // (required for the RFC §6 delegation depth guard to be testable with the
     // in-memory backend).
@@ -381,6 +399,15 @@ pub trait PersistHook: Send + Sync {
     fn save_suspension(&self, _session_id: &str, _json: &str) {}
     /// 方案 C (RFC §5): load the persisted turn-suspension state.
     fn load_suspension(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+    /// issue #240: persist the `pending_yield_events` queue so it survives
+    /// a restart before an outstanding `sessions_yield` is filled. Empty
+    /// `json` deletes the file. Default no-op (sessions without a persist
+    /// hook).
+    fn save_pending_yield_events(&self, _session_id: &str, _json: &str) {}
+    /// issue #240: load the persisted `pending_yield_events` queue.
+    fn load_pending_yield_events(&self, _session_id: &str) -> Option<String> {
         None
     }
     /// Truncate message history to keep only the first `keep_count` messages.
@@ -477,6 +504,16 @@ impl PersistHook for BackendPersistHook {
 
     fn load_suspension(&self, session_id: &str) -> Option<String> {
         self.backend.load_suspension(session_id)
+    }
+
+    fn save_pending_yield_events(&self, session_id: &str, json: &str) {
+        if let Err(e) = self.backend.save_pending_yield_events(session_id, json) {
+            tracing::warn!(session = %session_id, err = %e, "persist pending yield events failed");
+        }
+    }
+
+    fn load_pending_yield_events(&self, session_id: &str) -> Option<String> {
+        self.backend.load_pending_yield_events(session_id)
     }
 
     fn truncate_messages(&self, session_id: &str, keep_count: usize) {

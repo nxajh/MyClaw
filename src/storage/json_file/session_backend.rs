@@ -573,6 +573,28 @@ impl SessionBackend for JsonFileBackend {
         fs::read_to_string(self.suspension_path(session_id)).ok()
     }
 
+    fn save_pending_yield_events(&self, session_id: &str, json: &str) -> std::io::Result<()> {
+        let path = self.pending_yield_events_path(session_id);
+        if json.is_empty() {
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
+            return Ok(());
+        }
+        let dir = self.session_dir(session_id);
+        fs::create_dir_all(&dir)?;
+        // Atomic write (uniquely-named temp + rename), mirroring
+        // `save_suspension` / `write_json_atomic`.
+        let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+        tmp.write_all(json.as_bytes())?;
+        tmp.persist(&path).map_err(|e| e.error)?;
+        Ok(())
+    }
+
+    fn load_pending_yield_events(&self, session_id: &str) -> Option<String> {
+        fs::read_to_string(self.pending_yield_events_path(session_id)).ok()
+    }
+
     fn save_agent_name(&self, session_id: &str, name: &str) -> std::io::Result<()> {
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.agent_name = if name.is_empty() || name == "main" {
