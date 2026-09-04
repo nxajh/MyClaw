@@ -6,7 +6,6 @@ use anyhow::Result;
 
 use super::Agent;
 use super::exec_marker::{exec_marker_clear, exec_marker_read, persist_last};
-use super::tool_filter::filter_turn_scoped_tools;
 use crate::agents::AgentRuntime;
 use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
@@ -17,9 +16,10 @@ impl Agent {
     /// the legacy `AgentLoop::recover_interrupted_turn` semantics:
     ///
     /// - **Case A** — assistant tool_calls without matching tool_results:
-    ///   re-execute each orphan call via the same ToolExecutor `run()`
-    ///   uses, append the results to history, then fall through to
-    ///   `run_inner()` so the LLM continues.
+    ///   synthesize a status result for each orphan call (never re-execute
+    ///   it — issue #232), append the results to history, then fall through
+    ///   to `run_inner()` so the LLM continues and can decide whether to
+    ///   retry.
     /// - **Case B** — trailing tool_results, no LLM response: just call
     ///   `run_inner()`. The chat loop sends the current history to the LLM
     ///   without appending a fresh user message.
@@ -77,22 +77,42 @@ impl Agent {
             return Ok(None);
         }
 
-        // Case A: re-execute orphan tool_calls so history ends well-formed.
+        // Case A: close out orphan tool_calls so history ends well-formed.
+        //
+        // issue #232: this used to re-execute (blindly replay) any orphan
+        // call whose id didn't match the exec marker, on the theory that a
+        // non-matching call was presumably just unlucky timing, not the
+        // actual cause of death. In production this caused a restart storm:
+        // a graceful SIGUSR1 hot switch lets the triggering command (e.g.
+        // `shell("myclaw restart")`) return normally well before the daemon
+        // actually exits, so by the time the process dies the marker has
+        // already been cleared by that call's own `ExecMarkerGuard` — the
+        // *next* orphan call (if any) then never matches, gets blindly
+        // replayed, and if that replay is itself another restart trigger,
+        // the daemon dies again with the same non-matching marker state.
+        // Since the replay path here never wrote its own marker either,
+        // once the marker was absent it stayed absent for every subsequent
+        // cycle — 22 replay cycles, 0 marker matches, one shell session.
+        //
+        // Fix: never re-execute an orphan call here, regardless of marker
+        // state. The marker is now purely informational — when it matches a
+        // pending call we can say something specific (e.g. a shell command's
+        // tracked process state); when it doesn't, we fall back to a generic
+        // "unknown, check before retrying" message. Either way the call is
+        // synthesized, never replayed, and the retry decision is left to the
+        // LLM (which can re-issue the call itself if warranted).
         if needs_case_a {
             tracing::info!(
                 session = %session.id,
                 missing_count = pending_calls.len(),
-                "recovery: re-executing interrupted tool calls"
+                "recovery: closing interrupted tool calls (no blind replay)"
             );
-            let mut allowed_tools = self.allowed_tools(runtime);
-            filter_turn_scoped_tools(&mut allowed_tools, session);
-            let tool_executor = &runtime.tool_executor;
 
-            // Check the exec marker: if present, the call_id it contains was
+            // If present, the exec marker names the call_id that was
             // mid-execution when the daemon died (e.g. `myclaw update` →
-            // `systemctl restart` → SIGKILL). Re-running such a call would
-            // kill the daemon again, creating a crash loop. Instead we
-            // synthesize an error result so the LLM can assess the situation.
+            // `systemctl restart` → SIGKILL). It only enriches the message
+            // below for whichever pending call it matches — it no longer
+            // gates whether a call gets re-executed.
             let interrupted_id =
                 exec_marker_read(runtime.sessions_dir.as_deref(), &session.id);
             if let Some(ref id) = interrupted_id {
@@ -103,91 +123,70 @@ impl Agent {
                 );
             }
 
+            // Only clear the marker once it's actually been matched against
+            // a call in this pass — an unmatched marker may still describe
+            // an unresolved situation elsewhere, and clearing it blindly
+            // would discard that forensic information for no reason.
+            let mut marker_consumed = false;
+
             for call in &pending_calls {
-                // If this call was the one that killed the daemon, don't
-                // blindly re-execute it — for `shell` in particular, a
-                // tracked process can survive a `myclaw restart` hot switch
-                // (see `crate::tools::shell::latest_entry_summary`), so
-                // re-invoking would spawn a second copy racing the first.
-                // Synthesize a result describing what's known instead and
-                // let the LLM decide.
-                if interrupted_id.as_deref() == Some(call.id.as_str()) {
-                    let shell_detail = if call.name == "shell" {
-                        runtime
-                            .sessions_dir
-                            .as_deref()
-                            .and_then(|dir| crate::tools::shell::latest_entry_summary(dir, &session.id))
-                    } else {
-                        None
-                    };
-                    // issue #228: for `shell`, the process registry already
-                    // knows exactly what happened (survived a hot-switch and
-                    // is still running, survived but its outcome is unknown,
-                    // or was definitely killed alongside a non-hot-switch
-                    // restart) — use that state-specific wording verbatim
-                    // instead of a generic "interrupted by a daemon restart"
-                    // framing, which is actively wrong for the common case
-                    // of a command that just kept running across a
-                    // deployment hot-switch.
-                    let (msg, is_error) = match shell_detail {
-                        Some((d, is_error)) => (format!("[recovery] {}", d), is_error),
-                        // No independent process to check (non-shell tool
-                        // call, or shell with no registry entry) — genuinely
-                        // unknown whether it completed. Still name the
-                        // actual restart cause instead of a blanket
-                        // "daemon restart", since a deployment hot-switch is
-                        // an expected, successful rollout, not an accident.
-                        None => (
-                            format!(
-                                "[recovery] This tool call was in flight during {} — its \
-                                 completion status is unknown and it will not be \
-                                 automatically re-executed, since re-running it could \
-                                 duplicate side effects it may have already produced. Check \
-                                 the actual state (e.g. the relevant files, git log, or logs) \
-                                 before deciding whether to retry.",
-                                interrupted_restart_cause(crate::hot_switch::is_hot_switch())
-                            ),
-                            true,
-                        ),
-                    };
-                    tracing::warn!(
-                        session = %session.id,
-                        call_id = %call.id,
-                        tool = %call.name,
-                        "recovery: interrupted call not re-executed"
-                    );
-                    session.add_tool_result(call.id.clone(), &call.name, msg, is_error);
-                    persist_last(session);
-                    continue;
+                let matched = interrupted_id.as_deref() == Some(call.id.as_str());
+                if matched {
+                    marker_consumed = true;
                 }
 
-                let result = tool_executor
-                    .execute(
-                        call,
-                        session,
-                        Some(&turn_ctx.permission_mode),
-                        &allowed_tools,
-                    )
-                    .await;
-                let (result_content, is_error) = match &result {
-                    Ok(r) => {
-                        let mut out = r.output.clone();
-                        if let Some(ref err) = r.error {
-                            if out.is_empty() {
-                                out = format!("error: {}", err);
-                            }
-                        }
-                        (out, !r.success)
-                    }
-                    Err(e) => (format!("error: {}", e), true),
+                let shell_detail = if matched && call.name == "shell" {
+                    runtime
+                        .sessions_dir
+                        .as_deref()
+                        .and_then(|dir| crate::tools::shell::latest_entry_summary(dir, &session.id))
+                } else {
+                    None
                 };
-                session.add_tool_result(call.id.clone(), &call.name, result_content, is_error);
+                // issue #228: for `shell`, the process registry already
+                // knows exactly what happened (survived a hot-switch and
+                // is still running, survived but its outcome is unknown,
+                // or was definitely killed alongside a non-hot-switch
+                // restart) — use that state-specific wording verbatim
+                // instead of a generic "interrupted by a daemon restart"
+                // framing, which is actively wrong for the common case
+                // of a command that just kept running across a
+                // deployment hot-switch.
+                let (msg, is_error) = match shell_detail {
+                    Some((d, is_error)) => (format!("[recovery] {}", d), is_error),
+                    // No independent process to check (non-shell tool call,
+                    // shell with no registry entry, or the marker simply
+                    // didn't name this call) — genuinely unknown whether it
+                    // completed. Still name the actual restart cause instead
+                    // of a blanket "daemon restart", since a deployment
+                    // hot-switch is an expected, successful rollout, not an
+                    // accident.
+                    None => (
+                        format!(
+                            "[recovery] This tool call was in flight during {} — its \
+                             completion status is unknown and it will not be \
+                             automatically re-executed, since re-running it could \
+                             duplicate side effects it may have already produced. Check \
+                             the actual state (e.g. the relevant files, git log, or logs) \
+                             before deciding whether to retry.",
+                            interrupted_restart_cause(crate::hot_switch::is_hot_switch())
+                        ),
+                        true,
+                    ),
+                };
+                tracing::warn!(
+                    session = %session.id,
+                    call_id = %call.id,
+                    tool = %call.name,
+                    "recovery: interrupted call not re-executed"
+                );
+                session.add_tool_result(call.id.clone(), &call.name, msg, is_error);
                 persist_last(session);
             }
 
-            // Clear any stale exec marker — recovery has handled all pending
-            // calls, so the marker is no longer needed.
-            exec_marker_clear(runtime.sessions_dir.as_deref(), &session.id);
+            if marker_consumed {
+                exec_marker_clear(runtime.sessions_dir.as_deref(), &session.id);
+            }
         }
 
         // Cases B, C, and tail of A: drive the LLM loop from the now
@@ -383,6 +382,158 @@ mod tests {
         assert!(
             content.contains("in flight during"),
             "must name the actual restart cause: {content}"
+        );
+    }
+
+    /// issue #232 (defect A): an orphan call with NO exec marker at all must
+    /// still never be blindly re-executed. Before the fix, a missing marker
+    /// fell through to `tool_executor.execute()` — with the empty tool
+    /// registry `bailing_runtime()` provides, that would produce an "Unknown
+    /// tool" error instead of the recovery guidance message. Asserting its
+    /// absence is a precise way to prove `execute()` was never reached,
+    /// without needing a dedicated spy tool.
+    #[tokio::test]
+    async fn case_a_no_marker_never_replays_orphan_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = "sess-recovery-no-marker";
+        let call_id = "call_no_marker";
+
+        // Deliberately no `.exec_marker` file written at all.
+        let mut session = session_with_orphan_shell_call(session_id, call_id);
+        let agent = Agent::new(empty_config());
+        let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Default,
+            run_mode: RunMode::Interactive,
+        };
+
+        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+
+        let tool_msg = session
+            .history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id))
+            .expect("recovery must close the orphan tool_call with a tool result");
+        let content = tool_msg.text_content();
+        assert!(
+            !content.contains("Unknown tool"),
+            "must never reach tool_executor.execute() — got: {content}"
+        );
+        assert!(
+            content.contains("before deciding whether to retry"),
+            "must fall back to the generic guidance message: {content}"
+        );
+    }
+
+    /// issue #232 (defect A): a marker that names a DIFFERENT call than the
+    /// orphan being processed must also never trigger a blind replay — a
+    /// mismatch is exactly the scenario that produced the restart storm.
+    #[tokio::test]
+    async fn case_a_mismatched_marker_never_replays_orphan_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = "sess-recovery-mismatch";
+        let call_id = "call_current";
+
+        let marker_dir = tmp.path().join(crate::ids::bare_dir_name(session_id));
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(marker_dir.join(".exec_marker"), "call_some_other_stale_id").unwrap();
+
+        let mut session = session_with_orphan_shell_call(session_id, call_id);
+        let agent = Agent::new(empty_config());
+        let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Default,
+            run_mode: RunMode::Interactive,
+        };
+
+        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+
+        let tool_msg = session
+            .history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id))
+            .expect("recovery must close the orphan tool_call with a tool result");
+        let content = tool_msg.text_content();
+        assert!(
+            !content.contains("Unknown tool"),
+            "must never reach tool_executor.execute() — got: {content}"
+        );
+        assert!(
+            content.contains("before deciding whether to retry"),
+            "must fall back to the generic guidance message: {content}"
+        );
+    }
+
+    /// issue #232 (defect B): a marker that doesn't match anything in this
+    /// recovery pass must be left on disk, not blindly cleared — it may
+    /// still describe an unresolved situation the caller hasn't diagnosed
+    /// yet, and clearing it would discard that forensic information.
+    #[tokio::test]
+    async fn case_a_unmatched_marker_is_not_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = "sess-recovery-unmatched-clear";
+        let call_id = "call_current_2";
+
+        let marker_dir = tmp.path().join(crate::ids::bare_dir_name(session_id));
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(marker_dir.join(".exec_marker"), "call_some_other_stale_id").unwrap();
+
+        let mut session = session_with_orphan_shell_call(session_id, call_id);
+        let agent = Agent::new(empty_config());
+        let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Default,
+            run_mode: RunMode::Interactive,
+        };
+
+        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+
+        assert_eq!(
+            std::fs::read_to_string(marker_dir.join(".exec_marker")).ok(),
+            Some("call_some_other_stale_id".to_string()),
+            "an unmatched marker must survive the recovery pass untouched"
+        );
+    }
+
+    /// issue #232 (defect B): once a marker DOES match a call processed in
+    /// this pass, it has served its purpose and should be cleared — this
+    /// guards the "only clear when consumed" change against also becoming
+    /// "never clear at all".
+    #[tokio::test]
+    async fn case_a_matched_marker_is_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = "sess-recovery-matched-clear";
+        let call_id = "call_matched";
+
+        let marker_dir = tmp.path().join(crate::ids::bare_dir_name(session_id));
+        std::fs::create_dir_all(&marker_dir).unwrap();
+        std::fs::write(marker_dir.join(".exec_marker"), call_id).unwrap();
+
+        let mut session = session_with_orphan_shell_call(session_id, call_id);
+        let agent = Agent::new(empty_config());
+        let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Default,
+            run_mode: RunMode::Interactive,
+        };
+
+        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+
+        assert!(
+            std::fs::read_to_string(marker_dir.join(".exec_marker")).is_err(),
+            "a matched marker must be cleared once consumed"
         );
     }
 }
