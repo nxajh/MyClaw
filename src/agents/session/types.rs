@@ -513,6 +513,25 @@ impl Session {
         self.message_ids.push(0);
     }
 
+    /// Persist the last history entry via the installed `PersistHook`, if
+    /// any. Mirrors `agent::exec_marker::persist_last` (kept separate: that
+    /// one is `pub(super)`-scoped to the `agent` module and used inside the
+    /// tool-execution loop; this is the same logic for callers outside it,
+    /// e.g. `SessionContext::try_fill_pending_yield`, issue #238).
+    pub fn persist_last(&mut self) {
+        let Some(hook) = self.persist.clone() else {
+            return;
+        };
+        let Some(msg) = self.history.last().cloned() else {
+            return;
+        };
+        if let Some(id) = hook.persist_message(&self.id, &msg) {
+            if let Some(slot) = self.message_ids.last_mut() {
+                *slot = id;
+            }
+        }
+    }
+
     /// Add a system message to history.
     pub fn add_system_text(&mut self, text: String) {
         self.history.push(ChatMessage::system_text(text));

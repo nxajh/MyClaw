@@ -62,7 +62,7 @@ impl ProviderRegistry for BailingRegistry {
 
 /// An `AgentRuntime` whose provider registry always bails — the turn
 /// under test must fail with "test stub" before touching any real LLM.
-pub(super) fn bailing_runtime() -> AgentRuntime {
+pub(crate) fn bailing_runtime() -> AgentRuntime {
     let providers: Arc<dyn ProviderRegistry> = Arc::new(BailingRegistry);
     let tools = Arc::new(crate::agents::ToolRegistry::new());
     let skills = Arc::new(RwLock::new(crate::agents::SkillManager::new()));

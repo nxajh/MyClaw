@@ -129,6 +129,56 @@ pub struct PendingYieldEvent {
     pub content: String,
 }
 
+/// issue #238: render the accumulated queue as ONE combined tool_result —
+/// batched, not delivered one at a time (the #238 discussion rejected
+/// streaming consumption: token blowup from N separate wake round-trips,
+/// and intermediate-state hallucination risk from the model not knowing
+/// more results are already on their way). English: this feeds the model
+/// as an ordinary tool_result, not the user directly — same convention as
+/// `latest_entry_summary` (#237); the model paraphrases to the user in
+/// their own language on its own next turn either way.
+fn format_pending_yield_events(events: &[PendingYieldEvent]) -> String {
+    if events.len() == 1 {
+        return events[0].content.clone();
+    }
+    let mut out = String::from("Since you yielded, the following happened:\n");
+    for e in events {
+        out.push_str("- ");
+        out.push_str(&e.content);
+        out.push('\n');
+    }
+    out
+}
+
+/// issue #238: spawn `try_fill_pending_yield` as an independent task.
+/// Extracted into a plain (non-async) function so its `tokio::spawn` call
+/// isn't inlined into `run_and_deliver`'s own async body. `run_and_deliver`
+/// → `try_fill_pending_yield` → `resume_after_yield` → `run_and_deliver` is a
+/// genuine call cycle across three async fns on the same impl block, and
+/// Rust cannot resolve their opaque `impl Future` return types when any edge
+/// of that cycle is a direct (non-boxed) async-fn call — routing each spawn
+/// through a plain function breaks the cycle at the type level without
+/// changing behavior (the runtime call graph is identical either way).
+fn spawn_try_fill_pending_yield(sctx: Arc<SessionContext>, runtime: AgentRuntime) {
+    tokio::spawn(async move {
+        sctx.try_fill_pending_yield(runtime).await;
+    });
+}
+
+/// issue #238: see `spawn_try_fill_pending_yield` — same reasoning, the
+/// other edge of the cycle.
+fn spawn_resume_after_yield(sctx: Arc<SessionContext>, runtime: AgentRuntime) {
+    tokio::spawn(async move {
+        if let Err(e) = sctx.resume_after_yield(runtime).await {
+            tracing::error!(
+                session_id = %sctx.session_id,
+                err = %e,
+                "issue #238: resume_after_yield failed"
+            );
+        }
+    });
+}
+
 /// issue #224: how long a `record_terminal`'d sub_session_id is remembered
 /// for duplicate detection after `turn_suspension` clears. Matches the 1h
 /// convention already established by `STALE_LOST_NOTICE_AFTER_SECS`
@@ -434,6 +484,39 @@ impl SessionContext {
         )
         .into_iter()
         .collect()
+    }
+
+    /// issue #238: attempt to fill this session's pending `sessions_yield`
+    /// tool_call with whatever has accumulated in the event queue, and if
+    /// it does, spawn the resume turn. Safe to call from anywhere — both
+    /// directions (an event is enqueued while a yield may already be
+    /// pending; a yield appears — explicit or implicit — while events may
+    /// already be queued) funnel through here, and taking `pending_yield`
+    /// under the session lock means only one caller can ever actually fill
+    /// it.
+    ///
+    /// No-op when there's no pending yield yet (nothing to fill), or when
+    /// the queue is empty (nothing to fill it WITH) — in the latter case
+    /// `pending_yield` is put back so a later call can still find it.
+    pub async fn try_fill_pending_yield(self: &Arc<Self>, runtime: AgentRuntime) {
+        let should_resume = {
+            let mut session = self.session.lock().await;
+            let Some(pending) = session.pending_yield.take() else {
+                return;
+            };
+            let events = self.take_pending_yield_events();
+            if events.is_empty() {
+                session.pending_yield = Some(pending);
+                return;
+            }
+            let content = format_pending_yield_events(&events);
+            session.add_tool_result(pending.tool_call_id, "sessions_yield", content, false);
+            session.persist_last();
+            true
+        };
+        if should_resume {
+            spawn_resume_after_yield(Arc::clone(self), runtime);
+        }
     }
 
     /// P1 (2026-08-13, RFC delegation-notice-queue §4): true while any
@@ -1346,6 +1429,20 @@ impl SessionContext {
                         }
                     }
                 }
+                // issue #238: this turn may have left a pending
+                // `sessions_yield` behind (tool_phase.rs sets it, never
+                // persists its own result — see `Session::pending_yield`).
+                // Check immediately whether anything is already queued for
+                // it (a race where the event arrived before the yield did)
+                // rather than waiting for the next external trigger —
+                // `try_fill_pending_yield` is the single place both
+                // directions (event arrives / yield appears) funnel
+                // through, so calling it here is always safe, even when
+                // there's nothing to do yet.
+                if session.pending_yield.is_some() {
+                    spawn_try_fill_pending_yield(Arc::clone(self), runtime.clone());
+                }
+
                 Ok(turn_result)
             }
             (Err(e), stream) => {
@@ -1378,11 +1475,188 @@ impl SessionContext {
             }
         }
     }
+
+    /// issue #238: resume a session after `try_fill_pending_yield` has
+    /// already appended the filled tool_result directly to history — there
+    /// is no new inbound message here, this is a continuation of the same
+    /// still-open tool round, not a new conversational turn. Skips
+    /// `process_turn`'s message-specific setup entirely (attachment
+    /// diffing, bare-continue detection, `add_user`) and goes straight to
+    /// `run_and_deliver` as an ordinary, non-silenced turn — the model
+    /// decides for itself whether to respond, call more tools, or yield
+    /// again, exactly like any other multi-step tool round.
+    ///
+    /// Known simplification: unlike `process_turn`, this does not compute
+    /// the attachment-diff reminder (new skills/agents/memory/date deltas)
+    /// — those catch up on the next turn that does go through
+    /// `process_turn`. Acceptable for now; revisit if a long yield-wait
+    /// turns out to need them injected sooner.
+    pub async fn resume_after_yield(
+        self: &Arc<Self>,
+        runtime: AgentRuntime,
+    ) -> anyhow::Result<TurnResult> {
+        let _turn_guard = self.turn_lock.lock().await;
+        let mut session = self.session.lock().await;
+
+        let persist_hook = session.persist.clone();
+        let channel_for_send = session.resolve_channel();
+        let reply_target = session.reply_target().unwrap_or("").to_string();
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        *self.turn_cancel.lock().unwrap() = cancel_token.clone();
+        session.cancel_token = Some(cancel_token);
+
+        let session_override = session.session_override.clone();
+        let mut prompt_config = runtime.defaults.prompt.clone();
+        if let Some(pm) = session_override.permission_mode {
+            prompt_config.permission_mode = pm;
+        }
+        // A resumed turn is Interactive (the default) — same as a user/wake/
+        // recovery turn (RFC channel-role-split §1.1); it isn't a
+        // cron/heartbeat Background message.
+        prompt_config.run_mode = Default::default();
+
+        let system_prompt = match &session_override.system_prompt_override {
+            Some(custom) => custom.clone(),
+            None => runtime.build_system_prompt(&prompt_config),
+        };
+
+        let thinking = session_override.to_thinking_config();
+        let model_id = session_override.model.as_deref();
+        let turn_ctx = TurnContext {
+            system_prompt: &system_prompt,
+            model_id,
+            thinking: thinking.as_ref(),
+            permission_mode: prompt_config.permission_mode,
+            run_mode: prompt_config.run_mode,
+        };
+
+        let notice_guard = NoticeTurnGuard::new(self, false);
+
+        self.run_and_deliver(
+            &mut session,
+            turn_ctx,
+            &runtime,
+            channel_for_send,
+            reply_target,
+            false,
+            notice_guard,
+            persist_hook,
+        )
+        .await
+    }
 }
 
 // ── #151 Phase 8+ PendingWorkSession facade ──────────────────────────────────
 impl crate::api::session_store::PendingWorkSession for SessionContext {
     fn add_pending_task(&self, task_id: String) {
         SessionContext::add_pending_task(self, task_id);
+    }
+}
+
+/// issue #238: `try_fill_pending_yield` behavior tests — the queue/fill
+/// mechanism only, not the spawned resume turn itself (that requires a real
+/// or mocked LLM provider; these tests only need to observe the synchronous
+/// state mutation that happens before the resume is even spawned).
+#[cfg(test)]
+mod pending_yield_tests {
+    use super::*;
+    use crate::agents::SessionManager;
+    use crate::agents::session::PendingYield;
+
+    fn make_ctx() -> Arc<SessionContext> {
+        let manager = Arc::new(SessionManager::in_memory());
+        manager.get_or_create_context("mock:default:u1")
+    }
+
+    fn bailing_runtime() -> AgentRuntime {
+        crate::agents::agent::tests::bailing_runtime()
+    }
+
+    #[tokio::test]
+    async fn noop_without_a_pending_yield() {
+        let ctx = make_ctx();
+        ctx.enqueue_pending_yield_event(PendingYieldEvent {
+            content: "sub-agent A done".to_string(),
+        });
+
+        ctx.try_fill_pending_yield(bailing_runtime()).await;
+
+        // Nothing to fill it into — the event must stay queued, not be
+        // silently dropped, so a later yield can still pick it up.
+        assert_eq!(ctx.take_pending_yield_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn puts_pending_yield_back_when_queue_is_empty() {
+        let ctx = make_ctx();
+        {
+            let mut session = ctx.session.lock().await;
+            session.pending_yield = Some(PendingYield {
+                tool_call_id: "call_y1".to_string(),
+                implicit: false,
+            });
+        }
+
+        ctx.try_fill_pending_yield(bailing_runtime()).await;
+
+        let session = ctx.session.lock().await;
+        assert_eq!(
+            session.pending_yield.as_ref().map(|p| p.tool_call_id.as_str()),
+            Some("call_y1"),
+            "pending_yield must be restored, not lost, when there's nothing to fill it with yet"
+        );
+        assert!(
+            !session
+                .history
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some("call_y1")),
+            "must not fabricate a result when the queue is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn batches_queued_events_into_one_tool_result() {
+        let ctx = make_ctx();
+        {
+            let mut session = ctx.session.lock().await;
+            session.pending_yield = Some(PendingYield {
+                tool_call_id: "call_y2".to_string(),
+                implicit: false,
+            });
+        }
+        ctx.enqueue_pending_yield_event(PendingYieldEvent {
+            content: "sub-agent A done: result A".to_string(),
+        });
+        ctx.enqueue_pending_yield_event(PendingYieldEvent {
+            content: "sub-agent B done: result B".to_string(),
+        });
+
+        ctx.try_fill_pending_yield(bailing_runtime()).await;
+
+        let session = ctx.session.lock().await;
+        assert!(
+            session.pending_yield.is_none(),
+            "pending_yield must be cleared once filled"
+        );
+        let filled: Vec<_> = session
+            .history
+            .iter()
+            .filter(|m| m.tool_call_id.as_deref() == Some("call_y2"))
+            .collect();
+        assert_eq!(filled.len(), 1, "must be exactly ONE tool_result, not one per event");
+        let text = filled[0]
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                crate::providers::ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(text.contains("result A"), "got: {text}");
+        assert!(text.contains("result B"), "got: {text}");
+        assert_eq!(filled[0].name.as_deref(), Some("sessions_yield"));
+        assert_eq!(filled[0].is_error, Some(false));
     }
 }

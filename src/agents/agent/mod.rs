@@ -22,7 +22,7 @@ mod tool_phase;
 mod turn_state;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::agents::AgentRuntime;
 
