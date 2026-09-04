@@ -587,7 +587,7 @@ pub(super) fn dispatch_turn_spawn(
 ) -> Option<tokio::task::JoinHandle<()>> {
     let sk = key.to_string();
 
-    let session_ctx = ctx.sessions.get_or_create_context(&sk);
+    let session_ctx = ctx.session_context_for(&sk);
 
     // issue #131 decision 3: a real user message that arrives while the
     // session is suspended on async delegations no longer gets silently
@@ -766,7 +766,7 @@ async fn replay_one_sync(ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelIn
         return;
     };
     let sk = key.to_string();
-    let session_ctx = ctx.sessions.get_or_create_context(&sk);
+    let session_ctx = ctx.session_context_for(&sk);
     let runtime = ctx.runtime.clone();
     // Capture routing before `msg` moves into process_turn — process_turn
     // no longer sends a user-facing error notice itself (issue #113), so

@@ -302,10 +302,35 @@ impl SessionManager {
             cancel_token: None,
             pending_yield: None,
         };
-        // Breakpoints are detected purely for the incomplete-turn flag below;
-        // recovery itself is handled by `Agent::run_recovery` (which re-reads
-        // history) so we don't carry the detected items on the Session.
-        let _ = breakpoints;
+        // issue #240: reconstruct `pending_yield` from a persisted
+        // `sessions_yield` breakpoint. The tool_call's own result is
+        // deliberately never persisted (see `tool_phase.rs`'s
+        // `is_deferred_yield` branch), so a clean deferred yield always
+        // shows up here as exactly one orphan. Only treat it as a live
+        // pending yield when it's the SOLE breakpoint: a `sessions_yield`
+        // orphan mixed with other orphan tool calls means the process
+        // crashed mid-turn (a genuine interruption, not a deliberate defer)
+        // and belongs to `run_recovery`'s ordinary Case A handling instead.
+        if breakpoints.len() == 1 && breakpoints[0].tool_name == "sessions_yield" {
+            let tool_call_id = breakpoints[0].tool_call_id.clone();
+            // `Session::insert_implicit_yield` tags its synthesized calls
+            // with this prefix — a real model-issued call never collides
+            // with it, so the prefix alone tells the two apart on reload.
+            let implicit = tool_call_id.starts_with("call_implicit_yield_");
+            session.pending_yield = Some(crate::agents::session::PendingYield {
+                tool_call_id,
+                implicit,
+            });
+            tracing::info!(
+                session = %session_id,
+                "reconstructed pending sessions_yield from disk"
+            );
+        }
+        // Otherwise, breakpoints are detected purely for the incomplete-turn
+        // flag below; recovery itself is handled by `Agent::run_recovery`
+        // (which re-reads history) so we don't carry the detected items on
+        // the Session.
+        let _ = &breakpoints;
 
         // Detect incomplete turn: when the session history ends with user or tool,
         // or an assistant message with pending tool calls.
@@ -834,6 +859,129 @@ mod ownership_tests {
     }
 }
 
+/// issue #240: `load_session` must reconstruct `Session.pending_yield` from
+/// a persisted `sessions_yield` breakpoint (the tool_call's own result is
+/// deliberately never persisted — see `tool_phase.rs`'s `is_deferred_yield`
+/// branch), so a daemon restart doesn't lose track of an outstanding
+/// deferred yield.
+#[cfg(test)]
+mod pending_yield_reload_tests {
+    use super::*;
+    use crate::providers::ToolCall;
+    use crate::providers::capability_chat::ChatMessage;
+
+    fn assistant_with_tool_call(id: &str, name: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            parts: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            }]),
+            is_error: None,
+            model: None,
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn reconstructs_pending_yield_from_sole_sessions_yield_breakpoint() {
+        let manager = SessionManager::in_memory();
+        let session_id = manager.get_or_create_context("mock:default:u1").session_id.clone();
+        manager.drop_context("mock:default:u1");
+
+        manager.append_message(&session_id, ChatMessage::user_text("do the thing"));
+        manager.append_message(&session_id, assistant_with_tool_call("call_y1", "sessions_yield"));
+
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        let session = ctx.session.try_lock().expect("uncontended in test");
+        let pending = session
+            .pending_yield
+            .as_ref()
+            .expect("sole sessions_yield breakpoint must reconstruct pending_yield");
+        assert_eq!(pending.tool_call_id, "call_y1");
+        assert!(!pending.implicit, "a plain call_ id must not be flagged implicit");
+    }
+
+    #[test]
+    fn tags_implicit_yield_by_its_synthesized_id_prefix() {
+        let manager = SessionManager::in_memory();
+        let session_id = manager.get_or_create_context("mock:default:u1").session_id.clone();
+        manager.drop_context("mock:default:u1");
+
+        manager.append_message(&session_id, ChatMessage::user_text("do the thing"));
+        manager.append_message(
+            &session_id,
+            assistant_with_tool_call("call_implicit_yield_abc123", "sessions_yield"),
+        );
+
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        let session = ctx.session.try_lock().expect("uncontended in test");
+        let pending = session.pending_yield.as_ref().expect("must reconstruct");
+        assert!(pending.implicit, "the synthesized-id prefix must round-trip as implicit");
+    }
+
+    /// A `sessions_yield` orphan mixed with another orphan tool call means
+    /// the process crashed mid-turn (a genuine interruption), not a
+    /// deliberate defer — `pending_yield` must stay `None` so this falls
+    /// through to `run_recovery`'s ordinary Case A handling instead.
+    #[test]
+    fn does_not_reconstruct_when_mixed_with_other_orphans() {
+        let manager = SessionManager::in_memory();
+        let session_id = manager.get_or_create_context("mock:default:u1").session_id.clone();
+        manager.drop_context("mock:default:u1");
+
+        manager.append_message(&session_id, ChatMessage::user_text("do two things"));
+        manager.append_message(
+            &session_id,
+            ChatMessage {
+                role: "assistant".to_string(),
+                parts: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "call_y2".to_string(),
+                        name: "sessions_yield".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    ToolCall {
+                        id: "call_shell1".to_string(),
+                        name: "shell".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                ]),
+                is_error: None,
+                model: None,
+                usage: None,
+            },
+        );
+
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        let session = ctx.session.try_lock().expect("uncontended in test");
+        assert!(
+            session.pending_yield.is_none(),
+            "a mixed breakpoint must not be treated as a deliberate defer"
+        );
+    }
+
+    #[test]
+    fn no_breakpoint_leaves_pending_yield_none() {
+        let manager = SessionManager::in_memory();
+        let session_id = manager.get_or_create_context("mock:default:u1").session_id.clone();
+        manager.drop_context("mock:default:u1");
+
+        manager.append_message(&session_id, ChatMessage::user_text("hello"));
+        manager.append_message(&session_id, ChatMessage::assistant_text("hi there"));
+
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        let session = ctx.session.try_lock().expect("uncontended in test");
+        assert!(session.pending_yield.is_none());
+    }
+}
 
 // ── #151 Phase 8+ SessionStore facade ────────────────────────────────────────
 // shell 工具（L3）经 api::session_store 只拿到「按 session_id 查上下文并挂
