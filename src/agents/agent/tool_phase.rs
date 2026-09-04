@@ -250,24 +250,43 @@ impl Agent {
             // If the task is cancelled during a downstream await,
             // the result is already safe on disk.
             if is_deferred_yield {
-                // issue #238 (known gap, disclosed): a NEW user message can
-                // arrive and start a fresh turn while an earlier pending
-                // yield (explicit or implicit) is still outstanding — if
-                // THIS turn also calls sessions_yield, this silently
-                // orphans the earlier tool_call_id (it never gets filled,
-                // stays unfulfilled in history forever, only picked up by
-                // run_recovery's generic Case A on a future restart). Not
-                // fixed here — would need either a list of pending yields
-                // instead of one, or the new yield absorbing/taking over
-                // the old one's role. Logged so it's at least observable.
-                if let Some(orphaned) = &session.pending_yield {
+                // issue #240 (item 2): a NEW user message can arrive and
+                // start a fresh turn while an earlier pending yield
+                // (explicit or implicit) is still outstanding — if THIS
+                // turn also calls sessions_yield, close out the earlier
+                // tool_call_id right now instead of leaving it silently
+                // orphaned forever.
+                //
+                // Nothing is actually lost by doing so: `pending_yield_events`
+                // (session_context/mod.rs) is a shared queue keyed on
+                // "whichever tool_call is currently `pending_yield`", not on
+                // a specific tool_call_id — anything that would have arrived
+                // for the old one still arrives, just delivered via the new
+                // one instead. Closing it synchronously also keeps
+                // `identify_breakpoint` seeing exactly one sessions_yield-
+                // shaped orphan at a time, which is what #242's restart
+                // reconstruction (`SessionManager::load_session`) needs to
+                // tell a deliberate defer apart from a genuine crash — left
+                // as a silent double-orphan, a restart landing between the
+                // two would misclassify the still-live new yield as an
+                // interrupted call too.
+                if let Some(orphaned) = session.pending_yield.take() {
                     tracing::warn!(
                         session = %session.id,
                         orphaned_tool_call_id = %orphaned.tool_call_id,
                         new_tool_call_id = %call.id,
-                        "issue #238: a new sessions_yield is overwriting an already-pending one; \
-                         the orphaned tool_call will never be filled by try_fill_pending_yield"
+                        "issue #240: a new sessions_yield is superseding an already-pending one; closing out the old tool_call"
                     );
+                    session.add_tool_result(
+                        orphaned.tool_call_id,
+                        "sessions_yield",
+                        "A newer sessions_yield call superseded this one before it \
+                         received any update. Anything that was in flight will be \
+                         delivered via the newer yield instead."
+                            .to_string(),
+                        false,
+                    );
+                    persist_last(session);
                 }
                 session.pending_yield = Some(crate::agents::session::PendingYield {
                     tool_call_id: call.id.clone(),
@@ -694,5 +713,83 @@ mod tests {
             .expect("pending_yield must be set after a sessions_yield call");
         assert_eq!(pending.tool_call_id, "call_yield_1");
         assert!(!pending.implicit, "an explicit model call must not be marked implicit");
+    }
+
+    /// issue #240 (item 2): a new `sessions_yield` call arriving while an
+    /// earlier one is still pending must close the earlier tool_call out
+    /// with a real result — not silently orphan it forever (the old
+    /// behavior, `tracing::warn!` only).
+    #[tokio::test]
+    async fn sessions_yield_closes_out_a_superseded_pending_yield() {
+        let mut session = Session::new("test_yield_supersede".to_string());
+        session.pending_yield = Some(crate::agents::session::PendingYield {
+            tool_call_id: "call_old".to_string(),
+            implicit: false,
+        });
+        let runtime = bailing_runtime();
+        let agent = Agent::new(empty_config());
+
+        let response = CollectedResponse {
+            text: "starting a new async task".to_string(),
+            reasoning_content: None,
+            thinking_signature: None,
+            tool_calls: vec![ToolCall {
+                id: "call_new".into(),
+                name: "sessions_yield".into(),
+                arguments: "{}".into(),
+            }],
+            tool_call_events: 1,
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+            actual_model: None,
+        };
+        let mut messages: Vec<ChatMessage> = Vec::new();
+        let allowed_tools: Vec<Arc<dyn crate::providers::Tool>> =
+            vec![Arc::new(crate::tools::SessionsYieldTool::new())];
+        let mut turn_state = TurnState::default();
+        let mut loop_breaker = LoopBreakerCounter::new(LoopBreakerConfig::default());
+
+        agent
+            .execute_tool_batch(
+                &mut session,
+                &response,
+                &mut messages,
+                &runtime,
+                "test-model",
+                &PermissionMode::Full,
+                &allowed_tools,
+                &[],
+                &mut turn_state,
+                &mut loop_breaker,
+            )
+            .await
+            .unwrap();
+
+        let old_result = session
+            .history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call_old"))
+            .expect("the superseded tool_call must be closed out with a real result, not left dangling");
+        assert_eq!(old_result.is_error, Some(false));
+        assert!(
+            old_result.text_content().contains("superseded"),
+            "got: {}",
+            old_result.text_content()
+        );
+        assert!(
+            !session
+                .history
+                .iter()
+                .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call_new")),
+            "the NEW sessions_yield call must still defer its own result, same as ever"
+        );
+        let pending = session
+            .pending_yield
+            .as_ref()
+            .expect("pending_yield must be set after the new sessions_yield call");
+        assert_eq!(
+            pending.tool_call_id, "call_new",
+            "pending_yield must now point at the new call, not the closed-out old one"
+        );
     }
 }
