@@ -1429,9 +1429,19 @@ impl SessionContext {
                         }
                     }
                 }
-                // issue #238: this turn may have left a pending
-                // `sessions_yield` behind (tool_phase.rs sets it, never
-                // persists its own result — see `Session::pending_yield`).
+                // issue #238: a turn that leaves async work outstanding
+                // (has_pending) but never called `sessions_yield` itself —
+                // natural EndTurn, per that tool's own doc comment, is an
+                // equally valid way to leave work running — still needs a
+                // pending tool_call to hang the eventual result on.
+                // Synthesize one so this path and the explicit-yield path
+                // converge on the exact same delivery mechanism.
+                if turn_result.has_pending && session.pending_yield.is_none() {
+                    session.insert_implicit_yield();
+                }
+
+                // This turn may have left a pending `sessions_yield` behind
+                // (explicit, from tool_phase.rs, or just synthesized above).
                 // Check immediately whether anything is already queued for
                 // it (a race where the event arrived before the yield did)
                 // rather than waiting for the next external trigger —

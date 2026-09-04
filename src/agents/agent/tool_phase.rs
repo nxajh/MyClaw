@@ -250,6 +250,25 @@ impl Agent {
             // If the task is cancelled during a downstream await,
             // the result is already safe on disk.
             if is_deferred_yield {
+                // issue #238 (known gap, disclosed): a NEW user message can
+                // arrive and start a fresh turn while an earlier pending
+                // yield (explicit or implicit) is still outstanding — if
+                // THIS turn also calls sessions_yield, this silently
+                // orphans the earlier tool_call_id (it never gets filled,
+                // stays unfulfilled in history forever, only picked up by
+                // run_recovery's generic Case A on a future restart). Not
+                // fixed here — would need either a list of pending yields
+                // instead of one, or the new yield absorbing/taking over
+                // the old one's role. Logged so it's at least observable.
+                if let Some(orphaned) = &session.pending_yield {
+                    tracing::warn!(
+                        session = %session.id,
+                        orphaned_tool_call_id = %orphaned.tool_call_id,
+                        new_tool_call_id = %call.id,
+                        "issue #238: a new sessions_yield is overwriting an already-pending one; \
+                         the orphaned tool_call will never be filled by try_fill_pending_yield"
+                    );
+                }
                 session.pending_yield = Some(crate::agents::session::PendingYield {
                     tool_call_id: call.id.clone(),
                     implicit: false,
