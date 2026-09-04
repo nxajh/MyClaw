@@ -896,10 +896,6 @@ async fn recover_suspension(
         &session_ctx.session_id,
         notice,
         format!("recovery:{}", session_ctx.session_id),
-        // P2: recovery-synthesized notices are NOT persisted (no NoticeMeta)
-        // — the store only tracks wake-time delegation events, and the
-        // `recovery:` id would never be marked delivered anyway.
-        None,
     )
     .await;
 }

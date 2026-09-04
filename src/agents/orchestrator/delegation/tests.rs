@@ -63,21 +63,18 @@ fn suspended_session(ctx: &OrchestratorCtx) -> Arc<SessionContext> {
     sctx
 }
 
-/// P2 (2026-08-13, RFC delegation-notice-queue §5.2): a wake for an
-/// ACTIVE session (auto-activated by `get_or_create_context`) with a
-/// channel present persists the notice BEFORE it enters the queue. The
-/// test runtime's NullRegistry makes the notice turn fail, so the entry
-/// stays Pending — exactly the at-least-once state a crash would leave
-/// (recovery re-enqueues it on the next start).
+/// issue #238: a wake for an ACTIVE session (auto-activated by
+/// `get_or_create_context`) with a channel present queues the event on
+/// `pending_yield_events` — no `sessions_yield` is pending in this test (the
+/// session never called it), so nothing drains the queue yet; the event just
+/// sits there for whenever one appears. This replaces the pre-#238
+/// completion_queue-persistence test: that store is no longer written by
+/// this path at all (see `orchestrator/mod.rs`'s doc comment on the
+/// `CompletionNoticeEntry`/`DeliveryState` reexport).
 #[tokio::test]
-async fn active_wake_persists_notice_before_enqueue() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
-    );
+async fn active_wake_queues_event_for_pending_yield() {
     let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
-    let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
-    ctx.completion_queue = Some(Arc::clone(&store));
+    let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
     let sctx = suspended_session(&ctx);
     let sid = sctx.session_id.clone();
     wake(
@@ -85,51 +82,46 @@ async fn active_wake_persists_notice_before_enqueue() {
         DelegationEvent::Completed {
             sub_session_id: "t1".to_string(),
             parent_session_id: sid.clone(),
-            summary: "persisted summary".to_string(),
+            summary: "queued summary".to_string(),
             duration_secs: 5,
             sent_message_count: 0,
         },
     )
     .await;
-    let pending = store.pending();
-    assert_eq!(pending.len(), 1, "notice must be persisted before enqueue");
-    let e = &pending[0];
-    assert_eq!(e.id, "delegation:t1");
-    assert_eq!(e.sub_session_id, "t1");
-    assert_eq!(e.parent_session_id, sid);
-    assert_eq!(e.status.as_deref(), Some("completed"));
-    assert_eq!(e.sent_message_count, 0);
-    // The just-collected terminal cleared `pending` — wake-time silence
-    // intent is false (see route_notice race-fix comment).
-    assert_eq!(e.silenced_override, Some(false));
-    assert!(e.content.contains("persisted summary"));
-    assert_eq!(e.delivery_state, crate::agents::orchestrator::DeliveryState::Pending);
+
+    // The terminal event itself is recorded on the suspension regardless of
+    // delivery mechanism — this part is unchanged by #238.
+    let snap = sctx.suspension_snapshot().unwrap();
+    let result = snap.results.iter().find(|r| r.sub_session_id == "t1").unwrap();
+    assert_eq!(result.status, SubStatus::Completed);
+    assert!(result.content.contains("queued summary"));
+
+    let queued = sctx.take_pending_yield_events();
+    assert_eq!(queued.len(), 1, "event must be queued for whenever a yield appears");
+    assert!(queued[0].content.contains("queued summary"));
 }
 
-/// issue #129/#140: `route_shell_completion` reuses `route_notice`
-/// wholesale for a shell background completion — this session never
-/// called `add_pending_task` for this process_id, so `record_terminal`
-/// resolves `NoSuspension` and the notice still routes/persists as an
-/// ordinary notice (falls through, does not drop it — see the function's
-/// doc comment). Persists to `completion_queue` the same way a
-/// delegation notice does, with the shell command's `process_id` riding
-/// in the `sub_session_id` slot as an opaque id (not a real sub-session).
+/// issue #129/#140/#238: `route_shell_completion` reuses `route_notice`
+/// wholesale for a shell background completion — this session never called
+/// `add_pending_task` for this process_id, so `record_terminal` resolves
+/// `NoSuspension` and the notice still routes as an ordinary notice (falls
+/// through, does not drop it — see the function's doc comment). Now queues
+/// on `pending_yield_events` the same way a delegation notice does, with
+/// the shell command's `process_id` embedded in the content (there's no
+/// separate `sub_session_id` slot on `PendingYieldEvent` — it's a single
+/// opaque content string, not a structured record like the old
+/// `CompletionNoticeEntry`).
 #[tokio::test]
-async fn route_shell_completion_persists_before_enqueue() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
-    );
+async fn route_shell_completion_queues_event() {
     let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
-    let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
-    ctx.completion_queue = Some(Arc::clone(&store));
+    let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
     let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
     let sid = sctx.session_id.clone();
 
     route_shell_completion(
         &ctx,
         crate::tools::shell::ShellCompletion {
-            session_id: sid.clone(),
+            session_id: sid,
             process_id: "sh_abc123".to_string(),
             content: "[系统通知] 后台命令已完成 (process_id: sh_abc123, exit_code: 0)。"
                 .to_string(),
@@ -138,31 +130,27 @@ async fn route_shell_completion_persists_before_enqueue() {
     )
     .await;
 
-    let pending = store.pending();
-    assert_eq!(pending.len(), 1, "shell completion must persist before enqueue");
-    let e = &pending[0];
-    assert_eq!(e.id, "shell:sh_abc123");
-    assert_eq!(e.sub_session_id, "sh_abc123");
-    assert_eq!(e.parent_session_id, sid);
-    assert_eq!(e.status, Some("completed".to_string()));
-    assert!(e.content.contains("sh_abc123"));
+    let queued = sctx.take_pending_yield_events();
+    assert_eq!(queued.len(), 1, "shell completion must be queued");
+    assert!(queued[0].content.contains("sh_abc123"));
 }
 
 /// issue #142 review (xiaoer-bot): an adopted orphan's completion
 /// carries `exit_code: None` (we aren't its real parent, so the real
 /// exit code is unobservable) — this must map to Completed, not Failed,
-/// or the persisted status contradicts the notice's own "已完成" content.
+/// or the recorded status contradicts the notice's own "已完成" content.
+/// Registered as a pending task (unlike the #129/#140 NoSuspension test
+/// above) specifically so `record_terminal` actually records a `SubResult`
+/// with an observable `status` — the fall-through NoSuspension path has no
+/// externally observable status of its own since #238 removed the
+/// completion_queue persistence this test used to check it through.
 #[tokio::test]
 async fn shell_completion_with_unknown_exit_code_maps_to_completed() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
-    );
     let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
-    let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
-    ctx.completion_queue = Some(Arc::clone(&store));
+    let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
     let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
     let sid = sctx.session_id.clone();
+    sctx.add_pending_task("sh_orphan".to_string());
 
     route_shell_completion(
         &ctx,
@@ -176,31 +164,29 @@ async fn shell_completion_with_unknown_exit_code_maps_to_completed() {
     )
     .await;
 
-    let pending = store.pending();
-    let e = pending.iter().find(|e| e.id == "shell:sh_orphan").unwrap();
+    let snap = sctx.suspension_snapshot().unwrap();
+    let result = snap.results.iter().find(|r| r.sub_session_id == "sh_orphan").unwrap();
     assert_eq!(
-        e.status,
-        Some("completed".to_string()),
+        result.status,
+        SubStatus::Completed,
         "unknown exit code must not contradict the notice's own 已完成 content"
     );
 }
 
-/// issue #140: the core value of pending-unification — two shell
-/// background processes registered as pending on the SAME session
-/// (mirrors `ShellTool::register_pending`'s `add_pending_task` calls).
-/// The first completion, with the second still pending, must route as a
-/// SILENCED intermediate notice (wake-time intent captured synchronously
-/// right after `record_terminal`, exactly like a delegation terminal
-/// event); the second (last pending item) must be loud/final.
+/// issue #140/#238: two shell background processes registered as pending on
+/// the SAME session (mirrors `ShellTool::register_pending`'s
+/// `add_pending_task` calls). Both completions queue as separate events
+/// (issue #238: no `sessions_yield` is pending in this test, so nothing
+/// drains them — they just accumulate); the suspension's `pending` list
+/// still shrinks as each is recorded, unchanged by #238. The old
+/// "intermediate silenced vs final loud" distinction this test used to
+/// check doesn't apply to this delivery path anymore — a queued event has
+/// no individual loud/silent flag; only the eventual filled tool_result
+/// (batched from whatever's queued) does.
 #[tokio::test]
-async fn concurrent_shell_completions_silence_intermediate_notice() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        crate::agents::orchestrator::CompletionNoticeStore::open(tmp.path().join("queue")).unwrap(),
-    );
+async fn concurrent_shell_completions_both_queue() {
     let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
-    let mut ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
-    ctx.completion_queue = Some(Arc::clone(&store));
+    let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel)]);
     let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
     let sid = sctx.session_id.clone();
     sctx.add_pending_task("sh_a".to_string());
@@ -217,16 +203,6 @@ async fn concurrent_shell_completions_silence_intermediate_notice() {
     )
     .await;
 
-    let after_a = store.pending();
-    let a_entry = after_a
-        .iter()
-        .find(|e| e.id == "shell:sh_a")
-        .expect("sh_a notice persisted");
-    assert_eq!(
-        a_entry.silenced_override,
-        Some(true),
-        "sh_b still pending — sh_a's notice must be silenced (intermediate)"
-    );
     assert_eq!(sctx.suspension_snapshot().unwrap().pending, vec!["sh_b".to_string()]);
 
     route_shell_completion(
@@ -240,18 +216,15 @@ async fn concurrent_shell_completions_silence_intermediate_notice() {
     )
     .await;
 
-    let after_b = store.pending();
-    let b_entry = after_b
-        .iter()
-        .find(|e| e.id == "shell:sh_b")
-        .expect("sh_b notice persisted");
-    assert_eq!(
-        b_entry.silenced_override,
-        Some(false),
-        "sh_b is the last pending item — its notice must be loud (final)"
-    );
-    assert_eq!(b_entry.status, Some("failed".to_string()));
     assert!(sctx.suspension_snapshot().unwrap().pending.is_empty());
+    let snap = sctx.suspension_snapshot().unwrap();
+    let b_result = snap.results.iter().find(|r| r.sub_session_id == "sh_b").unwrap();
+    assert_eq!(b_result.status, SubStatus::Failed);
+
+    let queued = sctx.take_pending_yield_events();
+    assert_eq!(queued.len(), 2, "both completions must be queued");
+    assert!(queued.iter().any(|e| e.content.contains("a done")));
+    assert!(queued.iter().any(|e| e.content.contains("b done")));
 }
 
 #[tokio::test]
@@ -606,39 +579,55 @@ async fn notice_queue_fifo_roundtrip() {
     assert!(!sctx.has_notice_turns_in_flight());
 }
 
+/// issue #238: enqueueing must not block on `turn_lock` — `wake()` (via
+/// `route_notice`) queues the event and spawns `try_fill_pending_yield`
+/// independently; it must return promptly even while a turn is (simulated)
+/// in flight, since `try_fill_pending_yield` waits on the SESSION lock, not
+/// `turn_lock`, and there's nothing to fill yet anyway (no `sessions_yield`
+/// pending in this test).
 #[tokio::test]
-async fn busy_turn_lock_holds_notices_for_turn_end_drain() {
+async fn busy_turn_lock_does_not_block_wake() {
     let channel = MockChannel::new();
     let ctx = test_ctx(vec![(("mock".into(), "default".into()), channel.clone())]);
     let sctx = suspended_session(&ctx);
     let sid = sctx.session_id.clone();
-    // Simulate a running turn: hold `turn_lock` so the wake's idle check
-    // fails.
     let _busy = sctx.turn_lock.lock().await;
-    wake(
-        &ctx,
-        DelegationEvent::Completed {
-            sub_session_id: "t1".to_string(),
-            parent_session_id: sid,
-            summary: "done".to_string(),
-            duration_secs: 3,
-            sent_message_count: 0,
-        },
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                summary: "done".to_string(),
+                duration_secs: 3,
+                sent_message_count: 0,
+            },
+        ),
     )
-    .await;
-    // Enqueued, NOT dispatched — no immediate drain while busy.
-    assert!(sctx.has_queued_delegation_notices());
-    assert_eq!(sctx.notice_turns_in_flight.load(Ordering::SeqCst), 0);
-    assert!(channel.sent.lock().unwrap().is_empty());
+    .await
+    .expect("wake must not block on turn_lock");
+    assert_eq!(sctx.take_pending_yield_events().len(), 1);
     drop(_busy);
 }
 
+/// issue #238: when a `sessions_yield` is already pending, a wake event
+/// gets delivered as ITS tool_result — `try_fill_pending_yield` spawned by
+/// `route_notice` picks up the just-queued event and fills the pending
+/// slot, clearing it and appending exactly one new tool-role history entry.
 #[tokio::test]
-async fn idle_wake_drains_immediately() {
+async fn wake_fills_an_already_pending_yield() {
     let channel = MockChannel::new();
     let ctx = test_ctx(vec![(("mock".into(), "default".into()), channel.clone())]);
     let sctx = suspended_session(&ctx);
     let sid = sctx.session_id.clone();
+    {
+        let mut session = sctx.session.lock().await;
+        session.pending_yield = Some(crate::agents::session::PendingYield {
+            tool_call_id: "call_y1".to_string(),
+            implicit: false,
+        });
+    }
     wake(
         &ctx,
         DelegationEvent::Completed {
@@ -650,12 +639,17 @@ async fn idle_wake_drains_immediately() {
         },
     )
     .await;
-    // wake spawned the drain; give it a moment to take + dispatch.
+    // wake spawned try_fill_pending_yield; give it a moment to fill +
+    // spawn the resume turn.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert!(!sctx.has_queued_delegation_notices());
-    assert_eq!(sctx.notice_turns_in_flight.load(Ordering::SeqCst), 0);
-    // The notice turn ran (NullRegistry → error notice lands on channel).
-    assert!(!channel.sent.lock().unwrap().is_empty());
+    let session = sctx.session_snapshot().await;
+    assert!(session.pending_yield.is_none(), "pending_yield must be cleared once filled");
+    let filled = session
+        .history
+        .iter()
+        .find(|m| m.tool_call_id.as_deref() == Some("call_y1"))
+        .unwrap_or_else(|| panic!("no filled tool_result found in history: {:?}", session.history));
+    assert!(filled.text_content().contains("done"));
 }
 
 #[tokio::test]
@@ -783,10 +777,11 @@ async fn undrained_notices_keep_suspension_alive() {
     assert!(sctx.suspension_snapshot().is_none());
 }
 
-/// 方案4: a duplicate terminal event (same sub_session_id sent twice via
-/// `wake`) must only deliver ONE notice. The first `record_terminal`
+/// 方案4/#238: a duplicate terminal event (same sub_session_id sent twice
+/// via `wake`) must only queue ONE event. The first `record_terminal`
 /// returns `Recorded` → route_notice fires; the second returns `Duplicate`
-/// → `wake` returns early without routing. A second pending task keeps the
+/// → `wake` returns early without routing (so it never reaches the
+/// pending_yield_events queue at all). A second pending task keeps the
 /// suspension alive so the second call hits the idempotent guard rather
 /// than `NoSuspension`.
 #[tokio::test]
@@ -798,7 +793,7 @@ async fn wake_dedupes_duplicate_terminal_event() {
     sctx.add_pending_task("t2".to_string());
     let sid = sctx.session_id.clone();
 
-    // First wake: record_terminal → Recorded → notice routed.
+    // First wake: record_terminal → Recorded → event queued.
     wake(
         &ctx,
         DelegationEvent::Completed {
@@ -810,14 +805,13 @@ async fn wake_dedupes_duplicate_terminal_event() {
         },
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    let count_after_first = channel.sent.lock().unwrap().len();
-    assert!(
-        count_after_first > 0,
-        "first wake should deliver a notice"
+    assert_eq!(
+        sctx.pending_yield_events.lock().unwrap().len(),
+        1,
+        "first wake should queue an event"
     );
 
-    // Second wake (same t1): record_terminal → Duplicate → no notice.
+    // Second wake (same t1): record_terminal → Duplicate → no new event.
     wake(
         &ctx,
         DelegationEvent::Completed {
@@ -829,10 +823,9 @@ async fn wake_dedupes_duplicate_terminal_event() {
         },
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    let count_after_second = channel.sent.lock().unwrap().len();
     assert_eq!(
-        count_after_second, count_after_first,
-        "duplicate wake must not deliver another notice"
+        sctx.pending_yield_events.lock().unwrap().len(),
+        1,
+        "duplicate wake must not queue another event"
     );
 }
