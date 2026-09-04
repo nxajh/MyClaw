@@ -1390,7 +1390,7 @@ mod tests {
             SubStatus::Completed,
             "done by sub-agent".into(),
             0,
-        "test",
+            "test",
         );
         // Re-add s1 to pending — simulates recover_suspension's snapshot
         // having captured s1 before the terminal event collected it.

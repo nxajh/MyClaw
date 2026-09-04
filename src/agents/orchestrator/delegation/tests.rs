@@ -529,7 +529,7 @@ async fn silence_guidance_omitted_when_last_terminal_lands() {
         SubStatus::Completed,
         "done".to_string(),
         0,
-    "test",
+        "test",
     );
     let mut content = "[系统通知] 子代理已完成后台任务 (session_id: t1)".to_string();
     maybe_append_silence_guidance(&sctx, &mut content);
@@ -767,7 +767,7 @@ async fn undrained_notices_keep_suspension_alive() {
         SubStatus::Completed,
         "done".to_string(),
         0,
-    "test",
+        "test",
     );
     // ...but a notice is still waiting for a drain — suspension survives.
     sctx.enqueue_delegation_notice(DelegationNotice {
