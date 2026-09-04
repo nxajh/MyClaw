@@ -79,21 +79,25 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     // (Completed/Failed/TimedOut) and None for `Message{Final}` — only
     // terminals enter the suspension's `results` list.
     //
-    // issue #240 (item 3): two parallel renderings of the same event —
-    // `content` (Chinese) for the paths that still use message-injection
-    // semantics (`process_non_active`, the no-materialized-context and
-    // channel-not-found fallbacks in `route_notice`), and `queue_content`
-    // (English) for the #238 queue path, which ends up as a `sessions_yield`
-    // tool_result the model reads directly and paraphrases back to the user
-    // in their own language on its own next turn — same convention #237
-    // already established for `latest_entry_summary` (proc_entry.rs).
+    // issue #240 (item 3, review follow-up): a single English rendering per
+    // event, used everywhere `route_notice` might send it — the #238 queue
+    // path (a `sessions_yield` tool_result), the message-injection fallbacks
+    // (`process_non_active`, no-materialized-context, channel-not-found),
+    // and the persisted suspension record. All of these are read by the
+    // model, not displayed to the user verbatim (the model paraphrases back
+    // in the user's own language on its own next turn, same as any other
+    // tool_result) — an earlier version of this fix kept the three fallback
+    // paths in a separate Chinese rendering on the theory that they were a
+    // different audience; review (xiaoer-bot) flagged that as inconsistent
+    // with #237's own convention, and on closer look none of the four
+    // destinations actually display this text to the user directly, so
+    // there was no real audience split to preserve.
     let (
         sub_session_id,
         parent_session_id,
         status,
         sent_message_count,
         mut content,
-        mut queue_content,
         synthetic_id,
     ) = match event {
         DelegationEvent::Completed {
@@ -107,27 +111,15 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             // If the sub-agent already streamed its result to the parent via
             // `Message` events, the summary would duplicate what the parent
             // has seen — degrade the note to pure metadata (④).
-            let (content, queue_content) = if sent_message_count > 0 {
-                (
-                    format!(
-                        "[系统通知] 子代理已完成后台任务 (session_id: {}, 耗时: {}s)。结果已通过子代理消息实时同步。",
-                        sub_session_id, duration_secs
-                    ),
-                    format!(
-                        "[system notice] The sub-agent finished its background task (session_id: {}, duration: {}s). The result was already streamed via sub-agent messages.",
-                        sub_session_id, duration_secs
-                    ),
+            let content = if sent_message_count > 0 {
+                format!(
+                    "[system notice] The sub-agent finished its background task (session_id: {}, duration: {}s). The result was already streamed via sub-agent messages.",
+                    sub_session_id, duration_secs
                 )
             } else {
-                (
-                    format!(
-                        "[系统通知] 子代理已完成后台任务 (session_id: {}, 耗时: {}s)，结果如下：\n{}",
-                        sub_session_id, duration_secs, summary
-                    ),
-                    format!(
-                        "[system notice] The sub-agent finished its background task (session_id: {}, duration: {}s). Result:\n{}",
-                        sub_session_id, duration_secs, summary
-                    ),
+                format!(
+                    "[system notice] The sub-agent finished its background task (session_id: {}, duration: {}s). Result:\n{}",
+                    sub_session_id, duration_secs, summary
                 )
             };
             let synthetic_id = format!("delegation:{}", sub_session_id);
@@ -137,7 +129,6 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 Some(SubStatus::Completed),
                 sent_message_count,
                 content,
-                queue_content,
                 synthetic_id,
             )
         }
@@ -148,10 +139,6 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
         } => {
             tracing::warn!(sub_session_id = %sub_session_id, "delegation failed, waking main agent");
             let content = format!(
-                "[系统通知] 子代理后台任务失败 (session_id: {})，错误：\n{}",
-                sub_session_id, error
-            );
-            let queue_content = format!(
                 "[system notice] The sub-agent's background task failed (session_id: {}). Error:\n{}",
                 sub_session_id, error
             );
@@ -162,7 +149,6 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 Some(SubStatus::Failed),
                 0,
                 content,
-                queue_content,
                 synthetic_id,
             )
         }
@@ -179,12 +165,6 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 "delegation timed out, waking main agent"
             );
             let content = format!(
-                "[系统通知] 子代理后台任务超时 (session_id: {}, 超时上限: {}s, 已运行: {}s)，任务已中止。\
-                 子会话的已完成工作已保留：如需继续该任务，用 agent_resume 工具以其 session_id 恢复\
-                 （会获得新的时间预算并从断点继续）；如需重做，重新委托即可。",
-                sub_session_id, timeout_secs, duration_secs
-            );
-            let queue_content = format!(
                 "[system notice] The sub-agent's background task timed out (session_id: {}, timeout: {}s, ran: {}s) and was aborted. \
                  The sub-session's completed work is preserved: to continue this task, use the agent_resume tool with its session_id \
                  (it gets a fresh time budget and continues from where it left off); to redo it instead, just delegate again.",
@@ -197,7 +177,6 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 Some(SubStatus::TimedOut),
                 0,
                 content,
-                queue_content,
                 synthetic_id,
             )
         }
@@ -210,10 +189,6 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
         DelegationEvent::Message(msg) => {
             tracing::info!(sub_session_id = %msg.sub_session_id, sender = %msg.sender_name, "sub-agent message, waking main agent");
             let content = format!(
-                "[子代理消息] 来自子代理 '{}' (session_id: {}):\n{}",
-                msg.sender_name, msg.sub_session_id, msg.text
-            );
-            let queue_content = format!(
                 "[sub-agent message] From sub-agent '{}' (session_id: {}):\n{}",
                 msg.sender_name, msg.sub_session_id, msg.text
             );
@@ -225,7 +200,6 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 None,
                 0,
                 content,
-                queue_content,
                 synthetic_id,
             )
         }
@@ -274,15 +248,11 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                         .filter(|p| !p.is_empty())
                     {
                         let mut enriched = content;
-                        enriched.push_str("\n\n任务过程记录：\n");
-                        let mut enriched_queue = queue_content;
-                        enriched_queue.push_str("\n\nTask progress log:\n");
+                        enriched.push_str("\n\nTask progress log:\n");
                         for line in lines {
                             enriched.push_str(&format!("- {}\n", line));
-                            enriched_queue.push_str(&format!("- {}\n", line));
                         }
                         content = enriched;
-                        queue_content = enriched_queue;
                     }
                     tracing::info!(
                         sub_session_id = %sub_session_id,
@@ -303,7 +273,7 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     }
 
     // Route the synthesized notice (terminal or message) into the session.
-    route_notice(ctx, &parent_session_id, content, queue_content, synthetic_id).await;
+    route_notice(ctx, &parent_session_id, content, synthetic_id).await;
 }
 
 /// Route a shell command's completion (issue #129) into the session that
@@ -383,33 +353,33 @@ pub(crate) async fn route_shell_completion(
     }
 
     // issue #240 (item 3): shell completion content (`proc_entry.rs`'s
-    // `build_completion_content`) is out of scope for this translation pass
-    // — it stays Chinese on every path for now, so the same string serves as
-    // both the legacy-path and queue-path content here.
-    route_notice(ctx, &sc.session_id, sc.content.clone(), sc.content, synthetic_id).await;
+    // `build_completion_content`) is a separate, out-of-scope string — it
+    // stays Chinese for now, independent of the delegation-notice wording
+    // above.
+    route_notice(ctx, &sc.session_id, sc.content, synthetic_id).await;
 }
 
-/// Route a synthesized system notice into the parent session:
-/// active → the pending-yield queue when the session has a live
-/// `SessionContext` (issue #238: delivered as the tool_result of whatever
-/// `sessions_yield` is currently pending, batched with anything else queued
-/// — never a synthesized `[user]` message; issue #240 item 3: this path
-/// gets `queue_content`, in English per #237's "structured content fed to
-/// the model" convention); a couple of narrower fallbacks (no live context,
-/// or a channel we can't resolve) still use the older message-injection
-/// style, and so does the non-active path (see `process_non_active`) — all
-/// three of those keep using `content` (whatever language the caller built
-/// it in; delegation notices build it in Chinese, matching the pre-#238
-/// behavior they still preserve). Shared by `wake` (delegation events),
-/// `route_shell_completion`, and `recover_suspension` (P1-1 startup
-/// recovery of persisted suspensions) — the latter two currently pass the
-/// same string for both parameters (neither is in scope for translation
-/// yet).
+/// Route a synthesized system notice into the parent session: active → the
+/// pending-yield queue when the session has a live `SessionContext` (issue
+/// #238: delivered as the tool_result of whatever `sessions_yield` is
+/// currently pending, batched with anything else queued — never a
+/// synthesized `[user]` message); a couple of narrower fallbacks (no live
+/// context, or a channel we can't resolve) still use the older
+/// message-injection style, and so does the non-active path (see
+/// `process_non_active`). All four destinations receive the SAME `content`
+/// — issue #240 (item 3): delegation notices (`wake`) build it in English,
+/// matching #237's "structured content fed to the model" convention, since
+/// none of the four destinations actually display this text to the user
+/// directly (the model reads it and replies in the user's own language on
+/// its own next turn, same as any other tool_result) — see the longer
+/// rationale on `wake`'s content-building match. Shared by `wake`
+/// (delegation events), `route_shell_completion` (still Chinese — out of
+/// scope), and `recover_suspension` (P1-1 startup recovery of persisted
+/// suspensions, also still Chinese — out of scope).
 pub(crate) async fn route_notice(
     ctx: &OrchestratorCtx,
     session_id: &str,
     mut content: String,
-    queue_content: String,
     synthetic_id: String,
 ) {
     // Resolve the session to get its routing key (owner).
@@ -475,7 +445,7 @@ pub(crate) async fn route_notice(
         // daemon restart before it's delivered.
         if let Some(sctx) = &sctx_opt {
             sctx.enqueue_pending_yield_event(crate::agents::session_context::PendingYieldEvent {
-                content: queue_content,
+                content,
             });
             let fill_ctx = ctx.clone();
             let fill_sid = session_id.to_string();

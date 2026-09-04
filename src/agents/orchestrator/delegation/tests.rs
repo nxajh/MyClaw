@@ -105,14 +105,19 @@ fn has_cjk(s: &str) -> bool {
     s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
 }
 
-/// issue #240 (item 3): the queue path (what ultimately fills a
-/// `sessions_yield` tool_result) must get English content, matching #237's
-/// "structured content fed to the model" convention — while the persisted
-/// suspension record (Chinese-facing UI / logs) keeps its Chinese wording
-/// unchanged. Covers all four `DelegationEvent` variants in one pass since
-/// they share the same content-rendering shape in `wake`.
+/// issue #240 (item 3, review follow-up): every destination `wake` can
+/// route a delegation notice to — the queue path (what ultimately fills a
+/// `sessions_yield` tool_result) AND the persisted suspension record — must
+/// get English content now, matching #237's "structured content fed to the
+/// model" convention. An earlier version of this fix kept the suspension
+/// record (and the message-injection fallbacks) in a separate Chinese
+/// rendering; review found no destination actually displays this text to
+/// the user directly, so there was no real audience split to preserve —
+/// collapsed back to one English string used everywhere. Covers all four
+/// `DelegationEvent` variants in one pass since they share the same
+/// content-rendering shape in `wake`.
 #[tokio::test]
-async fn wake_queue_content_is_english_suspension_record_stays_chinese() {
+async fn wake_content_is_english_everywhere() {
     let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
 
     // Completed (sent_message_count == 0): full summary inlined.
@@ -136,9 +141,13 @@ async fn wake_queue_content_is_english_suspension_record_stays_chinese() {
         assert!(queued[0].content.contains("did the thing"));
         let snap = sctx.suspension_snapshot().unwrap();
         assert!(
-            has_cjk(&snap.results[0].content),
-            "suspension record must stay Chinese: {}",
+            !has_cjk(&snap.results[0].content),
+            "suspension record must be English too: {}",
             snap.results[0].content
+        );
+        assert_eq!(
+            queued[0].content, snap.results[0].content,
+            "both destinations now render the same single string"
         );
     }
 
@@ -181,7 +190,7 @@ async fn wake_queue_content_is_english_suspension_record_stays_chinese() {
         assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
         assert!(queued[0].content.contains("boom"));
         let snap = sctx.suspension_snapshot().unwrap();
-        assert!(has_cjk(&snap.results[0].content), "suspension record must stay Chinese");
+        assert!(!has_cjk(&snap.results[0].content), "suspension record must be English too");
     }
 
     // TimedOut.
@@ -203,7 +212,7 @@ async fn wake_queue_content_is_english_suspension_record_stays_chinese() {
         assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
         assert!(queued[0].content.contains("agent_resume"));
         let snap = sctx.suspension_snapshot().unwrap();
-        assert!(has_cjk(&snap.results[0].content), "suspension record must stay Chinese");
+        assert!(!has_cjk(&snap.results[0].content), "suspension record must be English too");
     }
 
     // Message (not a terminal event — no suspension record to compare).
@@ -399,7 +408,7 @@ async fn completed_with_messages_degrades_summary() {
     let snap = sctx.suspension_snapshot().unwrap();
     let r = &snap.results[0];
     assert!(!r.content.contains("duplicate summary"));
-    assert!(r.content.contains("实时同步"));
+    assert!(r.content.contains("streamed via sub-agent messages"));
     assert_eq!(r.sent_message_count, 3);
 }
 
@@ -441,7 +450,7 @@ async fn timed_out_collects_timeout_note() {
     let snap = sctx.suspension_snapshot().unwrap();
     let r = &snap.results[0];
     assert_eq!(r.status, SubStatus::TimedOut);
-    assert!(r.content.contains("超时"));
+    assert!(r.content.contains("timed out"));
 }
 
 #[tokio::test]
