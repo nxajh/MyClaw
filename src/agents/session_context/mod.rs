@@ -299,22 +299,80 @@ impl SessionContext {
         ctx
     }
 
-    /// 方案 C (RFC §5): hydrate `turn_suspension` from
-    /// `sessions/<sid>/suspension.json` at construction (daemon-restart
-    /// recovery). Corrupt JSON is warned about and ignored — the session
-    /// just starts loud like an unsuspended one.
-    fn restore_suspension(&self) {
+    /// Shared restore skeleton for a per-session persisted JSON field, used
+    /// by both `restore_suspension` and `restore_pending_yield_events` (the
+    /// two share an identical shape: no hook installed → no-op, nothing
+    /// persisted yet → no-op, corrupt JSON → warn and ignore, fail open
+    /// rather than blocking session load). `load` fetches the raw JSON via
+    /// the installed hook; `apply` installs the parsed value into the
+    /// caller's own mutex-guarded field and does its own success logging
+    /// (the two callers use different field names — `pending` vs `count` —
+    /// so that part stays caller-specific rather than being forced generic).
+    /// `field` names the file for the corrupt-JSON warning.
+    fn restore_persisted_field<T, L, A>(&self, field: &'static str, load: L, apply: A)
+    where
+        T: serde::de::DeserializeOwned,
+        L: FnOnce(&dyn PersistHook, &str) -> Option<String>,
+        A: FnOnce(T),
+    {
         let Some(hook) = &self.suspension_persist else {
             return;
         };
-        let Some(json) = hook.load_suspension(&self.session_id) else {
+        let Some(json) = load(hook.as_ref(), &self.session_id) else {
             return;
         };
         if json.trim().is_empty() {
             return;
         }
-        match serde_json::from_str::<TurnSuspension>(&json) {
-            Ok(s) => {
+        match serde_json::from_str::<T>(&json) {
+            Ok(value) => apply(value),
+            Err(e) => {
+                tracing::warn!(
+                    session = %self.session_id,
+                    field,
+                    err = %e,
+                    "persisted field corrupt; ignoring"
+                );
+            }
+        }
+    }
+
+    /// Write-side counterpart of `restore_persisted_field`, shared by
+    /// `persist_suspension` and `persist_pending_yield_events`. `value` is
+    /// the current in-memory state — `None` (or, for the queue, an empty
+    /// collection mapped to `None` by the caller) persists as `""`, the
+    /// file backend's convention for "delete the file". No-op without a
+    /// persist hook.
+    fn persist_persisted_field<T, S>(&self, value: Option<&T>, save: S)
+    where
+        T: serde::Serialize,
+        S: FnOnce(&dyn PersistHook, &str, &str),
+    {
+        let Some(hook) = &self.suspension_persist else {
+            return;
+        };
+        let json = match value {
+            Some(v) => match serde_json::to_string(v) {
+                Ok(j) => j,
+                Err(e) => {
+                    tracing::warn!(session = %self.session_id, err = %e, "serialize persisted field failed");
+                    return;
+                }
+            },
+            None => String::new(),
+        };
+        save(hook.as_ref(), &self.session_id, &json);
+    }
+
+    /// 方案 C (RFC §5): hydrate `turn_suspension` from
+    /// `sessions/<sid>/suspension.json` at construction (daemon-restart
+    /// recovery). Corrupt JSON is warned about and ignored — the session
+    /// just starts loud like an unsuspended one.
+    fn restore_suspension(&self) {
+        self.restore_persisted_field::<TurnSuspension, _, _>(
+            "suspension.json",
+            |hook, sid| hook.load_suspension(sid),
+            |s| {
                 let pending = s.pending.len();
                 *self
                     .turn_suspension
@@ -325,15 +383,8 @@ impl SessionContext {
                     pending = pending,
                     "restored suspended turn from disk"
                 );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    session = %self.session_id,
-                    err = %e,
-                    "suspension.json corrupt; ignoring"
-                );
-            }
-        }
+            },
+        );
     }
 
     /// 方案 C (RFC §5): write the current `turn_suspension` to
@@ -341,25 +392,13 @@ impl SessionContext {
     /// deleted). No-op without a persist hook. Called after every mutation
     /// point so a crash/restart never loses collected progress.
     fn persist_suspension(&self) {
-        let Some(hook) = &self.suspension_persist else {
-            return;
-        };
-        let json = match self
+        let guard = self
             .turn_suspension
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            Some(s) => match serde_json::to_string(s) {
-                Ok(j) => j,
-                Err(e) => {
-                    tracing::warn!(session = %self.session_id, err = %e, "serialize suspension failed");
-                    return;
-                }
-            },
-            None => String::new(),
-        };
-        hook.save_suspension(&self.session_id, &json);
+            .unwrap_or_else(|e| e.into_inner());
+        self.persist_persisted_field(guard.as_ref(), |hook, sid, json| {
+            hook.save_suspension(sid, json)
+        });
     }
 
     /// issue #240: hydrate `pending_yield_events` from
@@ -368,17 +407,10 @@ impl SessionContext {
     /// JSON is warned about and ignored — the session just starts with an
     /// empty queue.
     fn restore_pending_yield_events(&self) {
-        let Some(hook) = &self.suspension_persist else {
-            return;
-        };
-        let Some(json) = hook.load_pending_yield_events(&self.session_id) else {
-            return;
-        };
-        if json.trim().is_empty() {
-            return;
-        }
-        match serde_json::from_str::<Vec<PendingYieldEvent>>(&json) {
-            Ok(events) => {
+        self.restore_persisted_field::<Vec<PendingYieldEvent>, _, _>(
+            "pending_yield_events.json",
+            |hook, sid| hook.load_pending_yield_events(sid),
+            |events| {
                 let count = events.len();
                 *self
                     .pending_yield_events
@@ -389,15 +421,8 @@ impl SessionContext {
                     count = count,
                     "restored pending yield events from disk"
                 );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    session = %self.session_id,
-                    err = %e,
-                    "pending_yield_events.json corrupt; ignoring"
-                );
-            }
-        }
+            },
+        );
     }
 
     /// issue #240: write the current `pending_yield_events` queue to
@@ -407,9 +432,6 @@ impl SessionContext {
     /// crash/restart never loses events queued before the outstanding
     /// `sessions_yield` was filled.
     fn persist_pending_yield_events(&self) {
-        let Some(hook) = &self.suspension_persist else {
-            return;
-        };
         let events: Vec<PendingYieldEvent> = self
             .pending_yield_events
             .lock()
@@ -417,18 +439,10 @@ impl SessionContext {
             .iter()
             .cloned()
             .collect();
-        let json = if events.is_empty() {
-            String::new()
-        } else {
-            match serde_json::to_string(&events) {
-                Ok(j) => j,
-                Err(e) => {
-                    tracing::warn!(session = %self.session_id, err = %e, "serialize pending yield events failed");
-                    return;
-                }
-            }
-        };
-        hook.save_pending_yield_events(&self.session_id, &json);
+        let arg = if events.is_empty() { None } else { Some(&events) };
+        self.persist_persisted_field(arg, |hook, sid, json| {
+            hook.save_pending_yield_events(sid, json)
+        });
     }
 
     /// Snapshot the session for read-only consumers (e.g., /status commands).
