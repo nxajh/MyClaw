@@ -112,6 +112,21 @@ pub struct SessionContext {
     /// avoid the same unbounded-growth class of issue #214/#222 already
     /// hit elsewhere in a long-lived session.
     pub(crate) recently_recorded_terminals: std::sync::Mutex<Vec<(String, std::time::Instant)>>,
+    /// issue #238: events (sub-agent/shell completions and, eventually, user
+    /// interjections) queued for whenever this session next has an
+    /// outstanding `sessions_yield` tool_call to deliver them to. Drained in
+    /// one batch by `try_fill_pending_yield`, never one-at-a-time — see the
+    /// #238 discussion for why streaming consumption was rejected (token
+    /// blowup, intermediate-state hallucination risk). Runtime-only, not
+    /// persisted (a restart's unfulfilled `sessions_yield` falls back to
+    /// ordinary orphan-tool-call handling in `run_recovery`'s Case A).
+    pub pending_yield_events: std::sync::Mutex<std::collections::VecDeque<PendingYieldEvent>>,
+}
+
+/// issue #238: see `SessionContext::pending_yield_events`.
+#[derive(Debug, Clone)]
+pub struct PendingYieldEvent {
+    pub content: String,
 }
 
 /// issue #224: how long a `record_terminal`'d sub_session_id is remembered
@@ -198,6 +213,7 @@ impl SessionContext {
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             user_profile: Arc::new(UserProfile::default()),
             recently_recorded_terminals: std::sync::Mutex::new(Vec::new()),
+            pending_yield_events: std::sync::Mutex::new(std::collections::VecDeque::new()),
         };
         ctx.restore_suspension();
         ctx
@@ -220,6 +236,7 @@ impl SessionContext {
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             user_profile: profile,
             recently_recorded_terminals: std::sync::Mutex::new(Vec::new()),
+            pending_yield_events: std::sync::Mutex::new(std::collections::VecDeque::new()),
         };
         ctx.restore_suspension();
         ctx
@@ -388,6 +405,30 @@ impl SessionContext {
         std::mem::take(
             &mut *self
                 .delegation_notice_queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+        .into_iter()
+        .collect()
+    }
+
+    /// issue #238: enqueue an event for whenever this session next has a
+    /// pending `sessions_yield` to deliver it to. Safe to call regardless of
+    /// whether a yield is currently outstanding — `try_fill_pending_yield`
+    /// is what actually consumes the queue.
+    pub fn enqueue_pending_yield_event(&self, event: PendingYieldEvent) {
+        self.pending_yield_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(event);
+    }
+
+    /// issue #238: take the whole queue (FIFO order) for one fill. Events
+    /// enqueued DURING the fill stay for the next one.
+    pub fn take_pending_yield_events(&self) -> Vec<PendingYieldEvent> {
+        std::mem::take(
+            &mut *self
+                .pending_yield_events
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()),
         )
@@ -634,7 +675,7 @@ impl SessionContext {
         // called explicitly on the main path BEFORE
         // `clear_suspension_if_collected` so the end-of-sequence check no
         // longer counts the current turn; `Drop` covers the rest.
-        let mut notice_guard = NoticeTurnGuard::new(self, silenced_intent.is_some());
+        let notice_guard = NoticeTurnGuard::new(self, silenced_intent.is_some());
 
         // Persist inbound files to session-local storage so their lifetime
         // matches the session.  Read the body stream (via
@@ -977,6 +1018,39 @@ impl SessionContext {
             run_mode: prompt_config.run_mode,
         };
 
+        self.run_and_deliver(
+            &mut session,
+            turn_ctx,
+            &runtime,
+            channel_for_send,
+            reply_target,
+            silenced,
+            notice_guard,
+            persist_hook,
+        )
+        .await
+    }
+
+    /// issue #238: extracted from `process_turn` — everything from here on is
+    /// generic "run the LLM/tool loop and deliver the result" logic that
+    /// doesn't care whether the turn was triggered by a new inbound message or
+    /// a resumed `sessions_yield`. `resume_after_yield` (added alongside the
+    /// rest of #238) is the second caller: it skips straight to this after
+    /// appending the filled tool_result directly to history, with
+    /// `silenced=false` and a no-op `NoticeTurnGuard` — a yield-resume is now
+    /// an ordinary turn, not part of the old suspension/silenced bookkeeping.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_and_deliver(
+        self: &Arc<Self>,
+        session: &mut Session,
+        turn_ctx: TurnContext<'_>,
+        runtime: &AgentRuntime,
+        channel_for_send: Option<Arc<dyn Channel>>,
+        reply_target: String,
+        silenced: bool,
+        mut notice_guard: NoticeTurnGuard,
+        persist_hook: Option<Arc<dyn PersistHook>>,
+    ) -> anyhow::Result<TurnResult> {
         // Notify channel that processing has started (typing indicator, etc.)
         // — suppressed on silenced resume turns (RFC §3.3).
         if !silenced {
@@ -986,7 +1060,7 @@ impl SessionContext {
             }
         }
 
-        let result = self.agent.run(&mut session, turn_ctx, &runtime).await;
+        let result = self.agent.run(session, turn_ctx, runtime).await;
         // Per-turn turn_stream is transient. Consume the stream first
         // (RFC §7.6): finish on success delivers FinalDelivered; abort on
         // error cancels the WS transport.
@@ -1075,7 +1149,7 @@ impl SessionContext {
                 // never successfully processed the request, so we want the
                 // media to remain inline for the retry / compaction path.
                 if turn_result.stop_reason != crate::providers::StopReason::ContextOverflow {
-                    age_session_media(&mut session, persist_hook.as_deref());
+                    age_session_media(session, persist_hook.as_deref());
                 }
 
                 if let Some(ref retry_msg) = turn_result.pending_retry {
