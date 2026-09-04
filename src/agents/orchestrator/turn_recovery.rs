@@ -493,7 +493,7 @@ async fn recover_active_session(
         tracing::warn!(session = %sk, "startup recovery: channel gone; skipping session recovery");
         return;
     };
-    let session_ctx = ctx.session_context_for(&sk);
+    let session_ctx = ctx.session_context_for(&sk).await;
 
     let text = {
         let _turn_guard = session_ctx.turn_lock.lock().await;
@@ -1609,7 +1609,7 @@ mod tests {
         // Active session (get_or_create auto-activates) with a materialized
         // context — mirrors a session mid-recovery at startup.
         let _ = ctx.sessions.get_or_create(&sk);
-        let sctx = ctx.session_context_for(&sk);
+        let sctx = ctx.session_context_for(&sk).await;
         // Simulate the incident: a notice enqueued while the recovery turn
         // held `turn_lock` (silenced_override Some(false) = loud notice,
         // exactly what route_notice records with no pending delegations).

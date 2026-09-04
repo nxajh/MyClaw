@@ -200,19 +200,24 @@ impl OrchestratorCtx {
     /// unrelated event next touched this session — so a cache-miss here
     /// tries the fill eagerly, before the caller (e.g. startup recovery's
     /// `recover_active_session`) goes on to run `run_recovery` against the
-    /// same context. That ordering is why `run_recovery`'s Case A only ever
-    /// needs to handle the plain "still waiting, nothing queued" shape of a
-    /// `sessions_yield` breakpoint, never one with events already sitting
-    /// behind it.
-    pub fn session_context_for(&self, sk: &str) -> Arc<SessionContext> {
+    /// same context.
+    ///
+    /// issue #244: this used to fire the fill via `tokio::spawn` and return
+    /// immediately, leaving the actual ordering against the caller's
+    /// subsequent `run_recovery` to a lock race — correct either way
+    /// (`try_fill_pending_yield` and `run_recovery`'s Case A are mutually
+    /// idempotent, see #242/#244's discussion), but only provably so by an
+    /// argument about both orderings rather than a guarantee. Awaiting the
+    /// fill directly here makes the ordering structural instead: by the
+    /// time this returns, a cache-miss session has already had its one
+    /// shot at delivery, and `run_recovery`'s Case A only ever needs to
+    /// handle the plain "still waiting, nothing was queued" shape of a
+    /// `sessions_yield` breakpoint.
+    pub async fn session_context_for(&self, sk: &str) -> Arc<SessionContext> {
         let is_new = self.sessions.get_context(sk).is_none();
         let sctx = self.sessions.get_or_create_context(sk);
         if is_new {
-            let sctx2 = Arc::clone(&sctx);
-            let runtime = self.runtime.clone();
-            tokio::spawn(async move {
-                sctx2.try_fill_pending_yield(runtime).await;
-            });
+            sctx.try_fill_pending_yield(self.runtime.clone()).await;
         }
         sctx
     }
@@ -287,4 +292,78 @@ fn _p1_drain_chain_send_guards() {
     assert_send::<std::sync::Arc<crate::agents::SessionContext>>();
     assert_sync::<std::sync::Arc<crate::agents::SessionContext>>();
     assert_send::<std::collections::VecDeque<crate::agents::DelegationNotice>>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::test_ctx;
+    use crate::agents::session_context::PendingYieldEvent;
+    use crate::providers::ToolCall;
+    use crate::providers::capability_chat::ChatMessage;
+
+    fn assistant_with_tool_call(id: &str, name: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            parts: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            }]),
+            is_error: None,
+            model: None,
+            usage: None,
+        }
+    }
+
+    /// issue #244: `session_context_for` used to fire its eager
+    /// `try_fill_pending_yield` via `tokio::spawn` and return immediately —
+    /// correct either way against a subsequent `run_recovery` (both paths
+    /// are mutually idempotent), but only provably so by an argument about
+    /// lock-acquisition order. Awaiting the fill directly makes this
+    /// deterministic: by the time `session_context_for` returns on a
+    /// cache-miss session that has both a persisted `pending_yield_events`
+    /// queue entry and a reconstructable `Session.pending_yield` (the
+    /// daemon-restart scenario #242 built persistence for), the fill has
+    /// already happened — no spawned task racing a caller's next lock
+    /// acquisition.
+    #[tokio::test]
+    async fn session_context_for_deterministically_fills_pending_yield_on_restart() {
+        let ctx = test_ctx(vec![]);
+
+        // Simulate the state a daemon restart would find on disk: a session
+        // whose history ends in an unresolved `sessions_yield` tool_call
+        // (reconstructs `Session.pending_yield` on load — #242), plus an
+        // event already sitting in the persisted `pending_yield_events`
+        // queue for it (enqueued through a live SessionContext so it goes
+        // through the real persistence path, then dropped to simulate the
+        // context not being materialized yet this run).
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        let sid = sctx.session_id.clone();
+        ctx.sessions.append_message(&sid, ChatMessage::user_text("do the async thing"));
+        ctx.sessions
+            .append_message(&sid, assistant_with_tool_call("call_y1", "sessions_yield"));
+        sctx.enqueue_pending_yield_event(PendingYieldEvent {
+            content: "sub-agent finished while the daemon was down".to_string(),
+        });
+        ctx.sessions.drop_context("mock:default:u1");
+
+        // The call under test — no explicit try_fill_pending_yield call
+        // anywhere in this test, and nothing spawned in the background.
+        let sctx2 = ctx.session_context_for("mock:default:u1").await;
+
+        let session = sctx2.session.lock().await;
+        assert!(
+            session.pending_yield.is_none(),
+            "pending_yield must already be filled by the time session_context_for returns"
+        );
+        let filled = session
+            .history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call_y1"))
+            .expect("the sessions_yield call must already have its result");
+        assert!(filled.text_content().contains("sub-agent finished while the daemon was down"));
+    }
 }

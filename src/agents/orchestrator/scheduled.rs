@@ -46,11 +46,12 @@ pub(crate) async fn run_scheduled_turn(
         // `pending_yield_events` queue and a reconstructed
         // `Session.pending_yield` from disk (daemon-restart recovery of a
         // cron/scheduled session that had an outstanding `sessions_yield`).
-        let sctx2 = Arc::clone(&session_ctx);
-        let runtime = orch.runtime.clone();
-        tokio::spawn(async move {
-            sctx2.try_fill_pending_yield(runtime).await;
-        });
+        // issue #244: awaited directly (this function is already async)
+        // instead of fired via a detached spawn, so the ordering against
+        // whatever runs next is structural rather than a lock race.
+        session_ctx
+            .try_fill_pending_yield(orch.runtime.clone())
+            .await;
     }
     if let Some(ref m) = model_override {
         let mut session = session_ctx.session.lock().await;
