@@ -101,6 +101,134 @@ async fn active_wake_queues_event_for_pending_yield() {
     assert!(queued[0].content.contains("queued summary"));
 }
 
+fn has_cjk(s: &str) -> bool {
+    s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+}
+
+/// issue #240 (item 3): the queue path (what ultimately fills a
+/// `sessions_yield` tool_result) must get English content, matching #237's
+/// "structured content fed to the model" convention — while the persisted
+/// suspension record (Chinese-facing UI / logs) keeps its Chinese wording
+/// unchanged. Covers all four `DelegationEvent` variants in one pass since
+/// they share the same content-rendering shape in `wake`.
+#[tokio::test]
+async fn wake_queue_content_is_english_suspension_record_stays_chinese() {
+    let channel: Arc<dyn crate::api::message::Channel> = MockChannel::new();
+
+    // Completed (sent_message_count == 0): full summary inlined.
+    {
+        let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                summary: "did the thing".to_string(),
+                duration_secs: 5,
+                sent_message_count: 0,
+            },
+        )
+        .await;
+        let queued = sctx.take_pending_yield_events();
+        assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
+        assert!(queued[0].content.contains("did the thing"));
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert!(
+            has_cjk(&snap.results[0].content),
+            "suspension record must stay Chinese: {}",
+            snap.results[0].content
+        );
+    }
+
+    // Completed (sent_message_count > 0): degraded metadata-only note.
+    {
+        let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                summary: "duplicate summary".to_string(),
+                duration_secs: 3,
+                sent_message_count: 3,
+            },
+        )
+        .await;
+        let queued = sctx.take_pending_yield_events();
+        assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
+        assert!(!queued[0].content.contains("duplicate summary"), "must still degrade to metadata-only");
+    }
+
+    // Failed.
+    {
+        let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Failed {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                error: "boom".to_string(),
+            },
+        )
+        .await;
+        let queued = sctx.take_pending_yield_events();
+        assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
+        assert!(queued[0].content.contains("boom"));
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert!(has_cjk(&snap.results[0].content), "suspension record must stay Chinese");
+    }
+
+    // TimedOut.
+    {
+        let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::TimedOut {
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                timeout_secs: 600,
+                duration_secs: 600,
+            },
+        )
+        .await;
+        let queued = sctx.take_pending_yield_events();
+        assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
+        assert!(queued[0].content.contains("agent_resume"));
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert!(has_cjk(&snap.results[0].content), "suspension record must stay Chinese");
+    }
+
+    // Message (not a terminal event — no suspension record to compare).
+    {
+        let ctx = test_ctx(vec![(("mock".to_string(), "default".to_string()), channel.clone())]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Message(AgentMessage {
+                msg_id: "m1".to_string(),
+                sender_name: "coder".to_string(),
+                sub_session_id: "t1".to_string(),
+                parent_session_id: sid,
+                text: "hello from sub-agent".to_string(),
+                kind: MessageKind::Final,
+            }),
+        )
+        .await;
+        let queued = sctx.take_pending_yield_events();
+        assert!(!has_cjk(&queued[0].content), "queue content must be English: {}", queued[0].content);
+        assert!(queued[0].content.contains("hello from sub-agent"));
+    }
+}
+
 /// issue #129/#140/#238: `route_shell_completion` reuses `route_notice`
 /// wholesale for a shell background completion — this session never called
 /// `add_pending_task` for this process_id, so `record_terminal` resolves

@@ -891,9 +891,13 @@ async fn recover_suspension(
         .timestamp()
         .saturating_sub(snapshot.suspended_at as i64);
     let notice = suspension_recovery_notice(suspended_secs, &merged);
+    // issue #240 (item 3): this restart-recovery notice is out of scope for
+    // this translation pass — it stays Chinese on every path, so the same
+    // string serves as both the legacy-path and queue-path content here.
     route_notice(
         ctx,
         &session_ctx.session_id,
+        notice.clone(),
         notice,
         format!("recovery:{}", session_ctx.session_id),
     )
