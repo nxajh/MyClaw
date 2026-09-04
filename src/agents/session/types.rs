@@ -204,6 +204,28 @@ pub struct Session {
     /// A clone lives on `SessionContext::turn_cancel` so `/stop` can trigger it
     /// without locking the session. Never persisted; reset on clone.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// issue #238: set while this session has an outstanding `sessions_yield`
+    /// tool_call with no persisted result yet — the framework deliberately
+    /// does NOT write a `{"status": "yielded"}` result for it (see
+    /// `tool_phase.rs`), so whatever happens next (sub-agent/shell
+    /// completion, a new user message) can be delivered as ITS tool_result
+    /// instead of a synthesized `[user]` message. In-memory convenience only
+    /// — the real signal is the unfulfilled tool_call sitting in `history`,
+    /// which `identify_breakpoint` already recognizes across restarts (a
+    /// restart before this field is reconstructed just falls back to the
+    /// ordinary orphan-tool-call handling in `run_recovery`'s Case A).
+    /// Never persisted; not carried across clone/snapshot.
+    pub pending_yield: Option<PendingYield>,
+}
+
+/// issue #238: see `Session::pending_yield`.
+#[derive(Debug, Clone)]
+pub struct PendingYield {
+    pub tool_call_id: String,
+    /// True when the framework synthesized this yield itself (the model
+    /// ended its turn with async work outstanding but never called
+    /// `sessions_yield`) rather than the model calling it explicitly.
+    pub implicit: bool,
 }
 
 // `Session` cannot derive `Clone` because `Box<dyn TurnStream>` is not
@@ -237,6 +259,7 @@ impl Clone for Session {
             turn_silenced: self.turn_silenced,
             turn_tool_allowlist: self.turn_tool_allowlist.clone(),
             cancel_token: None,
+            pending_yield: self.pending_yield.clone(),
         }
     }
 }
@@ -263,6 +286,7 @@ impl std::fmt::Debug for Session {
             .field("has_sub_agent_inbox", &self.sub_agent_inbox.is_some())
             .field("turn_silenced", &self.turn_silenced)
             .field("turn_tool_allowlist", &self.turn_tool_allowlist)
+            .field("pending_yield", &self.pending_yield.is_some())
             .finish()
     }
 }
@@ -295,6 +319,7 @@ impl Session {
             turn_silenced: false,
             turn_tool_allowlist: None,
             cancel_token: None,
+            pending_yield: None,
         }
     }
 
@@ -488,6 +513,60 @@ impl Session {
         self.message_ids.push(0);
     }
 
+    /// issue #238: synthesize a `sessions_yield` tool_call the model never
+    /// actually made — used when a turn ends with async work outstanding
+    /// (`TurnResult.has_pending`) but the model didn't call `sessions_yield`
+    /// itself (`sessions_yield.rs`'s own doc comment: "A model that never
+    /// calls it is harmless" — natural EndTurn is an equally valid, common
+    /// way to leave async work running). Without this, there would be no
+    /// pending tool_call to hang the eventual result on, and delivery would
+    /// have nowhere to go via the #238 mechanism.
+    ///
+    /// Appends an assistant message with empty text and exactly this one
+    /// tool_call (no narration — the model didn't say anything, the
+    /// framework is acting on its behalf) and sets `pending_yield` with
+    /// `implicit: true`, so a later reader (logs, `run_recovery`'s Case A)
+    /// can tell this apart from a call the model actually made.
+    pub fn insert_implicit_yield(&mut self) {
+        let tool_call_id = format!("call_implicit_yield_{}", uuid::Uuid::new_v4());
+        self.add_assistant_with_tools(
+            String::new(),
+            vec![crate::providers::ToolCall {
+                id: tool_call_id.clone(),
+                name: "sessions_yield".to_string(),
+                arguments: "{}".to_string(),
+            }],
+            None,
+            None,
+            None,
+            None,
+        );
+        self.persist_last();
+        self.pending_yield = Some(PendingYield {
+            tool_call_id,
+            implicit: true,
+        });
+    }
+
+    /// Persist the last history entry via the installed `PersistHook`, if
+    /// any. Mirrors `agent::exec_marker::persist_last` (kept separate: that
+    /// one is `pub(super)`-scoped to the `agent` module and used inside the
+    /// tool-execution loop; this is the same logic for callers outside it,
+    /// e.g. `SessionContext::try_fill_pending_yield`, issue #238).
+    pub fn persist_last(&mut self) {
+        let Some(hook) = self.persist.clone() else {
+            return;
+        };
+        let Some(msg) = self.history.last().cloned() else {
+            return;
+        };
+        if let Some(id) = hook.persist_message(&self.id, &msg) {
+            if let Some(slot) = self.message_ids.last_mut() {
+                *slot = id;
+            }
+        }
+    }
+
     /// Add a system message to history.
     pub fn add_system_text(&mut self, text: String) {
         self.history.push(ChatMessage::system_text(text));
@@ -641,6 +720,42 @@ impl Session {
         self.history.drain(..boundary);
         self.message_ids.drain(..boundary);
         self.compact_version = version;
+    }
+}
+
+#[cfg(test)]
+mod insert_implicit_yield_tests {
+    use super::Session;
+
+    /// issue #238: the framework-synthesized fallback for a turn that ends
+    /// with async work outstanding but never called `sessions_yield`
+    /// itself. Must produce the exact same shape as an explicit call
+    /// (an assistant message with one tool_call, no persisted result) so
+    /// `try_fill_pending_yield`/`identify_breakpoint` treat it identically
+    /// — the only difference is `implicit: true` for observability.
+    #[test]
+    fn produces_an_unfulfilled_sessions_yield_tool_call() {
+        let mut session = Session::new("test_implicit_yield".to_string());
+        session.insert_implicit_yield();
+
+        let last = session.history.last().expect("history must have the synthesized message");
+        assert_eq!(last.role, "assistant");
+        assert!(last.text_content().is_empty(), "no narration — the model didn't say this");
+        let calls = last.tool_calls.as_ref().expect("must carry exactly one tool_call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "sessions_yield");
+
+        assert!(
+            !session
+                .history
+                .iter()
+                .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(calls[0].id.as_str())),
+            "must not persist a result for it — that's the whole point"
+        );
+
+        let pending = session.pending_yield.as_ref().expect("pending_yield must be set");
+        assert_eq!(pending.tool_call_id, calls[0].id);
+        assert!(pending.implicit, "must be marked implicit, unlike an explicit model call");
     }
 }
 

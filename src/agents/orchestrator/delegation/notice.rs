@@ -1,8 +1,6 @@
 use super::super::ctx::OrchestratorCtx;
 use super::super::key::SessionKey;
-use super::dispatch::{
-    drain_delegation_notices, notice_fallback_sender, notice_receiver, process_non_active,
-};
+use super::dispatch::{notice_fallback_sender, notice_receiver, process_non_active};
 use crate::agents::session_context::TerminalRecord;
 use crate::agents::turn::SubStatus;
 use crate::agents::{DelegationEvent, MessageKind, SessionContext};
@@ -42,28 +40,6 @@ pub(super) fn maybe_append_silence_guidance(sctx: &SessionContext, content: &mut
     if sctx.has_pending_async_work() {
         content.push_str("\n\n");
         content.push_str(SILENCE_GUIDANCE);
-    }
-}
-
-/// P2 (2026-08-13, RFC delegation-notice-queue §5.2): metadata carried from
-/// `wake` into `route_notice` for persistence. Terminal events carry a
-/// terminal status; sub-agent `Message` events carry `status: None` (the RFC
-/// entry allows null). `recover_suspension`'s recovery-synthesized notice
-/// passes `None` for the whole struct — it is never persisted.
-#[derive(Debug, Clone)]
-pub(crate) struct NoticeMeta {
-    pub sub_session_id: String,
-    pub status: Option<SubStatus>,
-    pub sent_message_count: u64,
-}
-
-/// P2 (RFC §5.2): lowercase terminal status stored in persisted entries.
-/// Hand-written — serde's default variant naming would produce PascalCase.
-fn substatus_str(s: SubStatus) -> &'static str {
-    match s {
-        SubStatus::Completed => "completed",
-        SubStatus::Failed => "failed",
-        SubStatus::TimedOut => "timed_out",
     }
 }
 
@@ -283,22 +259,7 @@ pub(crate) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     }
 
     // Route the synthesized notice (terminal or message) into the session.
-    // P2 (RFC §5.2): carry the metadata for persistence — terminal and
-    // `Message` events both persist (Message with `status: None`); the
-    // recovery-synthesized notice passes `None` instead (not persisted).
-    let notice_meta = NoticeMeta {
-        sub_session_id: sub_session_id.clone(),
-        status,
-        sent_message_count,
-    };
-    route_notice(
-        ctx,
-        &parent_session_id,
-        content,
-        synthetic_id,
-        Some(notice_meta),
-    )
-    .await;
+    route_notice(ctx, &parent_session_id, content, synthetic_id).await;
 }
 
 /// Route a shell command's completion (issue #129) into the session that
@@ -377,30 +338,23 @@ pub(crate) async fn route_shell_completion(
         }
     }
 
-    let notice_meta = NoticeMeta {
-        sub_session_id: sc.process_id,
-        status: Some(status),
-        sent_message_count: 0,
-    };
-    route_notice(ctx, &sc.session_id, sc.content, synthetic_id, Some(notice_meta)).await;
+    route_notice(ctx, &sc.session_id, sc.content, synthetic_id).await;
 }
 
 /// Route a synthesized system notice into the parent session:
-/// active → `dispatch_turn` (live streaming to the user's UI); non-active →
-/// `process_non_active` (temporary context, persisted to history). Shared by
-/// `wake` (delegation events) and `recover_suspension` (P1-1 startup
-/// recovery of persisted suspensions).
-///
-/// `silenced_override` (fix v2): wake-time silence intent captured in this
-/// sync section (see below). The turn is silenced only while pending
-/// delegations remain — the model's output is then delivered as an ordinary
-/// intermediate message and the turn does NOT end.
+/// active → the pending-yield queue when the session has a live
+/// `SessionContext` (issue #238: delivered as the tool_result of whatever
+/// `sessions_yield` is currently pending, batched with anything else queued
+/// — never a synthesized `[user]` message); a couple of narrower fallbacks
+/// (no live context, or a channel we can't resolve) still use the older
+/// message-injection style, and so does the non-active path (see
+/// `process_non_active`). Shared by `wake` (delegation events) and
+/// `recover_suspension` (P1-1 startup recovery of persisted suspensions).
 pub(crate) async fn route_notice(
     ctx: &OrchestratorCtx,
     session_id: &str,
     mut content: String,
     synthetic_id: String,
-    notice_meta: Option<NoticeMeta>,
 ) {
     // Resolve the session to get its routing key (owner).
     let session = match ctx.sessions.get_by_id(session_id) {
@@ -411,26 +365,16 @@ pub(crate) async fn route_notice(
         }
     };
 
-    // 方案 C (§3.3): a resume turn with pending delegations is *silenced* —
-    // attach the guidance so the model never assumes the user has seen a
-    // draft summary (Claude Code-style pre-announcement; no backfill).
-    //
-    // Race fix (2026-08-10, E2E 恢复轮1): the silence INTENT is captured HERE
-    // (wake/route time — same sync section right after `record_terminal`, so
-    // `has_pending_async_work()` equals `!snap.pending.is_empty()` of the
-    // just-collected terminal), NOT at turn start: a queued notice may run
-    // after later terminal events cleared `pending`, and the live snapshot
-    // would wrongly mark the intermediate notice loud (it streamed as a
-    // normal message instead of the progress preview). The intent rides the
-    // synthetic `ChannelInboundMessage.silenced_override` into `process_turn`.
+    // issue #238: `sctx_opt` used to also drive the silenced/SILENCE_GUIDANCE
+    // machinery for the active-session path — that's gone now (see below),
+    // it's kept only for the two paths that still use the old message-
+    // injection style: the "no materialized context" fallback right below
+    // and the non-active `process_non_active` path at the bottom of this
+    // function, neither of which this issue's redesign touches.
     let sctx_opt = ctx
         .sessions
         .registered_context_by_session_id(session_id)
         .or_else(|| ctx.sessions.load_context_by_session_id(session_id));
-    if let Some(sctx) = &sctx_opt {
-        maybe_append_silence_guidance(sctx, &mut content);
-    }
-    let silenced_override = sctx_opt.as_ref().map(|s| s.has_pending_async_work());
 
     let routing_key = &session.owner;
     let is_active = ctx
@@ -439,10 +383,6 @@ pub(crate) async fn route_notice(
         .is_some_and(|id| id == session_id);
 
     if is_active {
-        // Active session — route through the notice queue (P1,
-        // docs/delegation-notice-queue-rfc.md §4). The synthetic turn is
-        // built by `drain_delegation_notices`; this function only enqueues
-        // and decides whether an immediate drain is safe.
         let key = match SessionKey::parse(routing_key) {
             Some(k) => k,
             None => {
@@ -451,89 +391,70 @@ pub(crate) async fn route_notice(
             }
         };
         if ctx.channel(&key.account_key()).is_none() {
+            let mut fallback_content = content.clone();
+            if let Some(sctx) = &sctx_opt {
+                maybe_append_silence_guidance(sctx, &mut fallback_content);
+            }
+            let silenced_override = sctx_opt.as_ref().map(|s| s.has_pending_async_work());
             tracing::warn!(routing_key = %routing_key, "channel for delegation event not found, falling back to non-active path");
-            process_non_active(ctx, session_id, &key.sender, &content, silenced_override, None).await;
+            process_non_active(ctx, session_id, &key.sender, &fallback_content, silenced_override, None).await;
             return;
         }
 
-        // Enqueue BEFORE the idle check: the queue must be non-empty by the
-        // time the drain (or the turn-end drain trigger) reads it.
+        // issue #238: this event no longer gets wrapped into a synthesized
+        // `[user]` message — it's queued for whenever this session next has
+        // a pending `sessions_yield` tool_call to deliver it to (any
+        // currently-open one, or the next one that appears), and delivered
+        // as ITS tool_result. See `Session::pending_yield` /
+        // `SessionContext::try_fill_pending_yield`. This sidesteps the
+        // Gemini tool→user adjacency problem and the whole SILENCE_GUIDANCE
+        // apparatus entirely for this path — there's no ambiguous "is this a
+        // new turn" question to resolve, it's unambiguously a continuation
+        // of the same still-open tool round.
+        //
+        // Known gap (disclosed, not yet closed): unlike the old
+        // `completion_queue`-backed `DelegationNotice` path, this queue is
+        // runtime-only — an event queued here that the daemon restarts
+        // before delivering is lost, not just delayed. Closing that gap
+        // (persisting pending_yield_events, and reconstructing
+        // `Session::pending_yield` from `identify_breakpoint` on load) is
+        // separate follow-up work; until then a restart mid-wait falls back
+        // to `run_recovery`'s generic Case A orphan-tool-call handling,
+        // which is safe (never replays, never crashes) but not as precise.
         if let Some(sctx) = &sctx_opt {
-            // P2 (2026-08-13, RFC delegation-notice-queue §5.2): persist the
-            // notice BEFORE it enters the in-memory queue — a crash after
-            // enqueue but before the turn persists its content must not lose
-            // the notice (startup recovery re-enqueues Pending entries).
-            // Fail-open: a storage error still delivers now via the queue
-            // (degraded to P1 for this notice; it just won't survive a
-            // restart). Dedup: the store's `seen` set returns `None` on a
-            // duplicate id — no double file.
-            if let (Some(store), Some(meta)) = (&ctx.completion_queue, &notice_meta) {
-                let entry = crate::agents::orchestrator::CompletionNoticeEntry {
-                    seq: 0,
-                    id: synthetic_id.clone(),
-                    sub_session_id: meta.sub_session_id.clone(),
-                    parent_session_id: session_id.to_string(),
-                    status: meta.status.map(|s| substatus_str(s).to_string()),
-                    content: content.clone(),
-                    silenced_override,
-                    // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
-                    sent_message_count: meta.sent_message_count,
-                    enqueued_at: chrono::Utc::now().timestamp() as u64,
-                    delivery_state: crate::agents::orchestrator::DeliveryState::Pending,
-                };
-                if let Err(e) = store.append(entry) {
-                    tracing::warn!(
-                        notice_id = %synthetic_id,
-                        err = %e,
-                        "completion queue: persist failed; delivering in-memory only"
-                    );
-                }
-            }
-            sctx.enqueue_delegation_notice(crate::agents::DelegationNotice {
-                id: synthetic_id,
+            sctx.enqueue_pending_yield_event(crate::agents::session_context::PendingYieldEvent {
                 content,
-                silenced_override,
             });
-
-            // Idle check: tokio Mutex::try_lock succeeds ONLY when the lock
-            // is free AND has no waiters (FIFO fairness) — so a success
-            // means the drain runs immediately (equivalently: dispatch_turn
-            // today). A busy lock means a user/notice turn is running (or
-            // waiting); the turn-end drain trigger in `dispatch_turn` picks
-            // the queue up — no spawn, no lock contention here.
-            if sctx.turn_lock.try_lock().is_ok() {
-                tracing::debug!(
-                    session_id = %session_id,
-                    "session idle; draining delegation notices immediately"
-                );
-                let drain_ctx = ctx.clone();
-                let drain_sid = session_id.to_string();
-                tokio::spawn(async move {
-                    drain_delegation_notices(&drain_ctx, &drain_sid).await;
-                });
-            } else {
-                tracing::debug!(
-                    session_id = %session_id,
-                    "session busy; delegation notice queued for turn-end drain"
-                );
-            }
+            let fill_ctx = ctx.clone();
+            let fill_sid = session_id.to_string();
+            tokio::spawn(async move {
+                if let Some(sctx) = fill_ctx.sessions.registered_context_by_session_id(&fill_sid) {
+                    sctx.try_fill_pending_yield(fill_ctx.runtime.clone()).await;
+                }
+            });
         } else {
             // No materialized context (should not happen for an active
             // session) — fall back to the pre-P1 direct dispatch so the
             // notice is not silently lost. No bump (no queue to track it);
-            // matches the old no-bump path.
-            let synthetic = ChannelInboundMessage {
-                id: synthetic_id,
-                sender: crate::api::message::MessageSender::new(key.sender.clone()),
-                receiver: notice_receiver(session.last_message.as_ref(), &key.sender),
-                content: crate::api::message::ChannelMessageContent::text(content),
-                timestamp: chrono::Utc::now().timestamp() as u64,
-                interruption_scope_id: None,
-                silenced_override,
-                // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
-                run_mode: Default::default(),
-            };
-            super::super::inbound::dispatch_turn(ctx, &key, synthetic).await;
+            // matches the old no-bump path. This is the one remaining
+            // active-session path still using message injection — it has
+            // no SessionContext to hang a pending_yield off of.
+            super::super::inbound::dispatch_turn(
+                ctx,
+                &key,
+                ChannelInboundMessage {
+                    id: synthetic_id,
+                    sender: crate::api::message::MessageSender::new(key.sender.clone()),
+                    receiver: notice_receiver(session.last_message.as_ref(), &key.sender),
+                    content: crate::api::message::ChannelMessageContent::text(content),
+                    timestamp: chrono::Utc::now().timestamp() as u64,
+                    interruption_scope_id: None,
+                    silenced_override: None,
+                    // RFC channel-role-split: delegation wake/notice turns are Interactive (a user may resume).
+                    run_mode: Default::default(),
+                },
+            )
+            .await;
         }
     } else {
         // Non-active session — load a temporary context, process the turn,
@@ -541,6 +462,15 @@ pub(crate) async fn route_notice(
         // P2: not persisted here (no queue to enter; the wake→turn window is
         // small and RFC §5 keeps this path in-memory-only) — `notice_id`
         // stays None so the store is untouched.
+        //
+        // issue #238: unchanged — a non-active session has no live turn to
+        // hang a pending_yield off of, so it keeps the old message-injection
+        // style for now (still needs the silenced/SILENCE_GUIDANCE
+        // treatment this function's active-session path no longer uses).
+        if let Some(sctx) = &sctx_opt {
+            maybe_append_silence_guidance(sctx, &mut content);
+        }
+        let silenced_override = sctx_opt.as_ref().map(|s| s.has_pending_async_work());
         process_non_active(ctx, session_id, &notice_fallback_sender(routing_key), &content, silenced_override, None).await;
     }
 }

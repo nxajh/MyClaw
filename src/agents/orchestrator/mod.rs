@@ -27,6 +27,18 @@ pub mod turn;
 
 pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;
+// issue #238: `route_notice` (the only production writer of
+// `CompletionNoticeEntry`/`DeliveryState`) no longer persists there — the
+// active-session delegation-notice path now goes through
+// `SessionContext::pending_yield_events` instead (runtime-only, see that
+// type's doc comment for the disclosed restart-survival gap). Both types
+// stay exercised by the recovery-path tests (`turn_recovery.rs`,
+// `inbound.rs`) that construct fixtures directly, and `CompletionNoticeStore`
+// itself still needs to read/drain whatever a pre-#238 daemon already wrote.
+// Not touching this further here — cleaning up `completion_queue.rs` itself
+// (if it turns out to have no other writer either) is separate follow-up
+// work, not part of this change.
+#[allow(unused_imports)]
 pub use completion_queue::{CompletionNoticeEntry, CompletionNoticeStore, DeliveryState};
 pub use inbound_spool::InboundSpool;
 pub(crate) use scheduled::{run_cron_task, run_distill_task, run_proposer_task};

@@ -227,10 +227,20 @@ impl Agent {
                 LoopBreak::None => {}
             }
 
-            let mut tool_msg = ChatMessage::text("tool", &result_content);
-            tool_msg.tool_call_id = Some(call.id.clone());
-            tool_msg.is_error = Some(is_error);
-            messages.push(tool_msg);
+            // issue #238: `sessions_yield`'s own result is deliberately NOT
+            // appended/persisted here — its tool_call is left unfulfilled in
+            // history so whatever wakes this session next (a sub-agent/shell
+            // completion, a new user message) can be delivered as ITS
+            // tool_result instead of a synthesized `[user]` message. See
+            // `Session::pending_yield` and the EndTurn branch below.
+            let is_deferred_yield = call.name == "sessions_yield" && !is_error;
+
+            if !is_deferred_yield {
+                let mut tool_msg = ChatMessage::text("tool", &result_content);
+                tool_msg.tool_call_id = Some(call.id.clone());
+                tool_msg.is_error = Some(is_error);
+                messages.push(tool_msg);
+            }
 
             // Persist the tool result to disk BEFORE any async
             // notification. persist_last is synchronous (no await
@@ -239,8 +249,34 @@ impl Agent {
             // at a later await point (push_or_drop, on_tool_event).
             // If the task is cancelled during a downstream await,
             // the result is already safe on disk.
-            session.add_tool_result(call.id.clone(), &call.name, result_content.clone(), is_error);
-            persist_last(session);
+            if is_deferred_yield {
+                // issue #238 (known gap, disclosed): a NEW user message can
+                // arrive and start a fresh turn while an earlier pending
+                // yield (explicit or implicit) is still outstanding — if
+                // THIS turn also calls sessions_yield, this silently
+                // orphans the earlier tool_call_id (it never gets filled,
+                // stays unfulfilled in history forever, only picked up by
+                // run_recovery's generic Case A on a future restart). Not
+                // fixed here — would need either a list of pending yields
+                // instead of one, or the new yield absorbing/taking over
+                // the old one's role. Logged so it's at least observable.
+                if let Some(orphaned) = &session.pending_yield {
+                    tracing::warn!(
+                        session = %session.id,
+                        orphaned_tool_call_id = %orphaned.tool_call_id,
+                        new_tool_call_id = %call.id,
+                        "issue #238: a new sessions_yield is overwriting an already-pending one; \
+                         the orphaned tool_call will never be filled by try_fill_pending_yield"
+                    );
+                }
+                session.pending_yield = Some(crate::agents::session::PendingYield {
+                    tool_call_id: call.id.clone(),
+                    implicit: false,
+                });
+            } else {
+                session.add_tool_result(call.id.clone(), &call.name, result_content.clone(), is_error);
+                persist_last(session);
+            }
 
             // Emit ToolResult event after the result is persisted.
             push_or_drop(
@@ -591,5 +627,72 @@ mod tests {
             "exec_marker must already be cleared by the time the tool result is \
              persisted — a wide guard scope would still show it present here"
         );
+    }
+
+    /// issue #238: `sessions_yield`'s own tool_result must NOT be appended
+    /// to history — its tool_call is left unfulfilled so whatever wakes the
+    /// session next can be delivered as ITS result instead of a synthesized
+    /// `[user]` message. `Session::pending_yield` records the tool_call_id
+    /// so the caller knows where to deliver it.
+    #[tokio::test]
+    async fn sessions_yield_defers_its_own_tool_result() {
+        let mut session = Session::new("test_yield_defers".to_string());
+        let runtime = bailing_runtime();
+        let agent = Agent::new(empty_config());
+
+        let response = CollectedResponse {
+            text: "waiting on sub-agents".to_string(),
+            reasoning_content: None,
+            thinking_signature: None,
+            tool_calls: vec![ToolCall {
+                id: "call_yield_1".into(),
+                name: "sessions_yield".into(),
+                arguments: "{}".into(),
+            }],
+            tool_call_events: 1,
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+            actual_model: None,
+        };
+        let mut messages: Vec<ChatMessage> = Vec::new();
+        let allowed_tools: Vec<Arc<dyn crate::providers::Tool>> =
+            vec![Arc::new(crate::tools::SessionsYieldTool::new())];
+        let mut turn_state = TurnState::default();
+        let mut loop_breaker = LoopBreakerCounter::new(LoopBreakerConfig::default());
+
+        let outcome = agent
+            .execute_tool_batch(
+                &mut session,
+                &response,
+                &mut messages,
+                &runtime,
+                "test-model",
+                &PermissionMode::Full,
+                &allowed_tools,
+                &[],
+                &mut turn_state,
+                &mut loop_breaker,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(outcome, ToolBatchOutcome::EndTurn(_)),
+            "sessions_yield must still end the turn deterministically"
+        );
+        assert!(
+            !session
+                .history
+                .iter()
+                .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call_yield_1")),
+            "sessions_yield's own result must not be persisted to history: {:?}",
+            session.history
+        );
+        let pending = session
+            .pending_yield
+            .as_ref()
+            .expect("pending_yield must be set after a sessions_yield call");
+        assert_eq!(pending.tool_call_id, "call_yield_1");
+        assert!(!pending.implicit, "an explicit model call must not be marked implicit");
     }
 }
