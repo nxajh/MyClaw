@@ -180,7 +180,7 @@ impl Interceptor for Callback {
             None => return Flow::Stop,
         };
 
-        let session_ctx = ctx.session_context_for(&key.to_string());
+        let session_ctx = ctx.session_context_for(&key.to_string()).await;
         let pending = if is_retry {
             session_ctx.pending_retry.lock().await.take()
         } else {
@@ -587,7 +587,12 @@ pub(super) fn dispatch_turn_spawn(
 ) -> Option<tokio::task::JoinHandle<()>> {
     let sk = key.to_string();
 
-    let session_ctx = ctx.session_context_for(&sk);
+    // issue #244: `session_context_for` is `async fn` (awaits its eager
+    // pending_yield fill deterministically instead of firing it via a
+    // detached spawn) — this function itself is not async, so materializing
+    // the SessionContext moves into the spawned closure below, right where
+    // `session_ctx` is first actually used. Nothing in this function's sync
+    // portion (before the spawn) ever touched `session_ctx`.
 
     // issue #131 decision 3: a real user message that arrives while the
     // session is suspended on async delegations no longer gets silently
@@ -627,6 +632,7 @@ pub(super) fn dispatch_turn_spawn(
     // clone it (cheap, all fields are Arc/Clone).
     let ctx = ctx.clone();
     Some(tokio::spawn(async move {
+        let session_ctx = ctx.session_context_for(&sk).await;
         let _guard = turn_tracker.track();
         // RFC §3.5/§4.3: render per-turn injections — user-level mailbox
         // (cross-user messages; drained = 注入即消费, shown once) and pending
@@ -766,7 +772,7 @@ async fn replay_one_sync(ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelIn
         return;
     };
     let sk = key.to_string();
-    let session_ctx = ctx.session_context_for(&sk);
+    let session_ctx = ctx.session_context_for(&sk).await;
     let runtime = ctx.runtime.clone();
     // Capture routing before `msg` moves into process_turn — process_turn
     // no longer sends a user-facing error notice itself (issue #113), so
@@ -1022,6 +1028,7 @@ mod tests {
         let ctx = with_channel(ch.clone());
         let k = key();
         *ctx.session_context_for(&k.to_string())
+            .await
             .pending_retry
             .lock()
             .await = Some("original question".into());
@@ -1060,7 +1067,7 @@ mod tests {
         let ctx = with_channel(ch.clone());
         let k = key();
         {
-            let sc = ctx.session_context_for(&k.to_string());
+            let sc = ctx.session_context_for(&k.to_string()).await;
             let mut session = sc.session.lock().await;
             session.incomplete_turn = true;
             session.add_user("orphaned".into());
@@ -1073,7 +1080,7 @@ mod tests {
             .handle(&ctx, &k, inbound_msg("user1", &content))
             .await;
         assert!(matches!(flow, Flow::Stop));
-        let sc = ctx.session_context_for(&k.to_string());
+        let sc = ctx.session_context_for(&k.to_string()).await;
         let session = sc.session.lock().await;
         assert!(!session.incomplete_turn);
         assert!(session.history.is_empty());
