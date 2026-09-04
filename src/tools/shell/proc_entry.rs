@@ -275,6 +275,17 @@ pub async fn recovery_lost_content(registry: &ShellRegistry, process_id: &str) -
             // hot-switch adoption whose real exit could not be observed
             // (see `spawn_adopted_reaper`) — genuinely unknown, unlike the
             // lost_on_restart case.
+            // PR #237 review (xiaoer-bot): unlike `latest_entry_summary`
+            // (fed back to the model as a tool_result mid-task, where the
+            // model's own later reply — not this text — is what the user
+            // sees), this string is merged by `recover_suspension` together
+            // with the still-Chinese sub-agent notice (`turn_recovery.rs`,
+            // the "子代理后台任务中断" branch) into ONE synthetic inbound
+            // turn delivered straight to the user's channel. Translating
+            // only this half would put two languages in the same merged
+            // notice — reintroducing the exact split this PR set out to
+            // fix, one level up. Stays Chinese until both halves of
+            // `recover_suspension`'s merge are unified together.
             let cause = if e.state == "lost_on_restart" {
                 "非热切换重启（进程组被整体回收），确定未执行完成。若仍需要这次任务的结果，可以放心重新执行——不存在与旧进程冲突的风险，但请自行确认该命令是否幂等（是否包含写入/提交/发送请求等副作用），避免重复".to_string()
             } else {
@@ -602,13 +613,23 @@ pub fn latest_entry_summary(sessions_dir: &Path, session_id: &str) -> Option<(St
     let entry = entries.pop()?;
 
     Some(match entry.state.as_str() {
+        // issue #230: the command text isn't included here — the only
+        // caller (`run_recovery`'s Case A) already has it right next to
+        // this message, in the orphan tool_call's own arguments, so
+        // echoing it back is zero-information redundancy. It's also
+        // LLM-generated text that would otherwise land in a
+        // `[recovery]` system-semantic message unneutralized and
+        // untruncated (unlike `recovery_lost_content`'s own `output`
+        // field, which does go through `neutralize_spoofing`). A future
+        // caller without that adjacent context can add it back — with
+        // neutralize + truncation this time.
         "running" => (
             format!(
-                "This shell command is still running (process_id={}, command={:?}) — it \
+                "This shell command is still running (process_id={}) — it \
                  survived a deployment hot-switch restart and was NOT re-executed to avoid \
                  running it twice. Call sessions_yield to suspend and be woken when it \
                  finishes, shell_poll for an instant peek, or shell_kill to stop it.",
-                entry.process_id, entry.command
+                entry.process_id
             ),
             false,
         ),
@@ -617,22 +638,22 @@ pub fn latest_entry_summary(sessions_dir: &Path, session_id: &str) -> Option<(St
                 "This shell command's process was terminated together with the previous \
                  daemon process (a non-hot-switch restart reclaims the whole process group) \
                  — it is confirmed to NOT have completed, and there is no captured output \
-                 (process_id={}, command={:?}, output_path={}). If you still need this, it's \
+                 (process_id={}, output_path={}). If you still need this, it's \
                  safe to re-run — there is no risk of a second copy already running — just \
                  make sure re-running it is idempotent (won't duplicate side effects such as \
                  a commit or a request that may already have gone out from a prior part of \
                  the same command).",
-                entry.process_id, entry.command, entry.output_path
+                entry.process_id, entry.output_path
             ),
             true,
         ),
         other => (
             format!(
                 "This shell command's process is no longer running (state={}, exit_code={:?}, \
-                 process_id={}, command={:?}, output_path={}) — it was adopted across a \
+                 process_id={}, output_path={}) — it was adopted across a \
                  deployment hot-switch restart, so its real exit code could not be captured. \
                  Check the output before deciding whether to re-run it.",
-                other, entry.exit_code, entry.process_id, entry.command, entry.output_path
+                other, entry.exit_code, entry.process_id, entry.output_path
             ),
             true,
         ),
@@ -695,6 +716,12 @@ mod recovery_wording_tests {
             msg.to_lowercase().contains("confirmed"),
             "must state definitively that it did not complete: {msg}"
         );
+        assert!(
+            !msg.contains("myclaw update"),
+            "issue #230: must not echo the raw command text — it's redundant (already \
+             visible in the adjacent orphan tool_call) and unneutralized LLM-generated \
+             text: {msg}"
+        );
     }
 
     #[test]
@@ -706,6 +733,10 @@ mod recovery_wording_tests {
         let (msg, is_error) = latest_entry_summary(tmp.path(), "sess-2").unwrap();
         assert!(!is_error, "a still-running survived process is not an error outcome");
         assert!(msg.contains("still running"));
+        assert!(
+            !msg.contains("myclaw update"),
+            "issue #230: must not echo the raw command text: {msg}"
+        );
     }
 
     /// An adopted orphan whose exit could not be reaped (`exited` with no
@@ -722,6 +753,10 @@ mod recovery_wording_tests {
         assert!(
             !msg.to_lowercase().contains("confirmed"),
             "an adopted-orphan exit is genuinely unknown, not a confirmed outcome: {msg}"
+        );
+        assert!(
+            !msg.contains("myclaw update"),
+            "issue #230: must not echo the raw command text: {msg}"
         );
     }
 
