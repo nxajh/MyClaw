@@ -1267,7 +1267,11 @@ mod tests {
         let r = &snap.results[0];
         assert_eq!(r.sub_session_id, "sh_lost");
         assert_eq!(r.status, SubStatus::Failed);
-        assert!(r.content.contains("后台命令"), "must use shell wording, not sub-agent wording: {}", r.content);
+        assert!(
+            r.content.contains("Background command"),
+            "must use shell wording, not sub-agent wording: {}",
+            r.content
+        );
         assert!(!r.content.contains("子代理"), "must NOT use sub-agent wording: {}", r.content);
         assert!(snap.pending.is_empty());
     }
