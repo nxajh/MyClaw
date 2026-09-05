@@ -129,6 +129,14 @@ fn sanitize_schema_for_google(value: &mut serde_json::Value) {
     obj.remove("$schema");
     obj.remove("$defs");
     obj.remove("definitions");
+    // issue #243: standard JSON Schema exclusive-bound keywords, legal and
+    // common in schemas MCP servers generate (e.g. n8n's `limit` params),
+    // but not in Google's functionDeclarations subset — "Unknown name
+    // exclusiveMinimum: Cannot find field" (400). Dropped like anyOf/oneOf
+    // above: the semantic constraint is lost, but the tool description
+    // should already convey it to the model.
+    obj.remove("exclusiveMinimum");
+    obj.remove("exclusiveMaximum");
     // Google does not support anyOf / oneOf in functionDeclarations
     // schemas. Remove them entirely — fields become implicitly optional.
     // The semantic constraint (e.g. "at least one of text/files") is lost,
@@ -449,5 +457,40 @@ mod tests {
             schema.get("oneOf").is_none(),
             "oneOf must be stripped for Google"
         );
+    }
+
+    /// issue #243: MCP-server-provided tool schemas (e.g. n8n's
+    /// `search_workflows.limit`) commonly use `exclusiveMinimum` /
+    /// `exclusiveMaximum` — legal standard JSON Schema, but unsupported by
+    /// Google's functionDeclarations subset ("Unknown name exclusiveMinimum:
+    /// Cannot find field", 400). These schemas flow into `req.tools`
+    /// unmodified from the MCP server (`McpTool::input_schema` clones them
+    /// verbatim), so the sanitizer — the only place that could catch this —
+    /// must strip them like it already does for anyOf/oneOf.
+    #[test]
+    fn sanitize_strips_exclusive_min_max_reproducing_n8n_limit_field() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "number",
+                    "minimum": 1,
+                    "exclusiveMinimum": 0
+                },
+                "timeout": {
+                    "type": "number",
+                    "maximum": 100,
+                    "exclusiveMaximum": 100
+                }
+            }
+        });
+        sanitize_schema_for_google(&mut schema);
+        let s = schema.to_string();
+        assert!(!s.contains("exclusiveMinimum"), "got: {s}");
+        assert!(!s.contains("exclusiveMaximum"), "got: {s}");
+        // Supported sibling keywords must survive.
+        assert_eq!(schema["properties"]["limit"]["minimum"], 1);
+        assert_eq!(schema["properties"]["limit"]["type"], "number");
+        assert_eq!(schema["properties"]["timeout"]["maximum"], 100);
     }
 }
