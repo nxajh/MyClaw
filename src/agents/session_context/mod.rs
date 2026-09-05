@@ -1561,14 +1561,14 @@ impl SessionContext {
     #[allow(clippy::too_many_arguments)]
     async fn run_and_deliver(
         self: &Arc<Self>,
-        mut session: OwnedMutexGuard<Session>,
+        session: OwnedMutexGuard<Session>,
         // Phase 2a (issue #256): owned (not borrowed) so this frame — the
         // only one that will ever need to — can `drop` it and reacquire a
         // fresh one around the Phase 2b sessions_yield park. `&mut
         // OwnedMutexGuard<_>` cannot do that (nothing to move it out into;
         // `OwnedMutexGuard` has no `Default` for `mem::take`, and
         // `try_lock_owned` would deadlock against the guard's own hold).
-        mut turn_guard: OwnedMutexGuard<()>,
+        turn_guard: OwnedMutexGuard<()>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
         channel_for_send: Option<Arc<dyn Channel>>,
