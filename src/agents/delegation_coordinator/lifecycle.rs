@@ -86,6 +86,7 @@ fn existing_final_text(session: &crate::agents::session::Session) -> Option<crat
             _ => None,
         })
         .collect();
+    let text = text.trim().to_string();
     if text.is_empty() {
         return None;
     }
@@ -696,5 +697,25 @@ mod tests {
         let mut session = Session::new("s5".to_string());
         session.history.push(ChatMessage::assistant_text(""));
         assert!(existing_final_text(&session).is_none());
+    }
+
+    /// Review finding (PR #253): a whitespace-only trailing message must be
+    /// treated the same as empty — `text.is_empty()` alone would let it
+    /// through and deliver a whitespace-only "completion".
+    #[test]
+    fn existing_final_text_none_for_whitespace_only_assistant_text() {
+        let mut session = Session::new("s7".to_string());
+        session.history.push(ChatMessage::assistant_text("   \n\t "));
+        assert!(existing_final_text(&session).is_none());
+    }
+
+    /// Surrounding whitespace on a genuine answer is trimmed, not treated
+    /// as part of the delivered result.
+    #[test]
+    fn existing_final_text_trims_surrounding_whitespace() {
+        let mut session = Session::new("s8".to_string());
+        session.history.push(ChatMessage::assistant_text("  done  \n"));
+        let tr = existing_final_text(&session).expect("non-whitespace content must still extract");
+        assert_eq!(tr.text, "done");
     }
 }
