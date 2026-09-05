@@ -270,6 +270,7 @@ mod tests {
             .await
     }
 
+
     #[test]
     fn interrupted_restart_cause_names_hot_switch_not_generic_daemon_restart() {
         assert_eq!(interrupted_restart_cause(true), "a deployment hot-switch restart");

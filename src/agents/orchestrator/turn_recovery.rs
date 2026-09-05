@@ -145,7 +145,7 @@ fn spawn_recovery(
 ) {
     tokio::spawn(async move {
         let _guard = turn_tracker.track();
-        let _turn_guard = session_ctx.turn_lock.lock().await;
+        let _turn_guard = Arc::clone(&session_ctx.turn_lock).lock_owned().await;
         let mut session = Arc::clone(&session_ctx.session).lock_owned().await;
 
         let resolved = ResolvedTurn::resolve(&session, &runtime);
@@ -496,7 +496,7 @@ async fn recover_active_session(
     let session_ctx = ctx.session_context_for(&sk).await;
 
     let text = {
-        let _turn_guard = session_ctx.turn_lock.lock().await;
+        let _turn_guard = Arc::clone(&session_ctx.turn_lock).lock_owned().await;
         let mut session = Arc::clone(&session_ctx.session).lock_owned().await;
         let resolved = ResolvedTurn::resolve(&session, &ctx.runtime);
         let turn_ctx = resolved.turn_context();

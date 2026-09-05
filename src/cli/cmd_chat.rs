@@ -189,7 +189,10 @@ pub async fn run(
             permission_mode: myclaw::PermissionMode::default(),
             run_mode: myclaw::RunMode::default(),
         };
-        match agent_obj.run(&mut session, turn_ctx, &agent_runtime).await {
+        match agent_obj
+            .run(&mut session, turn_ctx, &agent_runtime)
+            .await
+        {
             Ok(result) => println!("{}\n", result.text),
             Err(e) => eprintln!("error: {}\n", e),
         }

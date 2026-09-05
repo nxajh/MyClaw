@@ -527,11 +527,14 @@ impl DelegationCoordinator {
             }
 
             let turn_future = async {
-                let _turn_guard = sub_ctx.turn_lock.lock().await;
+                let _turn_guard = Arc::clone(&sub_ctx.turn_lock).lock_owned().await;
                 let mut session = Arc::clone(&sub_ctx.session).lock_owned().await;
                 let resolved = crate::agents::orchestrator::turn::ResolvedTurn::resolve(&session, &runtime);
                 let turn_ctx = resolved.turn_context();
-                let recovered = sub_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+                let recovered = sub_ctx
+                    .agent
+                    .run_recovery(&mut session, turn_ctx, &runtime)
+                    .await;
                 match recovered {
                     // issue #251: `run_recovery` returning `Ok(None)` means
                     // "no incomplete turn to continue" — which also covers

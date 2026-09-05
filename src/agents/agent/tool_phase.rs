@@ -412,6 +412,7 @@ mod tests {
     use crate::providers::capability_chat::ToolCall;
     use crate::providers::{Tool, ToolResult};
 
+
     /// A tool whose `execute()` never returns within the test's timeout —
     /// stands in for any long-running tool call (delegation, shell, http)
     /// that an outer cancellation (delegation timeout, task abort) can cut
