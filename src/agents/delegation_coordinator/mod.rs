@@ -40,6 +40,7 @@ use tokio::sync::mpsc;
 
 use crate::agents::delegation::{AgentMail, DelegationEvent, DelegationStatus};
 use crate::agents::session::SessionManager;
+use crate::agents::session_context::SessionContext;
 
 use registry::RunningEntry;
 
@@ -112,6 +113,59 @@ pub struct DelegationCoordinator {
     /// necessary: cancelling the delegation's future does not reach the
     /// detached tasks tracking those processes.
     shell_registry: crate::tools::shell::ShellRegistry,
+}
+
+impl DelegationCoordinator {
+    /// issue #260: the live sub-session context for an in-flight delegation,
+    /// if any. Contract W (issue #256) means the sub-agent's turn may be
+    /// physically parked in `park_for_yield`; this accessor is how delegation
+    /// notice routing reaches the parked instance instead of silently
+    /// rebuilding a second one from disk.
+    pub fn live_sub_context(&self, sub_session_id: &str) -> Option<Arc<SessionContext>> {
+        self.running
+            .get(sub_session_id)
+            .map(|entry| Arc::clone(&entry.sub_ctx))
+    }
+
+    /// issue #260: reconcile a delegation whose sub-session just completed a
+    /// notice turn outside the normal completion flow (route_notice's
+    /// non-active fallback). Without this the in-flight entry lingers until
+    /// the wall-clock timer fires, and the parent is woken with a spurious
+    /// "timed out, use agent_resume" even though the work is already done.
+    ///
+    /// No-op when `sub_session_id` has no in-flight entry (the normal
+    /// completion path already removed it — at-most-once semantics).
+    pub fn reconcile_notice_completed(&self, sub_session_id: &str, summary: &str) {
+        let Some((_, entry)) = self.running.remove(sub_session_id) else {
+            return;
+        };
+        let parent_session_id = entry.parent_session_id.clone();
+        let duration_secs = entry.spawned_at.elapsed().as_secs();
+        let sent_message_count = entry
+            .messages_sent
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.mailboxes.remove(sub_session_id);
+        tracing::info!(
+            sub_session_id = %sub_session_id,
+            duration_secs,
+            "issue #260: delegation reconciled as completed by notice fallback turn"
+        );
+        if let Some(tx) = self.event_sender() {
+            let sub_session_id = sub_session_id.to_string();
+            let summary = summary.to_string();
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(DelegationEvent::Completed {
+                        sub_session_id,
+                        parent_session_id,
+                        summary,
+                        duration_secs,
+                        sent_message_count,
+                    })
+                    .await;
+            });
+        }
+    }
 }
 
 /// P1-4: DelegationCoordinator unit tests — depth gating, async spawn

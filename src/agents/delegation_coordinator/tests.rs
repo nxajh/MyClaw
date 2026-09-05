@@ -89,6 +89,61 @@ async fn sync_send_to_parent_records_text_without_broadcast() {
     assert_eq!(stored, vec!["detailed final report"], "progress must be skipped");
 }
 
+/// issue #260 (review finding on #262): reconcile must remove the in-flight
+/// entry, drop the mailbox, and emit `Completed` to the parent with the
+/// notice summary; a second reconcile is a no-op (at-most-once).
+#[tokio::test]
+async fn reconcile_notice_completed_removes_entry_and_emits_completed() {
+    let (dc, manager) = coordinator(3);
+    let parent = manager.get_or_create_context("mock:default:u1");
+    let (tx, mut rx) = mpsc::channel(8);
+    dc.set_event_sender(tx);
+
+    let sub_session_id = "test/s/reconcile-sub".to_string();
+    dc.running.insert(
+        sub_session_id.clone(),
+        RunningEntry {
+            handle: tokio::spawn(async {}),
+            status: std::sync::RwLock::new(DelegationStatus::Running),
+            agent_name: "coder".to_string(),
+            parent_session_id: parent.session_id.clone(),
+            spawned_at: std::time::Instant::now(),
+            messages_sent: std::sync::atomic::AtomicU64::new(0),
+            timeout_secs: Some(60),
+            started_at: chrono::Utc::now(),
+            allowed_tools: None,
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
+        },
+    );
+    // A mailbox must exist so the reconcile is observable as "removed".
+    let (mail_tx, _mail_rx) = mpsc::channel(4);
+    dc.mailboxes.insert(sub_session_id.clone(), mail_tx);
+
+    dc.reconcile_notice_completed(&sub_session_id, "reconciled summary");
+
+    assert!(!dc.running.contains_key(&sub_session_id), "in-flight entry must be removed");
+    assert!(!dc.mailboxes.contains_key(&sub_session_id), "mailbox must be removed");
+
+    let event = rx.recv().await.expect("Completed event must be emitted");
+    match event {
+        DelegationEvent::Completed {
+            sub_session_id: sid,
+            parent_session_id: pid,
+            summary,
+            ..
+        } => {
+            assert_eq!(sid, sub_session_id);
+            assert_eq!(pid, parent.session_id, "Completed must be routed to the parent");
+            assert_eq!(summary, "reconciled summary");
+        }
+        _ => panic!("expected DelegationEvent::Completed"),
+    }
+
+    // At-most-once: reconciling an already-removed entry emits nothing.
+    dc.reconcile_notice_completed(&sub_session_id, "again");
+    assert!(rx.try_recv().is_err(), "second reconcile must be a no-op");
+}
+
 #[tokio::test]
 async fn async_send_to_parent_broadcasts_and_counts() {
     let (dc, manager) = coordinator(3);
@@ -103,6 +158,7 @@ async fn async_send_to_parent_broadcasts_and_counts() {
         sub_session_id.clone(),
         RunningEntry {
             handle: tokio::spawn(async {}),
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: parent.session_id.clone(),
@@ -326,6 +382,7 @@ async fn resume_timed_out_rewrites_checkpoint_and_rearms_parent() {
         sub.id.clone(),
         RunningEntry {
             handle: tokio::spawn(async {}),
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: parent.session_id.clone(),
@@ -554,6 +611,7 @@ async fn cancel_broadcasts_failed_cancelled_to_parent_session() {
         sub_session_id.clone(),
         RunningEntry {
             handle: tokio::spawn(async {}),
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: parent.session_id.clone(),
@@ -689,6 +747,7 @@ async fn checkpoint_and_cancel_all_empties_running_and_writes_checkpoints() {
         sub_session_id.clone(),
         RunningEntry {
             handle: tokio::spawn(async {}),
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: "parent".to_string(),
@@ -902,6 +961,7 @@ async fn panic_in_inner_task_emits_failed_and_cleans_running() {
         sub_session_id.clone(),
         RunningEntry {
             handle,
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: parent.session_id.clone(),
@@ -963,6 +1023,7 @@ async fn checkpoint_fallback_uses_running_entry_timeout_and_started_at() {
         sub_session_id.clone(),
         RunningEntry {
             handle: tokio::spawn(async {}),
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: "parent".to_string(),

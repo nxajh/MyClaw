@@ -580,11 +580,31 @@ impl SessionContext {
     /// whether a yield is currently outstanding — `try_fill_pending_yield`
     /// is what actually consumes the queue.
     pub fn enqueue_pending_yield_event(&self, event: PendingYieldEvent) {
+        // issue #260 (observability): the delivery-path probe in the issue's
+        // acceptance run was defeated by journal self-matching — make the
+        // enqueue leg directly visible instead. `info!` deliberately: this is
+        // a low-frequency event and the whole point is journal visibility at
+        // the default log level (review finding on #262).
+        tracing::info!(
+            content_len = event.content.len(),
+            "pending yield event enqueued"
+        );
         self.pending_yield_events
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(event);
         self.persist_pending_yield_events();
+    }
+
+    /// issue #260: true while a `sessions_yield` is live-parked in
+    /// `park_for_yield` (a waiter is registered for it). Delegation notice
+    /// routing consults this to deliver into the parked yield instead of
+    /// spawning a competing non-active turn (double-live instance bug).
+    pub(crate) fn has_live_yield_waiter(&self) -> bool {
+        self.yield_waiter
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     /// issue #238: take the whole queue (FIFO order) for one fill. Events
@@ -722,6 +742,14 @@ impl SessionContext {
             tool_call_id: tool_call_id.clone(),
             tx,
         });
+        // issue #260 (observability): same rationale as the enqueue tracing —
+        // this line is the difference between "parked, live-wake armed" and
+        // "fast path" being evidence instead of inference. `info!` per the
+        // #262 review: low-frequency, must be visible at default log level.
+        tracing::info!(
+            tool_call_id = %tool_call_id,
+            "sessions_yield parked, yield waiter registered"
+        );
 
         drop(turn_guard);
         drop(session);

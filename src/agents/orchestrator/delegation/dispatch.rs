@@ -263,6 +263,9 @@ pub(crate) async fn process_non_active(
     // P2: keep the notice id + store handle for the post-turn delivery mark.
     let notice_id_owned = notice_id.clone();
     let completion_queue = ctx.completion_queue.clone();
+    // issue #260: delegate handle for post-turn lifecycle reconciliation.
+    let delegator = ctx.delegator.clone();
+    let content_for_reconcile = content_owned.clone();
 
     // 单 preview (2026-08-12): any delegation notice (silenced or loud) is
     // part of the suspension sequence — count it in-flight before the spawn
@@ -289,6 +292,15 @@ pub(crate) async fn process_non_active(
         match session_ctx.process_turn(synthetic, None, runtime).await {
             Ok(_) => {
                 tracing::info!(session_id = %session_id_owned, "non-active delegation turn completed");
+                // issue #260: this turn may be the one that actually finished
+                // the sub-agent's work (route_notice's non-active fallback).
+                // Reconcile the delegation lifecycle so the in-flight entry
+                // doesn't linger until the wall-clock timer fires and the
+                // parent receives a spurious "timed out, use agent_resume"
+                // for work that is already done.
+                if let Some(d) = &delegator {
+                    d.reconcile_notice_completed(&session_id_owned, &content_for_reconcile);
+                }
                 // P2 (RFC §5.3): content persisted to history — mark the
                 // stored entry delivered (drop the file) so a restart does
                 // not re-deliver it. On Err the entry stays Pending

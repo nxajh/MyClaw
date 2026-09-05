@@ -136,6 +136,11 @@ impl DelegationCoordinator {
         let (sub_ctx, sub_session_id) = self
             .session_manager
             .create_sub_session_context(parent_session_id, &config.name)?;
+        // issue #260: keep a registry-owned Arc — sub_ctx itself is moved
+        // into the delegation task below, but notice routing must be able to
+        // find the live (possibly contract-W parked) instance while the
+        // delegation is in flight.
+        let sub_ctx_for_registry = std::sync::Arc::clone(&sub_ctx);
 
         // 方案 C (docs/turn-suspension-rfc.md): register the task against the
         // parent's registered SessionContext so the running turn knows to
@@ -369,6 +374,7 @@ impl DelegationCoordinator {
                 timeout_secs: Some(timeout_secs),
                 started_at: chrono::Utc::now(),
                 allowed_tools: allowed_tools_entry,
+                sub_ctx: sub_ctx_for_registry,
             },
         );
         Ok(sub_session_id)
@@ -511,6 +517,7 @@ impl DelegationCoordinator {
 
         let agent_name_clone = agent_name.clone();
         let allowed_tools_entry = allowed_tools.clone();
+        let sub_ctx_for_registry = std::sync::Arc::clone(&sub_ctx);
         let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
 
@@ -623,6 +630,7 @@ impl DelegationCoordinator {
                 timeout_secs: Some(timeout_secs),
                 started_at: chrono::Utc::now(),
                 allowed_tools: allowed_tools_entry,
+                sub_ctx: sub_ctx_for_registry,
             },
         );
     }
