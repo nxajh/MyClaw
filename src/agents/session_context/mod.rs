@@ -1027,6 +1027,52 @@ impl SessionContext {
             None => runtime.build_system_prompt(&prompt_config),
         };
 
+        // issue #248: a plain-text user interjection while a `sessions_yield`
+        // is still pending closes that yield's tool_result instead of
+        // wrapping the interjection in a new `[user]` message — the natural
+        // protocol position for "the wait was interrupted", and it sidesteps
+        // the tool_call → user adjacency problem `session_override.rs`'s
+        // placeholder patches. `add_tool_result` is text-only, so a message
+        // carrying media falls through to the ordinary path below unchanged
+        // (known simplification, same spirit as `resume_after_yield`'s own
+        // disclosed gaps).
+        if media_parts.is_empty() {
+            if let Some(pending) = session.pending_yield.take() {
+                let closing_content =
+                    format!("The user interrupted the wait and said: {}", content);
+                session.add_tool_result(
+                    pending.tool_call_id,
+                    "sessions_yield",
+                    closing_content,
+                    false,
+                );
+                session.persist_last();
+
+                let thinking = session_override.to_thinking_config();
+                let model_id = session_override.model.as_deref();
+                let turn_ctx = TurnContext {
+                    system_prompt: &system_prompt,
+                    model_id,
+                    thinking: thinking.as_ref(),
+                    permission_mode: prompt_config.permission_mode,
+                    run_mode: prompt_config.run_mode,
+                };
+
+                return self
+                    .run_and_deliver(
+                        &mut session,
+                        turn_ctx,
+                        &runtime,
+                        channel_for_send,
+                        reply_target,
+                        silenced,
+                        notice_guard,
+                        persist_hook,
+                    )
+                    .await;
+            }
+        }
+
         // RFC §三.A line 312-323: process_turn computes the attachment
         // delta (skills/agents/MCP/memory/date/autonomy) against the
         // history's announced state and prepends a <system-reminder> to
@@ -1834,5 +1880,167 @@ mod pending_yield_tests {
             ctx2.take_pending_yield_events().is_empty(),
             "a delivered event must not come back after a restart"
         );
+    }
+}
+
+/// issue #248: a plain-text user interjection while a `sessions_yield` is
+/// still pending must close that yield's tool_result instead of appending a
+/// new `[user]` message. `process_turn` is called end-to-end with a bailing
+/// provider (`agent.run` returns Err quickly) — irrelevant here since the
+/// closing logic runs, and mutates history, BEFORE `run_and_deliver` ever
+/// calls the provider.
+#[cfg(test)]
+mod yield_interjection_tests {
+    use super::*;
+    use crate::agents::SessionManager;
+    use crate::agents::session::PendingYield;
+    use crate::api::message::{
+        ChannelFile, ChannelFileMeta, ChannelMessageContent, LocalFileBody, MessageReceiver,
+        MessageSender,
+    };
+
+    fn make_ctx() -> Arc<SessionContext> {
+        let manager = Arc::new(SessionManager::in_memory());
+        manager.get_or_create_context("mock:default:u1")
+    }
+
+    fn bailing_runtime() -> AgentRuntime {
+        crate::agents::agent::tests::bailing_runtime()
+    }
+
+    fn inbound(content: &str, files: Vec<ChannelFile>) -> ChannelInboundMessage {
+        ChannelInboundMessage {
+            id: "m1".to_string(),
+            sender: MessageSender::new("u1".to_string()),
+            receiver: MessageReceiver::new("u1".to_string()),
+            content: ChannelMessageContent {
+                text: content.to_string(),
+                files,
+                buttons: vec![],
+            },
+            timestamp: 0,
+            interruption_scope_id: None,
+            silenced_override: None,
+            run_mode: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn interjection_closes_pending_yield_instead_of_adding_a_user_message() {
+        let ctx = make_ctx();
+        {
+            let mut session = ctx.session.lock().await;
+            session.pending_yield = Some(PendingYield {
+                tool_call_id: "call_y1".to_string(),
+                implicit: false,
+            });
+        }
+
+        let _ = ctx
+            .process_turn(inbound("怎么样了？", vec![]), None, bailing_runtime())
+            .await;
+
+        let session = ctx.session.lock().await;
+        assert!(
+            session.pending_yield.is_none(),
+            "the interjection must close the pending yield"
+        );
+        assert!(
+            !session.history.iter().any(|m| m.role == "user"),
+            "must not also add a [user] message for the same interjection"
+        );
+        let filled: Vec<_> = session
+            .history
+            .iter()
+            .filter(|m| m.tool_call_id.as_deref() == Some("call_y1"))
+            .collect();
+        assert_eq!(filled.len(), 1, "must close exactly the pending tool_call");
+        assert_eq!(filled[0].role, "tool");
+        assert_eq!(filled[0].name.as_deref(), Some("sessions_yield"));
+        assert_eq!(filled[0].is_error, Some(false));
+        let text = filled[0]
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                crate::providers::ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(
+            text, "The user interrupted the wait and said: 怎么样了？",
+            "got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_pending_yield_takes_the_ordinary_user_message_path() {
+        let ctx = make_ctx();
+
+        let _ = ctx
+            .process_turn(inbound("hello", vec![]), None, bailing_runtime())
+            .await;
+
+        let session = ctx.session.lock().await;
+        assert!(
+            session.history.iter().any(|m| m.role == "user"),
+            "with no pending yield, an ordinary [user] message must still be added"
+        );
+        assert!(
+            !session.history.iter().any(|m| m.tool_call_id.is_some()),
+            "no tool_result should be synthesized when there was nothing to close"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_carrying_interjection_falls_through_to_the_ordinary_path() {
+        let ctx = make_ctx();
+        {
+            let mut session = ctx.session.lock().await;
+            session.pending_yield = Some(PendingYield {
+                tool_call_id: "call_y2".to_string(),
+                implicit: false,
+            });
+        }
+
+        let tmp = std::env::temp_dir().join(format!("myclaw-test-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, b"hello").unwrap();
+        let file = ChannelFile {
+            meta: ChannelFileMeta {
+                file_name: "note.txt".to_string(),
+                mime_type: Some("text/plain".to_string()),
+                size_bytes: Some(5),
+                source_url: None,
+            },
+            body: Arc::new(LocalFileBody::new(tmp.clone())),
+        };
+
+        let _ = ctx
+            .process_turn(inbound("看这个文件", vec![file]), None, bailing_runtime())
+            .await;
+        let _ = std::fs::remove_file(&tmp);
+
+        let session = ctx.session.lock().await;
+        assert!(
+            session.pending_yield.is_some(),
+            "add_tool_result is text-only — a media-carrying interjection must NOT close the \
+             yield (known simplification, same as resume_after_yield's own disclosed gaps)"
+        );
+        assert!(
+            session.history.iter().any(|m| m.role == "user"),
+            "falls through to the ordinary add_user_with_media path"
+        );
+        assert!(!session.history.iter().any(|m| m.tool_call_id.is_some()));
+
+        // InMemoryBackend::save_session_file (agents/session/backend.rs)
+        // deliberately writes attached files to real disk under
+        // `<cwd>/sessions/<id>/` even for the "in-memory" test backend —
+        // clean up the directory this test caused it to create.
+        let session_dir = std::env::current_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join("sessions")
+            .join(crate::ids::bare_dir_name(&session.id));
+        drop(session);
+        let _ = std::fs::remove_dir_all(&session_dir);
     }
 }
