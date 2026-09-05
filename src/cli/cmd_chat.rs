@@ -127,9 +127,6 @@ pub async fn run(
         session_key.to_string(),
     )));
     let mut session = session.lock_owned().await;
-    let mut turn_guard = std::sync::Arc::new(tokio::sync::Mutex::new(()))
-        .lock_owned()
-        .await;
 
     // #101 P2: CLI identity — required `--user` (shared helper with
     // `exec`, see `cli::resolve_cli_identity`). Same FQID shape as
@@ -149,7 +146,7 @@ pub async fn run(
             run_mode: myclaw::RunMode::default(),
         };
         let result = agent_obj
-            .run(&mut session, &mut turn_guard, turn_ctx, &agent_runtime)
+            .run(&mut session, turn_ctx, &agent_runtime)
             .await?;
         println!("{}", result.text);
         return Ok(());
@@ -193,7 +190,7 @@ pub async fn run(
             run_mode: myclaw::RunMode::default(),
         };
         match agent_obj
-            .run(&mut session, &mut turn_guard, turn_ctx, &agent_runtime)
+            .run(&mut session, turn_ctx, &agent_runtime)
             .await
         {
             Ok(result) => println!("{}\n", result.text),

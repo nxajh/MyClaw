@@ -89,17 +89,13 @@ impl Agent {
     pub async fn run(
         &self,
         session: &mut OwnedMutexGuard<Session>,
-        turn_guard: &mut OwnedMutexGuard<()>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
     ) -> Result<TurnResult> {
-        if let Some(tr) = self
-            .run_recovery(session, turn_guard, turn_ctx.clone(), runtime)
-            .await?
-        {
+        if let Some(tr) = self.run_recovery(session, turn_ctx.clone(), runtime).await? {
             return Ok(tr);
         }
-        self.run_inner(session, turn_guard, turn_ctx, runtime).await
+        self.run_inner(session, turn_ctx, runtime).await
     }
 
     /// The raw LLM ↔ tool loop (no recovery pre-check). Called by [`Self::run`]
@@ -109,7 +105,6 @@ impl Agent {
     async fn run_inner(
         &self,
         session: &mut OwnedMutexGuard<Session>,
-        turn_guard: &mut OwnedMutexGuard<()>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
     ) -> Result<TurnResult> {
@@ -347,7 +342,6 @@ impl Agent {
             match self
                 .execute_tool_batch(
                     session,
-                    turn_guard,
                     &response,
                     &mut messages,
                     runtime,

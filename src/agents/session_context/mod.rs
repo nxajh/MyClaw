@@ -855,7 +855,7 @@ impl SessionContext {
         channel: Option<Arc<dyn Channel>>,
         runtime: AgentRuntime,
     ) -> anyhow::Result<TurnResult> {
-        let mut turn_guard = Arc::clone(&self.turn_lock).lock_owned().await;
+        let turn_guard = Arc::clone(&self.turn_lock).lock_owned().await;
         let mut session = Arc::clone(&self.session).lock_owned().await;
 
         let content = crate::str_utils::neutralize_spoofing(&inbound_msg.content.text);
@@ -1081,8 +1081,8 @@ impl SessionContext {
 
                 return self
                     .run_and_deliver(
-                        &mut session,
-                        &mut turn_guard,
+                        session,
+                        turn_guard,
                         turn_ctx,
                         &runtime,
                         channel_for_send,
@@ -1266,8 +1266,8 @@ impl SessionContext {
         };
 
         self.run_and_deliver(
-            &mut session,
-            &mut turn_guard,
+            session,
+            turn_guard,
             turn_ctx,
             &runtime,
             channel_for_send,
@@ -1290,8 +1290,15 @@ impl SessionContext {
     #[allow(clippy::too_many_arguments)]
     async fn run_and_deliver(
         self: &Arc<Self>,
-        session: &mut OwnedMutexGuard<Session>,
-        turn_guard: &mut OwnedMutexGuard<()>,
+        mut session: OwnedMutexGuard<Session>,
+        // Phase 2a (issue #256): owned (not borrowed) so this frame — the
+        // only one that will ever need to — can `drop` it and reacquire a
+        // fresh one around the Phase 2b sessions_yield park. `&mut
+        // OwnedMutexGuard<_>` cannot do that (nothing to move it out into;
+        // `OwnedMutexGuard` has no `Default` for `mem::take`, and
+        // `try_lock_owned` would deadlock against the guard's own hold).
+        // Unused until Phase 2b.
+        _turn_guard: OwnedMutexGuard<()>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
         channel_for_send: Option<Arc<dyn Channel>>,
@@ -1309,7 +1316,7 @@ impl SessionContext {
             }
         }
 
-        let result = self.agent.run(session, turn_guard, turn_ctx, runtime).await;
+        let result = self.agent.run(&mut session, turn_ctx, runtime).await;
         // Per-turn turn_stream is transient. Consume the stream first
         // (RFC §7.6): finish on success delivers FinalDelivered; abort on
         // error cancels the WS transport.
@@ -1398,7 +1405,7 @@ impl SessionContext {
                 // never successfully processed the request, so we want the
                 // media to remain inline for the retry / compaction path.
                 if turn_result.stop_reason != crate::providers::StopReason::ContextOverflow {
-                    age_session_media(session, persist_hook.as_deref());
+                    age_session_media(&mut session, persist_hook.as_deref());
                 }
 
                 if let Some(ref retry_msg) = turn_result.pending_retry {
@@ -1671,7 +1678,7 @@ impl SessionContext {
         self: &Arc<Self>,
         runtime: AgentRuntime,
     ) -> anyhow::Result<TurnResult> {
-        let mut turn_guard = Arc::clone(&self.turn_lock).lock_owned().await;
+        let turn_guard = Arc::clone(&self.turn_lock).lock_owned().await;
         let mut session = Arc::clone(&self.session).lock_owned().await;
 
         let persist_hook = session.persist.clone();
@@ -1710,8 +1717,8 @@ impl SessionContext {
         let notice_guard = NoticeTurnGuard::new(self, false);
 
         self.run_and_deliver(
-            &mut session,
-            &mut turn_guard,
+            session,
+            turn_guard,
             turn_ctx,
             &runtime,
             channel_for_send,

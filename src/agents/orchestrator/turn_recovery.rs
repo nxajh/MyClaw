@@ -145,7 +145,7 @@ fn spawn_recovery(
 ) {
     tokio::spawn(async move {
         let _guard = turn_tracker.track();
-        let mut turn_guard = Arc::clone(&session_ctx.turn_lock).lock_owned().await;
+        let _turn_guard = Arc::clone(&session_ctx.turn_lock).lock_owned().await;
         let mut session = Arc::clone(&session_ctx.session).lock_owned().await;
 
         let resolved = ResolvedTurn::resolve(&session, &runtime);
@@ -153,7 +153,7 @@ fn spawn_recovery(
 
         match session_ctx
             .agent
-            .run_recovery(&mut session, &mut turn_guard, turn_ctx, &runtime)
+            .run_recovery(&mut session, turn_ctx, &runtime)
             .await
         {
             Ok(Some(tr)) if !tr.text.is_empty() => {
@@ -496,13 +496,13 @@ async fn recover_active_session(
     let session_ctx = ctx.session_context_for(&sk).await;
 
     let text = {
-        let mut turn_guard = Arc::clone(&session_ctx.turn_lock).lock_owned().await;
+        let _turn_guard = Arc::clone(&session_ctx.turn_lock).lock_owned().await;
         let mut session = Arc::clone(&session_ctx.session).lock_owned().await;
         let resolved = ResolvedTurn::resolve(&session, &ctx.runtime);
         let turn_ctx = resolved.turn_context();
         let result = session_ctx
             .agent
-            .run_recovery(&mut session, &mut turn_guard, turn_ctx, &ctx.runtime)
+            .run_recovery(&mut session, turn_ctx, &ctx.runtime)
             .await;
         session.incomplete_turn = false;
         // Stash `pending_retry` while the session lock is held (same pattern
