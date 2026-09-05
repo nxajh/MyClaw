@@ -157,10 +157,37 @@ pub(crate) struct YieldWaiter {
 }
 
 /// issue #238: see `SessionContext::pending_yield_events`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PendingYieldEvent {
     pub content: String,
+    /// issue #255: enqueue timestamp (unix seconds). `0` = legacy event from
+    /// a pre-timestamp queue file — treated as expired at fill time (the
+    /// whole point is collapsing old backlog, so pre-upgrade stragglers fold
+    /// into the summary line instead of dumping full content).
+    #[serde(default)]
+    pub enqueued_at: u64,
 }
+
+impl PendingYieldEvent {
+    /// issue #255: a freshly produced event, stamped for expiry accounting.
+    pub fn fresh(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            enqueued_at: chrono::Utc::now().timestamp().max(0) as u64,
+        }
+    }
+}
+
+/// issue #255: events older than this are stale — collapsed into a one-line
+/// backlog summary at fill time instead of being delivered as full content.
+/// Rationale: a bg-shell notice is only actionable while its session turn is
+/// still waiting; days-old notices were already handled by their own timeout
+/// machinery.
+const PENDING_YIELD_EXPIRY_SECS: u64 = 24 * 3600;
+/// issue #255: at most this many fresh events merge into one fill; overflow
+/// stays queued (FIFO, original timestamps preserved) for the next fill, so
+/// an extreme backlog cannot produce a token-limit-busting tool_result.
+const PENDING_YIELD_FILL_LIMIT: usize = 20;
 
 /// issue #238: render the accumulated queue as ONE combined tool_result —
 /// batched, not delivered one at a time (the #238 discussion rejected
@@ -607,6 +634,54 @@ impl SessionContext {
             .is_some()
     }
 
+    /// issue #255: drain the queue for one fill, with expiry folding and a
+    /// FIFO fill limit.
+    ///
+    /// - Events older than `PENDING_YIELD_EXPIRY_SECS` (or without a
+    ///   timestamp) are collapsed into a single trailing summary line.
+    /// - At most `PENDING_YIELD_FILL_LIMIT` fresh events merge; overflow is
+    ///   re-queued (original timestamps preserved) for the next fill.
+    ///
+    /// Returns `None` when the queue held nothing at all — the caller keeps
+    /// its `pending_yield` untouched.
+    fn drain_pending_yield_for_fill(&self) -> Option<String> {
+        let events = self.take_pending_yield_events();
+        if events.is_empty() {
+            return None;
+        }
+        let now = chrono::Utc::now().timestamp().max(0) as u64;
+        let (mut fresh, mut expired) = (Vec::new(), Vec::new());
+        for event in events {
+            let stale = event.enqueued_at == 0
+                || now.saturating_sub(event.enqueued_at) > PENDING_YIELD_EXPIRY_SECS;
+            if stale {
+                expired.push(event);
+            } else {
+                fresh.push(event);
+            }
+        }
+        if fresh.len() > PENDING_YIELD_FILL_LIMIT {
+            for event in fresh.split_off(PENDING_YIELD_FILL_LIMIT) {
+                self.enqueue_pending_yield_event(event);
+            }
+        }
+        let mut content = if fresh.is_empty() {
+            String::new()
+        } else {
+            format_pending_yield_events(&fresh)
+        };
+        if !expired.is_empty() {
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(&format!(
+                "（另有 {} 条过期通知已折叠，不再展开）",
+                expired.len()
+            ));
+        }
+        Some(content)
+    }
+
     /// issue #238: take the whole queue (FIFO order) for one fill. Events
     /// enqueued DURING the fill stay for the next one. issue #240: the
     /// queue is empty on disk either way once this returns (whether the
@@ -658,37 +733,37 @@ impl SessionContext {
                 .as_ref()
                 .is_some_and(|w| w.tool_call_id == pending.tool_call_id);
             if has_live_waiter {
-                let events = self.take_pending_yield_events();
-                if events.is_empty() {
-                    session.pending_yield = Some(pending);
-                    return;
-                }
-                let waiter = self
-                    .yield_waiter
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                session.pending_yield = Some(pending);
-                if let Some(waiter) = waiter {
-                    let content = format_pending_yield_events(&events);
-                    let _ = waiter.tx.send(content);
-                } else {
-                    // Raced with the waiter being taken/cancelled between
-                    // the check above and here — fall back to persisting
-                    // the events for whoever looks next (restart-safe
-                    // path); nothing was consumed.
-                    for event in events {
-                        self.enqueue_pending_yield_event(event);
+                // issue #255: drain with expiry folding + FIFO fill limit.
+                match self.drain_pending_yield_for_fill() {
+                    Some(content) => {
+                        let waiter = self
+                            .yield_waiter
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .take();
+                        session.pending_yield = Some(pending);
+                        if let Some(waiter) = waiter {
+                            let _ = waiter.tx.send(content);
+                        } else {
+                            // Raced with the waiter being taken/cancelled between
+                            // the check above and here — fall back to persisting
+                            // the events for whoever looks next (restart-safe
+                            // path); nothing was consumed.
+                            self.enqueue_pending_yield_event(PendingYieldEvent::fresh(content));
+                        }
+                        return;
+                    }
+                    None => {
+                        session.pending_yield = Some(pending);
+                        return;
                     }
                 }
-                return;
             }
-            let events = self.take_pending_yield_events();
-            if events.is_empty() {
+            // issue #255: same drain contract for the cold (non-parked) path.
+            let Some(content) = self.drain_pending_yield_for_fill() else {
                 session.pending_yield = Some(pending);
                 return;
-            }
-            let content = format_pending_yield_events(&events);
+            };
             session.add_tool_result(pending.tool_call_id, "sessions_yield", content, false);
             session.persist_last();
             true
@@ -724,9 +799,8 @@ impl SessionContext {
     ) -> (OwnedMutexGuard<Session>, OwnedMutexGuard<()>, bool) {
         // Fast path: something may already be queued (issue #238's original
         // race — the event arrived before the yield did). No park needed.
-        let queued = self.take_pending_yield_events();
-        if !queued.is_empty() {
-            let content = format_pending_yield_events(&queued);
+        // issue #255: fast path drains with the same expiry/limit contract.
+        if let Some(content) = self.drain_pending_yield_for_fill() {
             session.pending_yield = None;
             session.add_tool_result(tool_call_id, "sessions_yield", content, false);
             session.persist_last();
@@ -783,7 +857,7 @@ impl SessionContext {
             // than silently dropping it: whatever superseded us (or its
             // own next sessions_yield) will pick it up via the same
             // fast-path queue check this function starts with.
-            self.enqueue_pending_yield_event(PendingYieldEvent { content });
+            self.enqueue_pending_yield_event(PendingYieldEvent::fresh(content));
             return (session, turn_guard, false);
         }
         session.pending_yield = None;
@@ -1981,9 +2055,7 @@ mod pending_yield_tests {
     #[tokio::test]
     async fn noop_without_a_pending_yield() {
         let ctx = make_ctx();
-        ctx.enqueue_pending_yield_event(PendingYieldEvent {
-            content: "sub-agent A done".to_string(),
-        });
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("sub-agent A done".to_string()));
 
         ctx.try_fill_pending_yield(bailing_runtime()).await;
 
@@ -2030,12 +2102,8 @@ mod pending_yield_tests {
                 implicit: false,
             });
         }
-        ctx.enqueue_pending_yield_event(PendingYieldEvent {
-            content: "sub-agent A done: result A".to_string(),
-        });
-        ctx.enqueue_pending_yield_event(PendingYieldEvent {
-            content: "sub-agent B done: result B".to_string(),
-        });
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("sub-agent A done: result A".to_string()));
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("sub-agent B done: result B".to_string()));
 
         ctx.try_fill_pending_yield(bailing_runtime()).await;
 
@@ -2073,9 +2141,7 @@ mod pending_yield_tests {
     async fn enqueued_event_survives_restart() {
         let manager = Arc::new(SessionManager::in_memory());
         let ctx = manager.get_or_create_context("mock:default:u1");
-        ctx.enqueue_pending_yield_event(PendingYieldEvent {
-            content: "sub-agent A done".to_string(),
-        });
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("sub-agent A done".to_string()));
 
         manager.drop_context("mock:default:u1");
         let ctx2 = manager.get_or_create_context("mock:default:u1");
@@ -2092,12 +2158,8 @@ mod pending_yield_tests {
     async fn multiple_queued_events_survive_restart_in_order() {
         let manager = Arc::new(SessionManager::in_memory());
         let ctx = manager.get_or_create_context("mock:default:u1");
-        ctx.enqueue_pending_yield_event(PendingYieldEvent {
-            content: "first".to_string(),
-        });
-        ctx.enqueue_pending_yield_event(PendingYieldEvent {
-            content: "second".to_string(),
-        });
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("first".to_string()));
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("second".to_string()));
 
         manager.drop_context("mock:default:u1");
         let ctx2 = manager.get_or_create_context("mock:default:u1");
@@ -2121,9 +2183,7 @@ mod pending_yield_tests {
                 implicit: false,
             });
         }
-        ctx.enqueue_pending_yield_event(PendingYieldEvent {
-            content: "sub-agent A done".to_string(),
-        });
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("sub-agent A done".to_string()));
         ctx.try_fill_pending_yield(bailing_runtime()).await;
 
         manager.drop_context("mock:default:u1");
@@ -2165,9 +2225,7 @@ mod park_for_yield_tests {
     #[tokio::test]
     async fn fast_path_delivers_from_an_already_queued_event() {
         let ctx = make_ctx();
-        ctx.enqueue_pending_yield_event(PendingYieldEvent {
-            content: "sub-agent A done".to_string(),
-        });
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("sub-agent A done".to_string()));
         let (mut session, turn_guard) = guards(&ctx).await;
         session.pending_yield = Some(PendingYield {
             tool_call_id: "call_fast".to_string(),
@@ -2233,9 +2291,7 @@ mod park_for_yield_tests {
             "park_for_yield must register a waiter when nothing is queued yet"
         );
 
-        ctx.enqueue_pending_yield_event(PendingYieldEvent {
-            content: "sub-agent B done".to_string(),
-        });
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("sub-agent B done".to_string()));
         ctx.try_fill_pending_yield(crate::agents::agent::tests::bailing_runtime())
             .await;
 

@@ -345,9 +345,7 @@ mod tests {
         ctx.sessions.append_message(&sid, ChatMessage::user_text("do the async thing"));
         ctx.sessions
             .append_message(&sid, assistant_with_tool_call("call_y1", "sessions_yield"));
-        sctx.enqueue_pending_yield_event(PendingYieldEvent {
-            content: "sub-agent finished while the daemon was down".to_string(),
-        });
+        sctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("sub-agent finished while the daemon was down".to_string()));
         ctx.sessions.drop_context("mock:default:u1");
 
         // The call under test — no explicit try_fill_pending_yield call
