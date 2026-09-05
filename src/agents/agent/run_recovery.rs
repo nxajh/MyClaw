@@ -351,7 +351,8 @@ mod tests {
         std::fs::write(marker_dir.join(".exec_marker"), call_id).unwrap();
         write_shell_entry(tmp.path(), session_id, "sh_lost", "lost_on_restart");
 
-        let mut session = owned(session_with_orphan_shell_call(session_id, call_id)).await;
+        let mut session = Some(owned(session_with_orphan_shell_call(session_id, call_id)).await);
+        let mut turn_guard_slot = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())).lock_owned().await);
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -366,7 +367,7 @@ mod tests {
         // run_inner hits the stub registry and errors — recovery's own
         // synthesized tool result is appended to `session.history` before
         // that happens, which is what this test inspects.
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
         let tool_msg = session
             .history
@@ -413,7 +414,8 @@ mod tests {
             None,
             None,
         );
-        let mut session = owned(session).await;
+        let mut session = Some(owned(session).await);
+        let mut turn_guard_slot = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())).lock_owned().await);
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -425,7 +427,7 @@ mod tests {
             yield_park: None,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
         let tool_msg = session
             .history
@@ -458,7 +460,8 @@ mod tests {
         let call_id = "call_no_marker";
 
         // Deliberately no `.exec_marker` file written at all.
-        let mut session = owned(session_with_orphan_shell_call(session_id, call_id)).await;
+        let mut session = Some(owned(session_with_orphan_shell_call(session_id, call_id)).await);
+        let mut turn_guard_slot = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())).lock_owned().await);
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -470,7 +473,7 @@ mod tests {
             yield_park: None,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
         let tool_msg = session
             .history
@@ -501,7 +504,8 @@ mod tests {
         std::fs::create_dir_all(&marker_dir).unwrap();
         std::fs::write(marker_dir.join(".exec_marker"), "call_some_other_stale_id").unwrap();
 
-        let mut session = owned(session_with_orphan_shell_call(session_id, call_id)).await;
+        let mut session = Some(owned(session_with_orphan_shell_call(session_id, call_id)).await);
+        let mut turn_guard_slot = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())).lock_owned().await);
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -513,7 +517,7 @@ mod tests {
             yield_park: None,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
         let tool_msg = session
             .history
@@ -545,7 +549,8 @@ mod tests {
         std::fs::create_dir_all(&marker_dir).unwrap();
         std::fs::write(marker_dir.join(".exec_marker"), "call_some_other_stale_id").unwrap();
 
-        let mut session = owned(session_with_orphan_shell_call(session_id, call_id)).await;
+        let mut session = Some(owned(session_with_orphan_shell_call(session_id, call_id)).await);
+        let mut turn_guard_slot = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())).lock_owned().await);
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -557,7 +562,7 @@ mod tests {
             yield_park: None,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
         assert_eq!(
             std::fs::read_to_string(marker_dir.join(".exec_marker")).ok(),
@@ -580,7 +585,8 @@ mod tests {
         std::fs::create_dir_all(&marker_dir).unwrap();
         std::fs::write(marker_dir.join(".exec_marker"), call_id).unwrap();
 
-        let mut session = owned(session_with_orphan_shell_call(session_id, call_id)).await;
+        let mut session = Some(owned(session_with_orphan_shell_call(session_id, call_id)).await);
+        let mut turn_guard_slot = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())).lock_owned().await);
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -592,7 +598,7 @@ mod tests {
             yield_park: None,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
         assert!(
             std::fs::read_to_string(marker_dir.join(".exec_marker")).is_err(),
@@ -633,7 +639,8 @@ mod tests {
             tool_call_id: call_id.to_string(),
             implicit: false,
         });
-        let mut session = owned(session).await;
+        let mut session = Some(owned(session).await);
+        let mut turn_guard_slot = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())).lock_owned().await);
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime();
         let turn_ctx = TurnContext {
@@ -645,7 +652,7 @@ mod tests {
             yield_park: None,
         };
 
-        let result = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let result = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
         assert!(
             matches!(result, Ok(None)),
@@ -659,7 +666,7 @@ mod tests {
             "must not synthesize a tool_result for a deliberately deferred yield"
         );
         assert!(
-            session.pending_yield.is_some(),
+            session.as_ref().unwrap().pending_yield.is_some(),
             "pending_yield must survive recovery untouched, ready for a real delivery"
         );
     }
@@ -673,7 +680,8 @@ mod tests {
     async fn sessions_yield_without_matching_pending_yield_falls_back_to_generic_case_a() {
         let session_id = "sess-yield-no-pending";
         let call_id = "call_y2";
-        let mut session = owned(session_with_orphan_sessions_yield(session_id, call_id)).await;
+        let mut session = Some(owned(session_with_orphan_sessions_yield(session_id, call_id)).await);
+        let mut turn_guard_slot = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())).lock_owned().await);
         // Deliberately no `session.pending_yield` set.
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime();
@@ -686,7 +694,7 @@ mod tests {
             yield_park: None,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
         let tool_msg = session
             .history
