@@ -157,7 +157,7 @@ pub(crate) struct YieldWaiter {
 }
 
 /// issue #238: see `SessionContext::pending_yield_events`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PendingYieldEvent {
     pub content: String,
     /// issue #255: enqueue timestamp (unix seconds). `0` = legacy event from
@@ -166,15 +166,6 @@ pub struct PendingYieldEvent {
     /// into the summary line instead of dumping full content).
     #[serde(default)]
     pub enqueued_at: u64,
-}
-
-impl Default for PendingYieldEvent {
-    fn default() -> Self {
-        Self {
-            content: String::new(),
-            enqueued_at: 0,
-        }
-    }
 }
 
 impl PendingYieldEvent {
@@ -742,37 +733,37 @@ impl SessionContext {
                 .as_ref()
                 .is_some_and(|w| w.tool_call_id == pending.tool_call_id);
             if has_live_waiter {
-                let events = self.take_pending_yield_events();
-                if events.is_empty() {
-                    session.pending_yield = Some(pending);
-                    return;
-                }
-                let waiter = self
-                    .yield_waiter
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                session.pending_yield = Some(pending);
-                if let Some(waiter) = waiter {
-                    let content = format_pending_yield_events(&events);
-                    let _ = waiter.tx.send(content);
-                } else {
-                    // Raced with the waiter being taken/cancelled between
-                    // the check above and here — fall back to persisting
-                    // the events for whoever looks next (restart-safe
-                    // path); nothing was consumed.
-                    for event in events {
-                        self.enqueue_pending_yield_event(event);
+                // issue #255: drain with expiry folding + FIFO fill limit.
+                match self.drain_pending_yield_for_fill() {
+                    Some(content) => {
+                        let waiter = self
+                            .yield_waiter
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .take();
+                        session.pending_yield = Some(pending);
+                        if let Some(waiter) = waiter {
+                            let _ = waiter.tx.send(content);
+                        } else {
+                            // Raced with the waiter being taken/cancelled between
+                            // the check above and here — fall back to persisting
+                            // the events for whoever looks next (restart-safe
+                            // path); nothing was consumed.
+                            self.enqueue_pending_yield_event(PendingYieldEvent::fresh(content));
+                        }
+                        return;
+                    }
+                    None => {
+                        session.pending_yield = Some(pending);
+                        return;
                     }
                 }
-                return;
             }
-            let events = self.take_pending_yield_events();
-            if events.is_empty() {
+            // issue #255: same drain contract for the cold (non-parked) path.
+            let Some(content) = self.drain_pending_yield_for_fill() else {
                 session.pending_yield = Some(pending);
                 return;
-            }
-            let content = format_pending_yield_events(&events);
+            };
             session.add_tool_result(pending.tool_call_id, "sessions_yield", content, false);
             session.persist_last();
             true
@@ -808,9 +799,8 @@ impl SessionContext {
     ) -> (OwnedMutexGuard<Session>, OwnedMutexGuard<()>, bool) {
         // Fast path: something may already be queued (issue #238's original
         // race — the event arrived before the yield did). No park needed.
-        let queued = self.take_pending_yield_events();
-        if !queued.is_empty() {
-            let content = format_pending_yield_events(&queued);
+        // issue #255: fast path drains with the same expiry/limit contract.
+        if let Some(content) = self.drain_pending_yield_for_fill() {
             session.pending_yield = None;
             session.add_tool_result(tool_call_id, "sessions_yield", content, false);
             session.persist_last();
