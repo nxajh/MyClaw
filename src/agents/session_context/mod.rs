@@ -126,6 +126,34 @@ pub struct SessionContext {
     /// longer drops events that arrived before the outstanding
     /// `sessions_yield` was filled.
     pub pending_yield_events: std::sync::Mutex<std::collections::VecDeque<PendingYieldEvent>>,
+    /// Phase 2b (issue #256): the live, in-process continuation for a
+    /// `sessions_yield` currently parked in `run_and_deliver`'s
+    /// `park_for_yield` — `None` whenever nothing is actually parked right
+    /// now (no yield outstanding, or an outstanding one survived a daemon
+    /// restart with nothing live to wake). A single slot: registering a new
+    /// waiter overwrites (and thus drops/cancels) whatever was there,
+    /// which is exactly the desired behavior when a new `sessions_yield`
+    /// call or a user interjection supersedes an older pending one — the
+    /// old parked task's `rx.await` resolves to `Err` and it gives up
+    /// without touching history a second time. Runtime-only, never
+    /// persisted: a restart has nothing live to reconnect to, so recovery
+    /// falls back to the pre-existing `pending_yield_events` +
+    /// `try_fill_pending_yield` + `resume_after_yield` path unchanged.
+    pub(crate) yield_waiter: std::sync::Mutex<Option<YieldWaiter>>,
+}
+
+/// Phase 2b (issue #256): see `SessionContext::yield_waiter`.
+pub(crate) struct YieldWaiter {
+    /// The tool_call_id this waiter is parked on — must match
+    /// `Session::pending_yield`'s id for a delivery to be accepted as
+    /// "still ours" (a supersede/interjection may have moved on).
+    pub tool_call_id: String,
+    /// Sent exactly once: the combined content to deliver as this
+    /// tool_call's result. Dropping the sender without sending (which
+    /// happens automatically when a new waiter overwrites this slot)
+    /// signals cancellation — the parked task's `rx.await` resolves to
+    /// `Err` and it gives up.
+    pub tx: tokio::sync::oneshot::Sender<String>,
 }
 
 /// issue #238: see `SessionContext::pending_yield_events`.
@@ -155,23 +183,16 @@ fn format_pending_yield_events(events: &[PendingYieldEvent]) -> String {
     out
 }
 
-/// issue #238: spawn `try_fill_pending_yield` as an independent task.
-/// Extracted into a plain (non-async) function so its `tokio::spawn` call
-/// isn't inlined into `run_and_deliver`'s own async body. `run_and_deliver`
-/// → `try_fill_pending_yield` → `resume_after_yield` → `run_and_deliver` is a
-/// genuine call cycle across three async fns on the same impl block, and
-/// Rust cannot resolve their opaque `impl Future` return types when any edge
-/// of that cycle is a direct (non-boxed) async-fn call — routing each spawn
+/// issue #238: spawn `resume_after_yield` as an independent task — used by
+/// `try_fill_pending_yield`'s cold/fallback path (no live waiter to signal,
+/// e.g. after a daemon restart). Extracted into a plain (non-async)
+/// function so its `tokio::spawn` call isn't inlined into an async body.
+/// `try_fill_pending_yield` → `resume_after_yield` → `run_and_deliver` is a
+/// genuine call cycle across async fns on the same impl block, and Rust
+/// cannot resolve their opaque `impl Future` return types when any edge of
+/// that cycle is a direct (non-boxed) async-fn call — routing the spawn
 /// through a plain function breaks the cycle at the type level without
 /// changing behavior (the runtime call graph is identical either way).
-fn spawn_try_fill_pending_yield(sctx: Arc<SessionContext>, runtime: AgentRuntime) {
-    tokio::spawn(async move {
-        sctx.try_fill_pending_yield(runtime).await;
-    });
-}
-
-/// issue #238: see `spawn_try_fill_pending_yield` — same reasoning, the
-/// other edge of the cycle.
 fn spawn_resume_after_yield(sctx: Arc<SessionContext>, runtime: AgentRuntime) {
     tokio::spawn(async move {
         if let Err(e) = sctx.resume_after_yield(runtime).await {
@@ -269,6 +290,7 @@ impl SessionContext {
             user_profile: Arc::new(UserProfile::default()),
             recently_recorded_terminals: std::sync::Mutex::new(Vec::new()),
             pending_yield_events: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            yield_waiter: std::sync::Mutex::new(None),
         };
         ctx.restore_suspension();
         ctx.restore_pending_yield_events();
@@ -293,6 +315,7 @@ impl SessionContext {
             user_profile: profile,
             recently_recorded_terminals: std::sync::Mutex::new(Vec::new()),
             pending_yield_events: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            yield_waiter: std::sync::Mutex::new(None),
         };
         ctx.restore_suspension();
         ctx.restore_pending_yield_events();
@@ -594,12 +617,52 @@ impl SessionContext {
     /// No-op when there's no pending yield yet (nothing to fill), or when
     /// the queue is empty (nothing to fill it WITH) — in the latter case
     /// `pending_yield` is put back so a later call can still find it.
+    ///
+    /// Phase 2b (issue #256): when a `sessions_yield` is currently live-
+    /// parked in `park_for_yield` (a waiter is registered matching this
+    /// tool_call_id), delivery goes through the waiter instead — signal it
+    /// directly and let the already-running task write the result itself
+    /// (single writer), rather than writing to history here and spawning a
+    /// fresh task. `pending_yield` is put back in that case too: the
+    /// waking task re-validates and clears it itself.
     pub async fn try_fill_pending_yield(self: &Arc<Self>, runtime: AgentRuntime) {
         let should_resume = {
             let mut session = self.session.lock().await;
             let Some(pending) = session.pending_yield.take() else {
                 return;
             };
+            let has_live_waiter = self
+                .yield_waiter
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|w| w.tool_call_id == pending.tool_call_id);
+            if has_live_waiter {
+                let events = self.take_pending_yield_events();
+                if events.is_empty() {
+                    session.pending_yield = Some(pending);
+                    return;
+                }
+                let waiter = self
+                    .yield_waiter
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                session.pending_yield = Some(pending);
+                if let Some(waiter) = waiter {
+                    let content = format_pending_yield_events(&events);
+                    let _ = waiter.tx.send(content);
+                } else {
+                    // Raced with the waiter being taken/cancelled between
+                    // the check above and here — fall back to persisting
+                    // the events for whoever looks next (restart-safe
+                    // path); nothing was consumed.
+                    for event in events {
+                        self.enqueue_pending_yield_event(event);
+                    }
+                }
+                return;
+            }
             let events = self.take_pending_yield_events();
             if events.is_empty() {
                 session.pending_yield = Some(pending);
@@ -613,6 +676,83 @@ impl SessionContext {
         if should_resume {
             spawn_resume_after_yield(Arc::clone(self), runtime);
         }
+    }
+
+    /// Phase 2b (issue #256): park in place awaiting the real event for the
+    /// `sessions_yield` tool_call named by `session.pending_yield` — called
+    /// from `run_and_deliver` immediately after `Agent::run` returns with a
+    /// pending yield outstanding. Takes both guards by value so it can drop
+    /// them for the actual wait and reacquire fresh ones once (or if) an
+    /// event arrives; returns them back to the caller either way.
+    ///
+    /// Two outcomes, distinguished by the returned `bool`:
+    /// - `true` — the tool_call's result was written directly to history
+    ///   (either immediately, from an already-queued event, or after
+    ///   waking from the park) and `pending_yield` cleared. The caller
+    ///   should loop back into `Agent::run` to continue the turn, exactly
+    ///   like `resume_after_yield`'s own turns.
+    /// - `false` — nothing more to do here: either the queue was empty and
+    ///   the wait was cancelled (a supersede/interjection resolved this
+    ///   tool_call from a different task while we were parked), or the
+    ///   wait was cancelled outright. The caller should return its current
+    ///   `TurnResult` as-is without re-delivering anything.
+    async fn park_for_yield(
+        self: &Arc<Self>,
+        mut session: OwnedMutexGuard<Session>,
+        mut turn_guard: OwnedMutexGuard<()>,
+        tool_call_id: String,
+    ) -> (OwnedMutexGuard<Session>, OwnedMutexGuard<()>, bool) {
+        // Fast path: something may already be queued (issue #238's original
+        // race — the event arrived before the yield did). No park needed.
+        let queued = self.take_pending_yield_events();
+        if !queued.is_empty() {
+            let content = format_pending_yield_events(&queued);
+            session.pending_yield = None;
+            session.add_tool_result(tool_call_id, "sessions_yield", content, false);
+            session.persist_last();
+            return (session, turn_guard, true);
+        }
+
+        // Register the waiter BEFORE dropping either lock — atomic with
+        // `pending_yield` already being set (by our caller, under the same
+        // continuous hold), so there is no window where a notice can find
+        // pending_yield set but no waiter to deliver to.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.yield_waiter.lock().unwrap_or_else(|e| e.into_inner()) = Some(YieldWaiter {
+            tool_call_id: tool_call_id.clone(),
+            tx,
+        });
+
+        drop(turn_guard);
+        drop(session);
+
+        let outcome = rx.await;
+
+        turn_guard = Arc::clone(&self.turn_lock).lock_owned().await;
+        session = Arc::clone(&self.session).lock_owned().await;
+
+        let content = match outcome {
+            Ok(content) => content,
+            // Sender dropped without sending: cancelled — a new waiter
+            // (supersede) overwrote our slot, or #240/interjection closed
+            // this tool_call out from a different task while we waited.
+            Err(_) => return (session, turn_guard, false),
+        };
+
+        // Re-validate: still ours? A cancellation can race the send itself
+        // (both are possible right up until we reacquire the lock), so
+        // check identity again rather than trusting `Ok` alone.
+        let still_ours = session
+            .pending_yield
+            .as_ref()
+            .is_some_and(|p| p.tool_call_id == tool_call_id);
+        if !still_ours {
+            return (session, turn_guard, false);
+        }
+        session.pending_yield = None;
+        session.add_tool_result(tool_call_id, "sessions_yield", content, false);
+        session.persist_last();
+        (session, turn_guard, true)
     }
 
     /// P1 (2026-08-13, RFC delegation-notice-queue §4): true while any
@@ -1059,6 +1199,24 @@ impl SessionContext {
         // disclosed gaps).
         if media_parts.is_empty() {
             if let Some(pending) = session.pending_yield.take() {
+                // Phase 2b (issue #256): if a live park was still waiting on
+                // this exact tool_call, cancel it now rather than leaving it
+                // to be silently overwritten (and only then dropped) by
+                // some later waiter registration — dropping the sender here
+                // resolves the parked task's `rx.await` to `Err` right
+                // away, so it gives up promptly instead of leaking until
+                // this session's next yield.
+                {
+                    let mut waiter_guard =
+                        self.yield_waiter.lock().unwrap_or_else(|e| e.into_inner());
+                    if waiter_guard
+                        .as_ref()
+                        .is_some_and(|w| w.tool_call_id == pending.tool_call_id)
+                    {
+                        *waiter_guard = None;
+                    }
+                }
+
                 let closing_content =
                     format!("The user interrupted the wait and said: {}", content);
                 session.add_tool_result(
@@ -1297,8 +1455,7 @@ impl SessionContext {
         // OwnedMutexGuard<_>` cannot do that (nothing to move it out into;
         // `OwnedMutexGuard` has no `Default` for `mem::take`, and
         // `try_lock_owned` would deadlock against the guard's own hold).
-        // Unused until Phase 2b.
-        _turn_guard: OwnedMutexGuard<()>,
+        mut turn_guard: OwnedMutexGuard<()>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
         channel_for_send: Option<Arc<dyn Channel>>,
@@ -1307,27 +1464,34 @@ impl SessionContext {
         mut notice_guard: NoticeTurnGuard,
         persist_hook: Option<Arc<dyn PersistHook>>,
     ) -> anyhow::Result<TurnResult> {
-        // Notify channel that processing has started (typing indicator, etc.)
-        // — suppressed on silenced resume turns (RFC §3.3).
-        if !silenced {
-            if let Some(ref ch) = channel_for_send {
-                ch.on_status(&reply_target, crate::ProcessingStatus::Thinking)
-                    .await;
+        // Phase 2b (issue #256): `silenced`/`notice_guard` apply only to
+        // the FIRST `Agent::run` call — the caller's own turn semantics. A
+        // loop iteration reached by parking-then-waking is always an
+        // ordinary (non-silenced) continuation, exactly like
+        // `resume_after_yield`'s own turns always are.
+        let mut silenced = silenced;
+        loop {
+            // Notify channel that processing has started (typing indicator,
+            // etc.) — suppressed on silenced resume turns (RFC §3.3).
+            if !silenced {
+                if let Some(ref ch) = channel_for_send {
+                    ch.on_status(&reply_target, crate::ProcessingStatus::Thinking)
+                        .await;
+                }
             }
-        }
 
-        let result = self.agent.run(&mut session, turn_ctx, runtime).await;
-        // Per-turn turn_stream is transient. Consume the stream first
-        // (RFC §7.6): finish on success delivers FinalDelivered; abort on
-        // error cancels the WS transport.
-        let turn_stream = session.turn_stream.take();
-        // RFC channel-role-split §1.1: the headless marker is turn-scoped —
-        // always cleared at turn end so the next turn starts Interactive
-        // unless its own message says otherwise.
-        session.turn_headless = false;
-        session.cancel_token = None;
+            let result = self.agent.run(&mut session, turn_ctx.clone(), runtime).await;
+            // Per-turn turn_stream is transient. Consume the stream first
+            // (RFC §7.6): finish on success delivers FinalDelivered; abort on
+            // error cancels the WS transport.
+            let turn_stream = session.turn_stream.take();
+            // RFC channel-role-split §1.1: the headless marker is turn-scoped —
+            // always cleared at turn end so the next turn starts Interactive
+            // unless its own message says otherwise.
+            session.turn_headless = false;
+            session.cancel_token = None;
 
-        match (result, turn_stream) {
+            match (result, turn_stream) {
             (Ok(mut turn_result), stream) => {
                 // 单 preview (2026-08-12): `has_pending` = "this turn belongs
                 // to the suspension sequence" = origin turn (Agent::run set it
@@ -1615,18 +1779,37 @@ impl SessionContext {
 
                 // This turn may have left a pending `sessions_yield` behind
                 // (explicit, from tool_phase.rs, or just synthesized above).
-                // Check immediately whether anything is already queued for
-                // it (a race where the event arrived before the yield did)
-                // rather than waiting for the next external trigger —
-                // `try_fill_pending_yield` is the single place both
-                // directions (event arrives / yield appears) funnel
-                // through, so calling it here is always safe, even when
-                // there's nothing to do yet.
+                //
+                // Phase 2b (issue #256): park right here awaiting the real
+                // event — `park_for_yield` handles the fast path (something
+                // already queued, issue #238's original race) and the
+                // actual wait (drop both guards, await, reacquire)
+                // uniformly. `true` means the tool_result is now in
+                // history and this loop should continue the SAME turn with
+                // a fresh `Agent::run` call, exactly like
+                // `resume_after_yield`'s own turns; `false` means either
+                // there was nothing pending, or delivery was cancelled
+                // (superseded by a different task while parked) — either
+                // way, nothing more to do here.
                 if session.pending_yield.is_some() {
-                    spawn_try_fill_pending_yield(Arc::clone(self), runtime.clone());
+                    let tool_call_id = session
+                        .pending_yield
+                        .as_ref()
+                        .expect("just checked is_some")
+                        .tool_call_id
+                        .clone();
+                    let (s, tg, filled) =
+                        self.park_for_yield(session, turn_guard, tool_call_id).await;
+                    session = s;
+                    turn_guard = tg;
+                    if filled {
+                        silenced = false;
+                        notice_guard = NoticeTurnGuard::new(self, false);
+                        continue;
+                    }
                 }
 
-                Ok(turn_result)
+                return Ok(turn_result);
             }
             (Err(e), stream) => {
                 if let Some(s) = stream {
@@ -1654,8 +1837,9 @@ impl SessionContext {
                     err = %e,
                     "Agent turn failed"
                 );
-                Err(e)
+                return Err(e);
             }
+        }
         }
     }
 
@@ -1911,6 +2095,188 @@ mod pending_yield_tests {
         assert!(
             ctx2.take_pending_yield_events().is_empty(),
             "a delivered event must not come back after a restart"
+        );
+    }
+}
+
+/// Phase 2b (issue #256): `park_for_yield`'s three outcomes — fast path
+/// (already queued), live-waiter delivery (park, then wake via
+/// `try_fill_pending_yield`), and cancellation (a superseding waiter
+/// registration drops the original sender). Exercises the new logic
+/// directly rather than through a full `process_turn`/LLM round-trip, same
+/// spirit as `pending_yield_tests` above.
+#[cfg(test)]
+mod park_for_yield_tests {
+    use super::*;
+    use crate::agents::SessionManager;
+    use crate::agents::session::PendingYield;
+
+    fn make_ctx() -> Arc<SessionContext> {
+        let manager = Arc::new(SessionManager::in_memory());
+        manager.get_or_create_context("mock:default:u1")
+    }
+
+    async fn guards(ctx: &Arc<SessionContext>) -> (OwnedMutexGuard<Session>, OwnedMutexGuard<()>) {
+        let session = Arc::clone(&ctx.session).lock_owned().await;
+        let turn_guard = Arc::clone(&ctx.turn_lock).lock_owned().await;
+        (session, turn_guard)
+    }
+
+    /// The queue already has an event by the time `park_for_yield` runs
+    /// (issue #238's original race, event-before-yield) — must deliver
+    /// immediately without ever registering a waiter or actually parking.
+    #[tokio::test]
+    async fn fast_path_delivers_from_an_already_queued_event() {
+        let ctx = make_ctx();
+        ctx.enqueue_pending_yield_event(PendingYieldEvent {
+            content: "sub-agent A done".to_string(),
+        });
+        let (mut session, turn_guard) = guards(&ctx).await;
+        session.pending_yield = Some(PendingYield {
+            tool_call_id: "call_fast".to_string(),
+            implicit: false,
+        });
+
+        let (session, _turn_guard, filled) = ctx
+            .park_for_yield(session, turn_guard, "call_fast".to_string())
+            .await;
+
+        assert!(filled, "an already-queued event must be delivered without parking");
+        assert!(session.pending_yield.is_none());
+        assert!(
+            ctx.yield_waiter.lock().unwrap().is_none(),
+            "the fast path must never register a waiter"
+        );
+        let tool_msg = session
+            .history
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call_fast"))
+            .expect("tool_result must be written");
+        assert!(tool_msg.text_content().contains("sub-agent A done"));
+    }
+
+    /// Nothing queued yet: `park_for_yield` must register a waiter and
+    /// actually suspend — `try_fill_pending_yield` (the same entry point
+    /// `route_notice` drives) then finds that live waiter and signals it
+    /// directly instead of writing to history itself, and the parked task
+    /// wakes up, writes the result, and reports `filled = true`.
+    #[tokio::test]
+    async fn live_waiter_is_signaled_and_the_parked_task_delivers_it() {
+        let ctx = make_ctx();
+        let (mut session, turn_guard) = guards(&ctx).await;
+        session.pending_yield = Some(PendingYield {
+            tool_call_id: "call_park".to_string(),
+            implicit: false,
+        });
+        // Drop our own guards before spawning — park_for_yield needs to
+        // acquire them itself (it owns them from here), and this test's
+        // "waker" side below needs the session lock free to enqueue +
+        // fill.
+        drop(session);
+        drop(turn_guard);
+        let (session, turn_guard) = guards(&ctx).await;
+
+        let park_ctx = Arc::clone(&ctx);
+        let handle = tokio::spawn(async move {
+            park_ctx
+                .park_for_yield(session, turn_guard, "call_park".to_string())
+                .await
+        });
+
+        // Give the spawned task a chance to register its waiter before we
+        // check for it (no fixed sleep — poll with a short bound).
+        for _ in 0..200 {
+            if ctx.yield_waiter.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            ctx.yield_waiter.lock().unwrap().is_some(),
+            "park_for_yield must register a waiter when nothing is queued yet"
+        );
+
+        ctx.enqueue_pending_yield_event(PendingYieldEvent {
+            content: "sub-agent B done".to_string(),
+        });
+        ctx.try_fill_pending_yield(crate::agents::agent::tests::bailing_runtime())
+            .await;
+
+        let (session, _turn_guard, filled) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("park_for_yield must wake promptly once signaled")
+                .expect("spawned task must not panic");
+
+        assert!(filled, "the live-waiter path must report a successful delivery");
+        assert!(session.pending_yield.is_none());
+        let tool_msg = session
+            .history
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call_park"))
+            .expect("tool_result must be written by the woken task itself");
+        assert!(tool_msg.text_content().contains("sub-agent B done"));
+        // try_fill_pending_yield's live-waiter branch must NOT have written
+        // the result itself — single writer stays the woken park task.
+        assert!(
+            ctx.yield_waiter.lock().unwrap().is_none(),
+            "the waiter slot must be empty again after delivery"
+        );
+    }
+
+    /// A supersede (a second `park_for_yield` registering its own waiter
+    /// for a DIFFERENT tool_call) must cancel the first one outright — its
+    /// `rx` resolves to `Err`, and it must report `filled = false` and
+    /// leave history untouched rather than racing the new owner.
+    #[tokio::test]
+    async fn superseding_waiter_cancels_the_original_park() {
+        let ctx = make_ctx();
+        let (mut session, turn_guard) = guards(&ctx).await;
+        session.pending_yield = Some(PendingYield {
+            tool_call_id: "call_old".to_string(),
+            implicit: false,
+        });
+        drop(session);
+        drop(turn_guard);
+        let (session, turn_guard) = guards(&ctx).await;
+
+        let park_ctx = Arc::clone(&ctx);
+        let handle = tokio::spawn(async move {
+            park_ctx
+                .park_for_yield(session, turn_guard, "call_old".to_string())
+                .await
+        });
+
+        for _ in 0..200 {
+            if ctx.yield_waiter.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(ctx.yield_waiter.lock().unwrap().is_some());
+
+        // Simulate a new sessions_yield superseding the old one: overwrite
+        // the single-slot waiter registry directly, exactly what a second
+        // `park_for_yield` call for a new tool_call would do.
+        let (_tx, _rx) = tokio::sync::oneshot::channel::<String>();
+        *ctx.yield_waiter.lock().unwrap() = Some(YieldWaiter {
+            tool_call_id: "call_new".to_string(),
+            tx: _tx,
+        });
+
+        let (session, _turn_guard, filled) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("a cancelled park must still resolve promptly")
+                .expect("spawned task must not panic");
+
+        assert!(!filled, "a cancelled park must report no delivery");
+        assert!(
+            !session
+                .history
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some("call_old")),
+            "a cancelled park must not write anything to history"
         );
     }
 }
