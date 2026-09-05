@@ -791,7 +791,7 @@ impl SessionContext {
     ///   tool_call from a different task while we were parked), or the
     ///   wait was cancelled outright. The caller should return its current
     ///   `TurnResult` as-is without re-delivering anything.
-    async fn park_for_yield(
+    pub(crate) async fn park_for_yield(
         self: &Arc<Self>,
         mut session: OwnedMutexGuard<Session>,
         mut turn_guard: OwnedMutexGuard<()>,
@@ -1346,6 +1346,7 @@ impl SessionContext {
                     thinking: thinking.as_ref(),
                     permission_mode: prompt_config.permission_mode,
                     run_mode: prompt_config.run_mode,
+                    yield_park: Some(std::sync::Arc::downgrade(self)),
                 };
 
                 return self
@@ -1532,6 +1533,7 @@ impl SessionContext {
             thinking: thinking.as_ref(),
             permission_mode: prompt_config.permission_mode,
             run_mode: prompt_config.run_mode,
+            yield_park: Some(std::sync::Arc::downgrade(self)),
         };
 
         self.run_and_deliver(
@@ -1581,6 +1583,11 @@ impl SessionContext {
         // ordinary (non-silenced) continuation, exactly like
         // `resume_after_yield`'s own turns always are.
         let mut silenced = silenced;
+        // Phase 2c (issue #256): wrap the owned guards into slots so the
+        // in-frame yield park (execute_tool_batch) and the tail park below
+        // can take/put-back the guards by value across the wait.
+        let mut session_slot: Option<OwnedMutexGuard<Session>> = Some(session);
+        let mut turn_guard_slot: Option<OwnedMutexGuard<()>> = Some(turn_guard);
         loop {
             // Notify channel that processing has started (typing indicator,
             // etc.) — suppressed on silenced resume turns (RFC §3.3).
@@ -1591,7 +1598,13 @@ impl SessionContext {
                 }
             }
 
-            let result = self.agent.run(&mut session, turn_ctx.clone(), runtime).await;
+            let result = self
+                .agent
+                .run(&mut session_slot, &mut turn_guard_slot, turn_ctx.clone(), runtime)
+                .await;
+            // Phase 2c: reborrow the guards from the slots (run may have
+            // parked in-frame and put fresh ones back).
+            let session = session_slot.as_mut().expect("run_and_deliver: session slot empty");
             // Per-turn turn_stream is transient. Consume the stream first
             // (RFC §7.6): finish on success delivers FinalDelivered; abort on
             // error cancels the WS transport.
@@ -1909,10 +1922,11 @@ impl SessionContext {
                         .expect("just checked is_some")
                         .tool_call_id
                         .clone();
-                    let (s, tg, filled) =
-                        self.park_for_yield(session, turn_guard, tool_call_id).await;
-                    session = s;
-                    turn_guard = tg;
+                    let s = session_slot.take().expect("run_and_deliver: session slot empty");
+                    let t = turn_guard_slot.take().expect("run_and_deliver: turn slot empty");
+                    let (s, tg, filled) = self.park_for_yield(s, t, tool_call_id).await;
+                    session_slot = Some(s);
+                    turn_guard_slot = Some(tg);
                     if filled {
                         silenced = false;
                         notice_guard = NoticeTurnGuard::new(self, false);
@@ -2007,6 +2021,7 @@ impl SessionContext {
             thinking: thinking.as_ref(),
             permission_mode: prompt_config.permission_mode,
             run_mode: prompt_config.run_mode,
+            yield_park: Some(std::sync::Arc::downgrade(self)),
         };
 
         let notice_guard = NoticeTurnGuard::new(self, false);

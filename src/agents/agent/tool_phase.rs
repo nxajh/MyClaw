@@ -18,7 +18,7 @@ use super::Agent;
 use crate::agents::error::AgentError;
 use crate::agents::loop_breaker::{LoopBreak, LoopBreakerCounter, LoopBreakReason};
 use crate::agents::session::Session;
-use crate::agents::turn::TurnResult;
+use crate::agents::turn::{TurnContext, TurnResult};
 use crate::api::turn_event::TurnEvent;
 use crate::providers::capability_chat::{ChatMessage, StopReason, ToolSpec};
 use tokio::sync::OwnedMutexGuard;
@@ -35,6 +35,12 @@ pub(super) enum ToolBatchOutcome {
     EndTurn(Box<TurnResult>),
     /// Loop breaker or hard max-calls limit tripped.
     Abort(AgentError),
+    /// Phase 2c (issue #256): the in-frame sessions_yield park woke
+    /// cancelled or superseded — the tool_call was resolved (or its content
+    /// re-queued) by another task while we waited. `run_inner` returns its
+    /// current TurnResult immediately: no history write here, no loop, no
+    /// re-delivery.
+    Superseded,
 }
 
 impl Agent {
@@ -44,17 +50,22 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_tool_batch(
         &self,
-        session: &mut OwnedMutexGuard<Session>,
+        session_slot: &mut Option<OwnedMutexGuard<Session>>,
+        turn_guard_slot: &mut Option<OwnedMutexGuard<()>>,
         response: &CollectedResponse,
         messages: &mut Vec<ChatMessage>,
         runtime: &crate::agents::AgentRuntime,
         model_id: &str,
-        permission_mode: &crate::config::agent::PermissionMode,
+        turn_ctx: &TurnContext<'_>,
         allowed_tools: &[Arc<dyn crate::providers::Tool>],
         _tool_specs: &[ToolSpec],
         turn_state: &mut TurnState,
         loop_breaker: &mut LoopBreakerCounter,
     ) -> anyhow::Result<ToolBatchOutcome> {
+        // Phase 2c (issue #256): per-iteration reborrow from the slot; the
+        // borrow ends at its last use before the yield branch takes the
+        // slots for the in-frame park (NLL-safe).
+        let session = session_slot.as_mut().expect("execute_tool_batch: session slot empty");
         // Tool calls present — append assistant message with the calls
         // (preserving thinking content for re-send), execute each tool,
         // append tool_result messages, then loop for the next LLM call.
@@ -163,7 +174,7 @@ impl Agent {
                     session_id: session.id.clone(),
                 };
                 tool_executor
-                    .execute(call, session, Some(permission_mode), allowed_tools)
+                    .execute(call, session, Some(&turn_ctx.permission_mode), allowed_tools)
                     .await
             };
 
@@ -348,6 +359,44 @@ impl Agent {
                 if remaining > 0 {
                     session.strip_trailing_tool_calls(remaining);
                 }
+                // Phase 2c (issue #256): when this turn's TurnContext carries
+                // a live handle to the owning SessionContext, park RIGHT HERE
+                // in the tool frame — take both guards out of the slots, let
+                // park_for_yield do the atomic waiter-registration, the guard
+                // drop, the rx.await and the turn_lock → session relock
+                // (identical order), then put the guards back. The waking
+                // task writes the tool_result itself (result single-writer);
+                // no stub stream emission, no channel End, no EndTurn.
+                if let Some(ctx) = turn_ctx.yield_park.as_ref().and_then(|w| w.upgrade()) {
+                    let session_id = session.id.clone();
+                    let mut session_opt = session_slot
+                        .take()
+                        .expect("execute_tool_batch: session slot empty at yield park");
+                    let mut turn_guard_opt = turn_guard_slot
+                        .take()
+                        .expect("execute_tool_batch: turn slot empty at yield park");
+                    let (s, tg, filled) = ctx
+                        .park_for_yield(session_opt, turn_guard_opt, call.id.clone())
+                        .await;
+                    *session_slot = Some(s);
+                    *turn_guard_slot = Some(tg);
+                    if filled {
+                        tracing::info!(
+                            session = %session_id,
+                            tool_call_id = %call.id,
+                            "sessions_yield filled in-frame; continuing the turn loop"
+                        );
+                        return Ok(ToolBatchOutcome::Continue);
+                    }
+                    tracing::info!(
+                        session = %session_id,
+                        tool_call_id = %call.id,
+                        "sessions_yield park superseded; ending turn without stub delivery"
+                    );
+                    return Ok(ToolBatchOutcome::Superseded);
+                }
+                // No-park fallback (CLI/tests): legacy deterministic EndTurn —
+                // run_and_deliver's tail park still handles the wait there.
                 tracing::info!(
                     session = %session.id,
                     "sessions_yield called; ending turn deterministically"
@@ -484,16 +533,26 @@ mod tests {
         let allowed_tools: Vec<Arc<dyn crate::providers::Tool>> = vec![Arc::new(SlowTool)];
         let mut turn_state = TurnState::default();
         let mut loop_breaker = LoopBreakerCounter::new(LoopBreakerConfig::default());
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Full,
+            run_mode: crate::config::agent::RunMode::default(),
+            yield_park: None,
+        };
+        let mut session_slot = Some(session);
 
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(50),
             agent.execute_tool_batch(
-                &mut session,
+                &mut session_slot,
+                &mut None,
                 &response,
                 &mut messages,
                 &runtime,
                 "test-model",
-                &PermissionMode::Full,
+                &turn_ctx,
                 &allowed_tools,
                 &[],
                 &mut turn_state,
@@ -628,15 +687,25 @@ mod tests {
         let allowed_tools: Vec<Arc<dyn crate::providers::Tool>> = vec![Arc::new(InstantTool)];
         let mut turn_state = TurnState::default();
         let mut loop_breaker = LoopBreakerCounter::new(LoopBreakerConfig::default());
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Full,
+            run_mode: crate::config::agent::RunMode::default(),
+            yield_park: None,
+        };
+        let mut session_slot = Some(session);
 
         agent
             .execute_tool_batch(
-                &mut session,
+                &mut session_slot,
+                &mut None,
                 &response,
                 &mut messages,
                 &runtime,
                 "test-model",
-                &PermissionMode::Full,
+                &turn_ctx,
                 &allowed_tools,
                 &[],
                 &mut turn_state,
@@ -686,15 +755,25 @@ mod tests {
             vec![Arc::new(crate::tools::SessionsYieldTool::new())];
         let mut turn_state = TurnState::default();
         let mut loop_breaker = LoopBreakerCounter::new(LoopBreakerConfig::default());
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Full,
+            run_mode: crate::config::agent::RunMode::default(),
+            yield_park: None,
+        };
+        let mut session_slot = Some(session);
 
         let outcome = agent
             .execute_tool_batch(
-                &mut session,
+                &mut session_slot,
+                &mut None,
                 &response,
                 &mut messages,
                 &runtime,
                 "test-model",
-                &PermissionMode::Full,
+                &turn_ctx,
                 &allowed_tools,
                 &[],
                 &mut turn_state,
@@ -702,6 +781,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let mut session = session_slot.take().expect("session slot");
 
         assert!(
             matches!(outcome, ToolBatchOutcome::EndTurn(_)),
@@ -758,15 +838,25 @@ mod tests {
             vec![Arc::new(crate::tools::SessionsYieldTool::new())];
         let mut turn_state = TurnState::default();
         let mut loop_breaker = LoopBreakerCounter::new(LoopBreakerConfig::default());
+        let turn_ctx = TurnContext {
+            system_prompt: "",
+            model_id: None,
+            thinking: None,
+            permission_mode: PermissionMode::Full,
+            run_mode: crate::config::agent::RunMode::default(),
+            yield_park: None,
+        };
+        let mut session_slot = Some(session);
 
         agent
             .execute_tool_batch(
-                &mut session,
+                &mut session_slot,
+                &mut None,
                 &response,
                 &mut messages,
                 &runtime,
                 "test-model",
-                &PermissionMode::Full,
+                &turn_ctx,
                 &allowed_tools,
                 &[],
                 &mut turn_state,
@@ -774,6 +864,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let mut session = session_slot.take().expect("session slot");
 
         let old_result = session
             .history

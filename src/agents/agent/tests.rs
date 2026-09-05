@@ -130,8 +130,13 @@ async fn run_prechecks_recovery_without_recursing() {
         thinking: None,
         permission_mode: PermissionMode::Default,
         run_mode: RunMode::Interactive,
+        yield_park: None,
     };
-    let err = match agent.run(&mut session, turn_ctx, &runtime).await {
+    let mut session_slot = Some(session);
+    let err = match agent
+        .run(&mut session_slot, &mut None, turn_ctx, &runtime)
+        .await
+    {
         Ok(_) => panic!("expected recovery to run the LLM and hit the stub registry"),
         Err(e) => e,
     };

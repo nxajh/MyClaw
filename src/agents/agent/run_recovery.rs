@@ -31,11 +31,15 @@ impl Agent {
     /// mid-turn state (no recovery needed).
     pub async fn run_recovery(
         &self,
-        session: &mut OwnedMutexGuard<Session>,
+        session_slot: &mut Option<OwnedMutexGuard<Session>>,
+        turn_guard_slot: &mut Option<OwnedMutexGuard<()>>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
     ) -> Result<Option<TurnResult>> {
         use std::collections::HashSet;
+        // Phase 2c (issue #256): per-call reborrow from the slot; the borrow
+        // ends before the `run_inner` tail takes the slots back (NLL-safe).
+        let session = session_slot.as_mut().expect("run_recovery: session slot empty");
 
         if session.history.is_empty() {
             return Ok(None);
@@ -233,7 +237,9 @@ impl Agent {
         // well-formed history. The user message (if any) is already in
         // history. `run_inner` (not `run`): `run` would re-enter
         // `run_recovery` and recurse forever.
-        let tr = self.run_inner(session, turn_ctx, runtime).await?;
+        let tr = self
+            .run_inner(session_slot, turn_guard_slot, turn_ctx, runtime)
+            .await?;
         Ok(Some(tr))
     }
 }
@@ -354,6 +360,7 @@ mod tests {
             thinking: None,
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
+            yield_park: None,
         };
 
         // run_inner hits the stub registry and errors — recovery's own
@@ -415,6 +422,7 @@ mod tests {
             thinking: None,
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
+            yield_park: None,
         };
 
         let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
@@ -459,6 +467,7 @@ mod tests {
             thinking: None,
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
+            yield_park: None,
         };
 
         let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
@@ -501,6 +510,7 @@ mod tests {
             thinking: None,
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
+            yield_park: None,
         };
 
         let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
@@ -544,6 +554,7 @@ mod tests {
             thinking: None,
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
+            yield_park: None,
         };
 
         let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
@@ -578,6 +589,7 @@ mod tests {
             thinking: None,
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
+            yield_park: None,
         };
 
         let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
@@ -630,6 +642,7 @@ mod tests {
             thinking: None,
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
+            yield_park: None,
         };
 
         let result = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
@@ -670,6 +683,7 @@ mod tests {
             thinking: None,
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
+            yield_park: None,
         };
 
         let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
