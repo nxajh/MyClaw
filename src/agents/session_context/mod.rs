@@ -855,7 +855,7 @@ impl SessionContext {
         channel: Option<Arc<dyn Channel>>,
         runtime: AgentRuntime,
     ) -> anyhow::Result<TurnResult> {
-        let _turn_guard = self.turn_lock.lock().await;
+        let mut turn_guard = Arc::clone(&self.turn_lock).lock_owned().await;
         let mut session = Arc::clone(&self.session).lock_owned().await;
 
         let content = crate::str_utils::neutralize_spoofing(&inbound_msg.content.text);
@@ -1082,6 +1082,7 @@ impl SessionContext {
                 return self
                     .run_and_deliver(
                         &mut session,
+                        &mut turn_guard,
                         turn_ctx,
                         &runtime,
                         channel_for_send,
@@ -1266,6 +1267,7 @@ impl SessionContext {
 
         self.run_and_deliver(
             &mut session,
+            &mut turn_guard,
             turn_ctx,
             &runtime,
             channel_for_send,
@@ -1289,6 +1291,7 @@ impl SessionContext {
     async fn run_and_deliver(
         self: &Arc<Self>,
         session: &mut OwnedMutexGuard<Session>,
+        turn_guard: &mut OwnedMutexGuard<()>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
         channel_for_send: Option<Arc<dyn Channel>>,
@@ -1306,7 +1309,7 @@ impl SessionContext {
             }
         }
 
-        let result = self.agent.run(session, turn_ctx, runtime).await;
+        let result = self.agent.run(session, turn_guard, turn_ctx, runtime).await;
         // Per-turn turn_stream is transient. Consume the stream first
         // (RFC §7.6): finish on success delivers FinalDelivered; abort on
         // error cancels the WS transport.
@@ -1668,7 +1671,7 @@ impl SessionContext {
         self: &Arc<Self>,
         runtime: AgentRuntime,
     ) -> anyhow::Result<TurnResult> {
-        let _turn_guard = self.turn_lock.lock().await;
+        let mut turn_guard = Arc::clone(&self.turn_lock).lock_owned().await;
         let mut session = Arc::clone(&self.session).lock_owned().await;
 
         let persist_hook = session.persist.clone();
@@ -1708,6 +1711,7 @@ impl SessionContext {
 
         self.run_and_deliver(
             &mut session,
+            &mut turn_guard,
             turn_ctx,
             &runtime,
             channel_for_send,

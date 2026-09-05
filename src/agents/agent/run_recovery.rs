@@ -32,6 +32,7 @@ impl Agent {
     pub async fn run_recovery(
         &self,
         session: &mut OwnedMutexGuard<Session>,
+        turn_guard: &mut OwnedMutexGuard<()>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
     ) -> Result<Option<TurnResult>> {
@@ -233,7 +234,7 @@ impl Agent {
         // well-formed history. The user message (if any) is already in
         // history. `run_inner` (not `run`): `run` would re-enter
         // `run_recovery` and recurse forever.
-        let tr = self.run_inner(session, turn_ctx, runtime).await?;
+        let tr = self.run_inner(session, turn_guard, turn_ctx, runtime).await?;
         Ok(Some(tr))
     }
 }
@@ -266,6 +267,14 @@ mod tests {
     /// issue #256's lock-chain refactor).
     async fn owned(session: Session) -> OwnedMutexGuard<Session> {
         std::sync::Arc::new(tokio::sync::Mutex::new(session))
+            .lock_owned()
+            .await
+    }
+
+    /// Phase 2a (issue #256): a standalone owned `turn_lock` guard for tests
+    /// that don't go through a real `SessionContext`.
+    async fn owned_turn_guard() -> OwnedMutexGuard<()> {
+        std::sync::Arc::new(tokio::sync::Mutex::new(()))
             .lock_owned()
             .await
     }
@@ -358,7 +367,8 @@ mod tests {
         // run_inner hits the stub registry and errors — recovery's own
         // synthesized tool result is appended to `session.history` before
         // that happens, which is what this test inspects.
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let mut turn_guard = owned_turn_guard().await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard, turn_ctx, &runtime).await;
 
         let tool_msg = session
             .history
@@ -416,7 +426,8 @@ mod tests {
             run_mode: RunMode::Interactive,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let mut turn_guard = owned_turn_guard().await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard, turn_ctx, &runtime).await;
 
         let tool_msg = session
             .history
@@ -460,7 +471,8 @@ mod tests {
             run_mode: RunMode::Interactive,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let mut turn_guard = owned_turn_guard().await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard, turn_ctx, &runtime).await;
 
         let tool_msg = session
             .history
@@ -502,7 +514,8 @@ mod tests {
             run_mode: RunMode::Interactive,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let mut turn_guard = owned_turn_guard().await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard, turn_ctx, &runtime).await;
 
         let tool_msg = session
             .history
@@ -545,7 +558,8 @@ mod tests {
             run_mode: RunMode::Interactive,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let mut turn_guard = owned_turn_guard().await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard, turn_ctx, &runtime).await;
 
         assert_eq!(
             std::fs::read_to_string(marker_dir.join(".exec_marker")).ok(),
@@ -579,7 +593,8 @@ mod tests {
             run_mode: RunMode::Interactive,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let mut turn_guard = owned_turn_guard().await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard, turn_ctx, &runtime).await;
 
         assert!(
             std::fs::read_to_string(marker_dir.join(".exec_marker")).is_err(),
@@ -631,7 +646,8 @@ mod tests {
             run_mode: RunMode::Interactive,
         };
 
-        let result = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let mut turn_guard = owned_turn_guard().await;
+        let result = agent.run_recovery(&mut session, &mut turn_guard, turn_ctx, &runtime).await;
 
         assert!(
             matches!(result, Ok(None)),
@@ -671,7 +687,8 @@ mod tests {
             run_mode: RunMode::Interactive,
         };
 
-        let _ = agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+        let mut turn_guard = owned_turn_guard().await;
+        let _ = agent.run_recovery(&mut session, &mut turn_guard, turn_ctx, &runtime).await;
 
         let tool_msg = session
             .history

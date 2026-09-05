@@ -45,6 +45,10 @@ impl Agent {
     pub(super) async fn execute_tool_batch(
         &self,
         session: &mut OwnedMutexGuard<Session>,
+        // Phase 2a (issue #256): threaded through so the sessions_yield park
+        // logic (Phase 2b) can drop/reacquire it alongside `session` without
+        // another signature change. Unused until then.
+        _turn_guard: &mut OwnedMutexGuard<()>,
         response: &CollectedResponse,
         messages: &mut Vec<ChatMessage>,
         runtime: &crate::agents::AgentRuntime,
@@ -412,6 +416,12 @@ mod tests {
     use crate::providers::capability_chat::ToolCall;
     use crate::providers::{Tool, ToolResult};
 
+    /// Phase 2a (issue #256): a standalone owned `turn_lock` guard for tests
+    /// that don't go through a real `SessionContext`.
+    async fn owned_turn_guard() -> OwnedMutexGuard<()> {
+        Arc::new(tokio::sync::Mutex::new(())).lock_owned().await
+    }
+
     /// A tool whose `execute()` never returns within the test's timeout —
     /// stands in for any long-running tool call (delegation, shell, http)
     /// that an outer cancellation (delegation timeout, task abort) can cut
@@ -462,6 +472,7 @@ mod tests {
 
         let session = std::sync::Arc::new(tokio::sync::Mutex::new(Session::new(session_id.clone())));
         let mut session = session.lock_owned().await;
+        let mut turn_guard = owned_turn_guard().await;
         let runtime = bailing_runtime().with_sessions_dir(sessions_dir.clone());
         let agent = Agent::new(empty_config());
 
@@ -488,6 +499,7 @@ mod tests {
             std::time::Duration::from_millis(50),
             agent.execute_tool_batch(
                 &mut session,
+                &mut turn_guard,
                 &response,
                 &mut messages,
                 &runtime,
@@ -579,6 +591,7 @@ mod tests {
         session.persist = Some(hook.clone());
         let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
         let mut session = session.lock_owned().await;
+        let mut turn_guard = owned_turn_guard().await;
 
         let runtime = bailing_runtime().with_sessions_dir(sessions_dir.clone());
         let agent = Agent::new(empty_config());
@@ -631,6 +644,7 @@ mod tests {
         agent
             .execute_tool_batch(
                 &mut session,
+                &mut turn_guard,
                 &response,
                 &mut messages,
                 &runtime,
@@ -663,6 +677,7 @@ mod tests {
             "test_yield_defers".to_string(),
         )));
         let mut session = session.lock_owned().await;
+        let mut turn_guard = owned_turn_guard().await;
         let runtime = bailing_runtime();
         let agent = Agent::new(empty_config());
 
@@ -689,6 +704,7 @@ mod tests {
         let outcome = agent
             .execute_tool_batch(
                 &mut session,
+                &mut turn_guard,
                 &response,
                 &mut messages,
                 &runtime,
@@ -735,6 +751,7 @@ mod tests {
         });
         let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
         let mut session = session.lock_owned().await;
+        let mut turn_guard = owned_turn_guard().await;
         let runtime = bailing_runtime();
         let agent = Agent::new(empty_config());
 
@@ -761,6 +778,7 @@ mod tests {
         agent
             .execute_tool_batch(
                 &mut session,
+                &mut turn_guard,
                 &response,
                 &mut messages,
                 &runtime,
