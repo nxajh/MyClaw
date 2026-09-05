@@ -563,6 +563,10 @@ impl TurnStream for TelegramTurnStream {
                         }
                     }
                 }
+                TurnEvent::ToolYielded { .. } => {
+                    // 契约 W（issue #256）：挂起中的调用不是完成——工具行保持
+                    // 进行中形态，真实结果由 park 唤醒后的 tool_result 写入。
+                }
                 TurnEvent::Done { text } => {
                     if self.defer_collapse {
                         // 单 preview (2026-08-12): KEEP the preview in

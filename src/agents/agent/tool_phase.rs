@@ -298,31 +298,49 @@ impl Agent {
                 persist_last(session);
             }
 
-            // Emit ToolResult event after the result is persisted.
-            push_or_drop(
-                &mut session.turn_stream,
-                TurnEvent::ToolResult {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    output: result_content,
-                    is_error,
-                },
-            )
-            .await;
-
-            // Notify channel of tool call completion (for reply progress).
-            // RFC channel-role-split §1.2: resolved from the live
-            // registry, not a turn-installed handle.
-            if let (Some(ch), Some(rt)) = (session.resolve_channel(), session.reply_target()) {
-                ch.on_tool_event(
-                    rt,
-                    crate::api::message::ToolEvent::End {
-                        tool_name: call.name.clone(),
-                        tool_call_id: call.id.clone(),
-                        success: !is_error,
+            // issue #256 (缺陷①): a deferred yield is NOT a completion — the
+            // tool_call stays unfulfilled while contract W parks on it. Emit
+            // the dedicated "yielded" event (client renders in-progress, never
+            // a return value) and skip the channel End event: a parked tool
+            // has not ended. The old unconditional ToolResult + End pair was
+            // exactly the "伪造完成" this issue documents — the stub
+            // `{"status":"yielded"}` was streamed as if it were the result.
+            if is_deferred_yield {
+                push_or_drop(
+                    &mut session.turn_stream,
+                    TurnEvent::ToolYielded {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
                     },
                 )
                 .await;
+            } else {
+                // Emit ToolResult event after the result is persisted.
+                push_or_drop(
+                    &mut session.turn_stream,
+                    TurnEvent::ToolResult {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        output: result_content,
+                        is_error,
+                    },
+                )
+                .await;
+
+                // Notify channel of tool call completion (for reply progress).
+                // RFC channel-role-split §1.2: resolved from the live
+                // registry, not a turn-installed handle.
+                if let (Some(ch), Some(rt)) = (session.resolve_channel(), session.reply_target()) {
+                    ch.on_tool_event(
+                        rt,
+                        crate::api::message::ToolEvent::End {
+                            tool_name: call.name.clone(),
+                            tool_call_id: call.id.clone(),
+                            success: !is_error,
+                        },
+                    )
+                    .await;
+                }
             }
 
             // Detect successful async delegation only after this result has
