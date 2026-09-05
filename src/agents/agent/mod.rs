@@ -117,7 +117,7 @@ impl Agent {
         // seed, request prefix, spec conversion, orphan-tool folding) —
         // extracted to `prepare_turn` below (batch 4).
         let (provider, model_id, allowed_tools, tool_specs, mut messages, mut loop_breaker) =
-            self.prepare_turn(session, &turn_ctx, runtime).await?;
+            self.prepare_turn(session_slot.as_mut().expect("run_inner: session slot empty"), &turn_ctx, runtime).await?;
 
         // Shared CompactionEngine singleton — RFC v2 target shape. Token
         // tracking lives solely on `Session.token_tracker`; CompactionEngine

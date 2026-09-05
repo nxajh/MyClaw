@@ -1693,7 +1693,7 @@ impl SessionContext {
                 // never successfully processed the request, so we want the
                 // media to remain inline for the retry / compaction path.
                 if turn_result.stop_reason != crate::providers::StopReason::ContextOverflow {
-                    age_session_media(&mut session, persist_hook.as_deref());
+                    age_session_media(&mut *session, persist_hook.as_deref());
                 }
 
                 if let Some(ref retry_msg) = turn_result.pending_retry {
