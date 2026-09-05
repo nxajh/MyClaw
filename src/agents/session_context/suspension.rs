@@ -197,6 +197,57 @@ mod suspension_tests {
         assert_eq!(snap.results[0].content, "pre-crash");
     }
 
+    /// issue #251/#252: `agent_resume` re-arms `pending` for a sub_session_id
+    /// that already has an EARLIER terminal recorded (the original timeout).
+    /// That earlier recording populated `recently_recorded_terminals`'
+    /// stale-repeat-call window (issue #224) — the resume's own terminal
+    /// event (completion or cancellation) must NOT be swallowed by that
+    /// window just because it shares the same id: the id is legitimately
+    /// pending again, so it must migrate cleanly into `results` and leave
+    /// `pending` empty, not orphan a ghost entry forever.
+    #[test]
+    fn record_terminal_pending_rearm_is_not_blocked_by_the_stale_window() {
+        let ctx = suspended(); // pending = ["t1"]
+        let first = ctx.record_terminal("t1".into(), SubStatus::TimedOut, "timed out".into(), 0, "test");
+        assert!(matches!(first, TerminalRecord::Recorded(_)));
+        assert!(ctx.suspension_snapshot().unwrap().pending.is_empty());
+
+        // Simulate `agent_resume`'s `add_pending_task` re-arming the SAME id
+        // (`recently_recorded_terminals` still holds "t1" from the call above).
+        ctx.add_pending_task("t1".to_string());
+        let second = ctx.record_terminal("t1".into(), SubStatus::Failed, "cancelled".into(), 0, "test");
+        assert!(
+            matches!(second, TerminalRecord::Recorded(_)),
+            "a re-armed pending id must not be treated as a stale duplicate: {second:?}"
+        );
+        let snap = ctx.suspension_snapshot().unwrap();
+        assert!(
+            snap.pending.is_empty(),
+            "pending must be cleared, not left as a permanent ghost entry: {:?}",
+            snap.pending
+        );
+        assert_eq!(snap.results.len(), 2);
+        assert_eq!(snap.results[1].content, "cancelled");
+    }
+
+    /// A genuinely stale repeat call — same id, NOT currently pending, no
+    /// legitimate re-arm — must still hit the #224 window guard exactly as
+    /// before; the #251/#252 fix only carves out the currently-pending case.
+    #[test]
+    fn record_terminal_stale_window_still_blocks_a_non_pending_repeat() {
+        let ctx = suspended();
+        ctx.add_pending_task("t2".to_string()); // keep suspension alive after t1 collects
+        let first = ctx.record_terminal("t1".into(), SubStatus::Completed, "done".into(), 0, "test");
+        assert!(matches!(first, TerminalRecord::Recorded(_)));
+        // t1 is not pending and not yet re-armed — a same-tick repeat call
+        // must still be caught by the stale-repeat-call window, same as
+        // `record_terminal_second_call_is_duplicate` already covers via the
+        // results-based check; this exercises the window-based path
+        // specifically (distinct code path, same outcome).
+        let second = ctx.record_terminal("t1".into(), SubStatus::Completed, "again".into(), 0, "test");
+        assert!(matches!(second, TerminalRecord::Duplicate));
+    }
+
     #[test]
     fn clear_semantics_pending_kept_empty_removed_idempotent() {
         let (ctx, _m) = make_ctx();

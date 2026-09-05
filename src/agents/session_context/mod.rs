@@ -670,17 +670,38 @@ impl SessionContext {
         sent_message_count: u64,
         source: &'static str,
     ) -> TerminalRecord {
-        // issue #224: this bounded, suspension-independent check runs FIRST
-        // because the check below (inside the `Some(s)` branch) only
-        // protects while `turn_suspension` still exists — as soon as every
-        // pending task is collected, `clear_suspension_if_collected` drops
-        // it back to `None`, and a call for an id already recorded minutes
-        // (or seconds) earlier would otherwise hit the `guard.as_mut() ==
-        // None` branch below and return `NoSuspension` — which
-        // `route_shell_completion` deliberately treats as "route it anyway"
-        // (#129: every notify-armed process gets a notice), turning a
-        // repeat call into a repeat delivery. Pruned lazily to the window.
-        {
+        // issue #252: an id currently sitting in `pending` is a legitimate,
+        // live task (freshly delegated, or re-armed by `agent_resume` —
+        // issue #251) — its terminal event must always be allowed to
+        // migrate pending→results, regardless of whether an EARLIER,
+        // different terminal for the same id (e.g. the original timeout
+        // that #251's resume is recovering from) fell inside the same
+        // stale-repeat-call window below. Skipping that window check here
+        // is what lets the resume's own completion/cancellation actually
+        // clear `pending` instead of leaving a ghost entry that
+        // `render_background_work_reminder` reports forever.
+        let currently_pending = {
+            let guard = self
+                .turn_suspension
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            guard
+                .as_ref()
+                .is_some_and(|s| s.pending.iter().any(|t| t == &sub_session_id))
+        };
+
+        if !currently_pending {
+            // issue #224: this bounded, suspension-independent check runs
+            // because the check below (inside the `Some(s)` branch) only
+            // protects while `turn_suspension` still exists — as soon as
+            // every pending task is collected, `clear_suspension_if_collected`
+            // drops it back to `None`, and a call for an id already recorded
+            // minutes (or seconds) earlier would otherwise hit the
+            // `guard.as_mut() == None` branch below and return
+            // `NoSuspension` — which `route_shell_completion` deliberately
+            // treats as "route it anyway" (#129: every notify-armed process
+            // gets a notice), turning a repeat call into a repeat delivery.
+            // Pruned lazily to the window.
             let mut recent = self
                 .recently_recorded_terminals
                 .lock()

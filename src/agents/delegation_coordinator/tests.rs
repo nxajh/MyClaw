@@ -374,6 +374,88 @@ async fn resume_timed_out_default_budget_doubles_original_with_floor_and_ceiling
     assert_eq!(backend.load_delegation_checkpoint(&sub3.id).unwrap().timeout_secs, 1800);
 }
 
+/// issue #251/#252 (end to end): the sub-agent completed naturally between
+/// the original timeout and `agent_resume` — its own history already ends
+/// with a clean final answer. `resume_timed_out` must deliver THAT existing
+/// result as a genuine `Completed` event (not a spurious `Failed` from
+/// misreading `run_recovery`'s "nothing to do" as a failure), and the
+/// parent's suspension must actually clear afterward instead of leaving a
+/// permanent ghost `pending` entry (the #252 stale-repeat-call dedup would
+/// otherwise swallow this second terminal for the same sub_session_id,
+/// since the FIRST — the original TimedOut — already occupies the window).
+#[tokio::test]
+async fn resume_timed_out_already_complete_delivers_existing_result_not_a_spurious_failure() {
+    use crate::agents::session_context::TerminalRecord;
+    use crate::agents::turn::SubStatus;
+
+    let (dc, manager, _dir) = coordinator_with_backend();
+    dc.set_runtime(crate::agents::agent::tests::bailing_runtime());
+    let (tx, mut rx) = mpsc::channel(8);
+    dc.set_event_sender(tx);
+
+    let parent = manager.get_or_create_context("mock:default:u1");
+    let sub = manager.create_sub_session(&parent.session_id, "coder").unwrap();
+    manager
+        .backend()
+        .save_delegation_checkpoint(&checkpoint_for(&sub.id, &parent.session_id, "timed_out", 15))
+        .unwrap();
+
+    // The original timeout already delivered and recorded — pending is
+    // empty again, `results` holds the TimedOut entry, and the
+    // stale-repeat-call window now contains this sub_session_id.
+    parent.add_pending_task(sub.id.clone());
+    let first = parent.record_terminal(sub.id.clone(), SubStatus::TimedOut, "timed out".into(), 0, "test");
+    assert!(matches!(first, TerminalRecord::Recorded(_)));
+    assert!(!parent.has_pending_async_work());
+
+    // Simulate the sub-agent's own natural completion landing on disk
+    // (its notification was lost to the SAME dedup window — that half of
+    // #251 is a separate, harder race; this test covers what `agent_resume`
+    // does once called).
+    {
+        let sub_ctx = manager.load_context_by_session_id(&sub.id).unwrap();
+        let mut session = sub_ctx.session.lock().await;
+        session.add_user("run the task".to_string());
+        session.persist_last();
+        session.add_assistant_with_tools(
+            "TIMEOUT-TEST-abc123 all done".to_string(),
+            vec![],
+            None,
+            None,
+            None,
+            None,
+        );
+        session.persist_last();
+    }
+
+    let resumed = dc.resume_timed_out(&sub.id, Some(30)).unwrap();
+    assert_eq!(resumed, sub.id);
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("recover_async's spawned task must produce an event")
+        .expect("event channel must not be closed");
+    match event {
+        DelegationEvent::Completed { sub_session_id, summary, .. } => {
+            assert_eq!(sub_session_id, sub.id);
+            assert!(summary.contains("TIMEOUT-TEST-abc123"), "got: {summary}");
+        }
+        other => panic!("expected Completed with the existing result, got {other:?}"),
+    }
+
+    // Route it through record_terminal exactly as `wake()` would — pending
+    // must actually clear, not stay stuck as a ghost entry.
+    let second = parent.record_terminal(sub.id.clone(), SubStatus::Completed, "...".into(), 0, "test");
+    assert!(
+        matches!(second, TerminalRecord::Recorded(_)),
+        "the resume's own terminal must not be swallowed by the #224 stale-repeat-call window: {second:?}"
+    );
+    assert!(
+        !parent.has_pending_async_work(),
+        "pending must clear — no ghost entry left behind"
+    );
+}
+
 #[test]
 fn check_depth_three_level_chain_boundary() {
     let (dc, manager) = coordinator(3);

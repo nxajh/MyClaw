@@ -59,6 +59,44 @@ pub(super) fn should_gc_sub_session(is_async_delegation: bool, result_is_ok: boo
     result_is_ok && !is_async_delegation
 }
 
+/// issue #251: `Agent::run_recovery` returns `Ok(None)` both when the
+/// session has no history at all AND when its history already ends with a
+/// clean, final assistant response (no incomplete turn to continue) — the
+/// latter is exactly what a `resume_timed_out` call sees when the sub-agent
+/// completed naturally between the original timeout and the resume. Extract
+/// that existing final answer so the caller can report it as a genuine
+/// completion instead of a failure. Returns `None` for any other shape
+/// (empty history, or an unexpected trailing role) — the caller falls back
+/// to its original "nothing to recover" error in that case.
+fn existing_final_text(session: &crate::agents::session::Session) -> Option<crate::agents::turn::TurnResult> {
+    let last = session.history.last()?;
+    // `tool_calls` may be `None` or `Some(vec![])` for a plain final answer
+    // depending on which `Session` helper appended it — both mean "no
+    // pending calls", matching how `run_recovery`'s own Case A detection
+    // treats them identically (iterating an empty `Some` is a no-op).
+    let has_tool_calls = last.tool_calls.as_ref().is_some_and(|c| !c.is_empty());
+    if last.role != "assistant" || has_tool_calls {
+        return None;
+    }
+    let text: String = last
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            crate::providers::ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    if text.is_empty() {
+        return None;
+    }
+    Some(crate::agents::turn::TurnResult {
+        text,
+        stop_reason: crate::providers::StopReason::EndTurn,
+        pending_retry: None,
+        has_pending: false,
+    })
+}
+
 impl DelegationCoordinator {
     /// Delegate a task asynchronously — spawns the sub-agent in a
     /// background tokio task whose JoinHandle is stashed in `running`
@@ -492,7 +530,23 @@ impl DelegationCoordinator {
                 let mut session = sub_ctx.session.lock().await;
                 let resolved = crate::agents::orchestrator::turn::ResolvedTurn::resolve(&session, &runtime);
                 let turn_ctx = resolved.turn_context();
-                sub_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await
+                let recovered = sub_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await;
+                match recovered {
+                    // issue #251: `run_recovery` returning `Ok(None)` means
+                    // "no incomplete turn to continue" — which also covers
+                    // the case where the sub-agent completed naturally
+                    // between the original timeout and this resume call, so
+                    // its history already ends with a genuine final answer.
+                    // Surface that existing result instead of letting the
+                    // caller below misread a legitimate no-op as a failure
+                    // (previously: a resume on an already-completed
+                    // delegation always produced a spurious
+                    // `DelegationEvent::Failed`, which then hit #252's
+                    // stale-repeat-call dedup and vanished, both losing the
+                    // real result and orphaning the parent's pending entry).
+                    Ok(None) => Ok(existing_final_text(&session)),
+                    other => other,
+                }
             };
 
             let result = match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), turn_future).await {
@@ -567,5 +621,80 @@ impl DelegationCoordinator {
                 allowed_tools: allowed_tools_entry,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::session::Session;
+    use crate::providers::capability_chat::ChatMessage;
+
+    /// issue #251: a session whose history already ends with a plain final
+    /// assistant answer (no incomplete turn) must have that answer
+    /// extracted — this is exactly what `resume_timed_out` sees when the
+    /// sub-agent completed naturally between the original timeout and the
+    /// resume call.
+    #[test]
+    fn existing_final_text_extracts_a_clean_trailing_assistant_message() {
+        let mut session = Session::new("s1".to_string());
+        session.history.push(ChatMessage::user_text("do the thing"));
+        session.history.push(ChatMessage::assistant_text("TIMEOUT-TEST-5c81 all done"));
+
+        let tr = existing_final_text(&session).expect("must extract the trailing answer");
+        assert_eq!(tr.text, "TIMEOUT-TEST-5c81 all done");
+        assert_eq!(tr.stop_reason, crate::providers::StopReason::EndTurn);
+        assert!(!tr.has_pending);
+    }
+
+    /// An assistant message with unresolved tool_calls is NOT a clean final
+    /// answer — `run_recovery` would have caught this as Case A (returning
+    /// `Some`, never reaching `existing_final_text` at all), but the helper
+    /// itself must still refuse to fabricate a result for this shape.
+    #[test]
+    fn existing_final_text_refuses_a_trailing_tool_call() {
+        let mut session = Session::new("s2".to_string());
+        session.history.push(ChatMessage::assistant_text(""));
+        session.history.last_mut().unwrap().tool_calls = Some(vec![crate::providers::ToolCall {
+            id: "call_1".to_string(),
+            name: "shell".to_string(),
+            arguments: "{}".to_string(),
+        }]);
+
+        assert!(existing_final_text(&session).is_none());
+    }
+
+    /// Some `Session` helpers stamp `tool_calls: Some(vec![])` for a
+    /// no-tool-call assistant message rather than `None` — must be treated
+    /// identically to `None` (matches `run_recovery`'s own Case A check,
+    /// which iterates an empty `Some` as a no-op).
+    #[test]
+    fn existing_final_text_accepts_an_empty_some_tool_calls() {
+        let mut session = Session::new("s6".to_string());
+        session.history.push(ChatMessage::assistant_text("done, empty Some"));
+        session.history.last_mut().unwrap().tool_calls = Some(vec![]);
+
+        let tr = existing_final_text(&session).expect("empty Some(tool_calls) must not block extraction");
+        assert_eq!(tr.text, "done, empty Some");
+    }
+
+    #[test]
+    fn existing_final_text_none_for_empty_history() {
+        let session = Session::new("s3".to_string());
+        assert!(existing_final_text(&session).is_none());
+    }
+
+    #[test]
+    fn existing_final_text_none_when_trailing_message_is_not_assistant() {
+        let mut session = Session::new("s4".to_string());
+        session.history.push(ChatMessage::user_text("hello"));
+        assert!(existing_final_text(&session).is_none());
+    }
+
+    #[test]
+    fn existing_final_text_none_for_empty_assistant_text() {
+        let mut session = Session::new("s5".to_string());
+        session.history.push(ChatMessage::assistant_text(""));
+        assert!(existing_final_text(&session).is_none());
     }
 }
