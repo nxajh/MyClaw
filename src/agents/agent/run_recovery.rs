@@ -369,7 +369,9 @@ mod tests {
         // that happens, which is what this test inspects.
         let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
-        let tool_msg = session
+        let tool_msg = session_slot
+            .as_deref()
+            .unwrap()
             .history
             .iter()
             .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id))
@@ -429,7 +431,9 @@ mod tests {
 
         let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
-        let tool_msg = session
+        let tool_msg = session_slot
+            .as_deref()
+            .unwrap()
             .history
             .iter()
             .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id))
@@ -475,7 +479,9 @@ mod tests {
 
         let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
-        let tool_msg = session
+        let tool_msg = session_slot
+            .as_deref()
+            .unwrap()
             .history
             .iter()
             .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id))
@@ -519,7 +525,9 @@ mod tests {
 
         let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
-        let tool_msg = session
+        let tool_msg = session_slot
+            .as_deref()
+            .unwrap()
             .history
             .iter()
             .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id))
@@ -659,7 +667,9 @@ mod tests {
             "must report nothing-to-recover, not a synthesized turn result"
         );
         assert!(
-            !session
+            !session_slot
+                .as_deref()
+                .unwrap()
                 .history
                 .iter()
                 .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id)),
@@ -696,7 +706,9 @@ mod tests {
 
         let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
-        let tool_msg = session
+        let tool_msg = session_slot
+            .as_deref()
+            .unwrap()
             .history
             .iter()
             .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id))
