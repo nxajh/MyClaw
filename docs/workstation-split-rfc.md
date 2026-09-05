@@ -26,7 +26,7 @@
 4. **验证回路外置**：CI 与 operator 审批在 agent 可自改范围之外（强度待批注，见 §7.2/§9-Q1）。
 5. **bootstrap 归身体**：工位宿主与实例的起停由 daemon/systemd/宿主 launcher 持有，agent 不承担自救循环。
 6. **自主是让渡不是获取**：各层自主档位由 operator 配置与调整（sudoers 类比：谁能 sudo 是配置）。
-7. **悬停不伪造完成（契约 W，endgame）**：工具未完成，execute() 不得返回——事件即返回值，由工具自身写入结果（单写者）；挂起期间 UI 呈现"进行中"而非伪造的完成态。挂起态的唯一权威源是持久化 history；任何执行可能跨越重启的工具自带重放幂等义务。现状契约 Y（信箱+回合结束）为过渡实现（§6.4，issue #256）。
+7. **悬停不伪造完成（契约 W，endgame）**：工具未完成，execute() 不得以非结果返回——阻塞至事件到达并返回事件本身，或跨重启时经重放取得真事件后返回；任何 stub/占位完成态均属违例，UI 须呈现"进行中"。结果由单一写入者落 history（endgame：工具自身；2b 落地中由会话层 park_for_yield 代行，见 §6.4）。挂起态的唯一权威源是持久化 history；任何执行可能跨越重启的工具自带重放幂等义务。现状为同任务 park 变体（过渡，§6.4，issue #256）。
 
 ## 2. 决策点总表
 
@@ -182,7 +182,7 @@ delegate 收敛后保留两档，**选择器是任务的目标域而非任务大
 
 **决议（2026-09-05，决策人）**：契约 W 记为本 RFC 原则区 endgame（§1.7）；现状契约 Y 为过渡实现。配套条款：①挂起态唯一权威源=持久化 history（内存 waiter 仅为加速结构）；②契约 W 的重放幂等义务——任何执行可能跨越重启的工具，重跑必须无害。
 
-**已落地**：Phase 1/2a/2b（#257/#258/#259：execute() 物理 park + 双锁穿线 + 单写者 history）；#262 补齐委托子会话的 notice→park 路由（registry miss 不再生成幽灵实例，通知经 try_fill 进入 park waiter）。三条交付路径（fast path / live-wake / 插话取消）已生产实证。
+**已落地（同任务 park 变体，过渡）**：Phase 1/2a/2b（#257/#258/#259）——sessions_yield 的回合在 `run_and_deliver::park_for_yield` 物理 park（双锁穿线 + 单写者 history）；execute() 本身照常返回 stub，`EndTurn` 信号在 SessionContext 层被转译为 park。外部语义与契约 W 一致（无磁盘 resume、history 无 stub、单写者），机制上保留 Y 的 EndTurn 骨架。#262 补齐委托子会话的 notice→park 路由（registry miss 不再生成幽灵实例，通知经 try_fill 进入 park waiter）。三条交付路径（fast path / live-wake / 插话取消）已生产实证（C/D park 115.5s / 295.5s）。**路线**：2b 为过渡；endgame 终态 = 等待点移入工具帧 + 跨重启重放（见下方未竟清单），届时 §1.7"工具自身写入"完全成立。
 
 **未竟（open）**：
 - 缺陷① stub 流渲染（近期待办①，契约无关）：`tool_phase.rs` 对 deferred yield 仍无条件发 `TurnEvent::ToolResult` + `End{success}`，客户端把悬停渲染成完成
