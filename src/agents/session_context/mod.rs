@@ -747,6 +747,15 @@ impl SessionContext {
             .as_ref()
             .is_some_and(|p| p.tool_call_id == tool_call_id);
         if !still_ours {
+            // The content was already successfully handed to us (`Ok`
+            // above) before a supersede (a new sessions_yield, or a #248
+            // interjection close) cleared `pending_yield` out from under
+            // this tool_call — the waiter slot was already empty by then,
+            // so nothing else knows about this content. Re-queue it rather
+            // than silently dropping it: whatever superseded us (or its
+            // own next sessions_yield) will pick it up via the same
+            // fast-path queue check this function starts with.
+            self.enqueue_pending_yield_event(PendingYieldEvent { content });
             return (session, turn_guard, false);
         }
         session.pending_yield = None;
@@ -2278,6 +2287,79 @@ mod park_for_yield_tests {
                 .any(|m| m.tool_call_id.as_deref() == Some("call_old")),
             "a cancelled park must not write anything to history"
         );
+    }
+
+    /// Regression: content already handed to the parked task via its waiter
+    /// (the `Ok(content)` branch) must not be silently dropped if
+    /// `pending_yield` gets superseded (by a new yield, or a #248
+    /// interjection close) in the narrow window between the send and the
+    /// parked task reacquiring the session lock — it must be re-queued so
+    /// whatever superseded it can still pick it up.
+    #[tokio::test]
+    async fn content_delivered_after_a_late_supersede_is_requeued_not_lost() {
+        let ctx = make_ctx();
+        let (mut session, turn_guard) = guards(&ctx).await;
+        session.pending_yield = Some(PendingYield {
+            tool_call_id: "call_a".to_string(),
+            implicit: false,
+        });
+        drop(session);
+        drop(turn_guard);
+        let (session, turn_guard) = guards(&ctx).await;
+
+        let park_ctx = Arc::clone(&ctx);
+        let handle = tokio::spawn(async move {
+            park_ctx
+                .park_for_yield(session, turn_guard, "call_a".to_string())
+                .await
+        });
+
+        for _ in 0..200 {
+            if ctx.yield_waiter.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(ctx.yield_waiter.lock().unwrap().is_some());
+
+        // Hold the session lock ourselves so the spawned task's own
+        // reacquire (right after `rx.await` resolves) blocks until we
+        // release it below — this deterministically orders "content sent"
+        // before "pending_yield superseded", reproducing the race exactly.
+        let mut held_session = Arc::clone(&ctx.session).lock_owned().await;
+
+        let waiter = ctx.yield_waiter.lock().unwrap().take().expect("waiter must be registered");
+        assert_eq!(waiter.tool_call_id, "call_a");
+        let _ = waiter.tx.send("sub-agent A done".to_string());
+
+        // Simulate a #248 interjection close superseding call_a while the
+        // parked task's content is already in flight: the waiter slot is
+        // already empty (taken above), so a real interjection's cancel
+        // would be a no-op here too.
+        held_session.pending_yield = None;
+        drop(held_session);
+
+        let (session, _turn_guard, filled) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("a superseded-after-send park must still resolve promptly")
+                .expect("spawned task must not panic");
+
+        assert!(!filled, "a superseded delivery must report no delivery");
+        assert!(
+            !session
+                .history
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some("call_a")),
+            "the superseded tool_call must not receive a second write"
+        );
+        let requeued = ctx.take_pending_yield_events();
+        assert_eq!(
+            requeued.len(),
+            1,
+            "the already-delivered content must be re-queued, not dropped"
+        );
+        assert_eq!(requeued[0].content, "sub-agent A done");
     }
 }
 
