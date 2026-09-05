@@ -21,6 +21,7 @@ use crate::agents::session::Session;
 use crate::agents::turn::TurnResult;
 use crate::api::turn_event::TurnEvent;
 use crate::providers::capability_chat::{ChatMessage, StopReason, ToolSpec};
+use tokio::sync::OwnedMutexGuard;
 
 /// Outcome of one tool batch. `Continue` means the turn loop should call the
 /// LLM again with the appended tool_result messages; the other variants are
@@ -43,7 +44,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_tool_batch(
         &self,
-        session: &mut Session,
+        session: &mut OwnedMutexGuard<Session>,
         response: &CollectedResponse,
         messages: &mut Vec<ChatMessage>,
         runtime: &crate::agents::AgentRuntime,
@@ -459,7 +460,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut session = Session::new(session_id.clone());
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(Session::new(session_id.clone())));
+        let mut session = session.lock_owned().await;
         let runtime = bailing_runtime().with_sessions_dir(sessions_dir.clone());
         let agent = Agent::new(empty_config());
 
@@ -575,6 +577,8 @@ mod tests {
             marker_present_at_tool_persist: std::sync::Mutex::new(None),
         });
         session.persist = Some(hook.clone());
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+        let mut session = session.lock_owned().await;
 
         let runtime = bailing_runtime().with_sessions_dir(sessions_dir.clone());
         let agent = Agent::new(empty_config());
@@ -655,7 +659,10 @@ mod tests {
     /// so the caller knows where to deliver it.
     #[tokio::test]
     async fn sessions_yield_defers_its_own_tool_result() {
-        let mut session = Session::new("test_yield_defers".to_string());
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(Session::new(
+            "test_yield_defers".to_string(),
+        )));
+        let mut session = session.lock_owned().await;
         let runtime = bailing_runtime();
         let agent = Agent::new(empty_config());
 
@@ -726,6 +733,8 @@ mod tests {
             tool_call_id: "call_old".to_string(),
             implicit: false,
         });
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+        let mut session = session.lock_owned().await;
         let runtime = bailing_runtime();
         let agent = Agent::new(empty_config());
 

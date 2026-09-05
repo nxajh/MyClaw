@@ -131,6 +131,8 @@ pub async fn run(
     session.owner_fqid = super::resolve_cli_identity(&cfg, user)?;
 
     session.add_user(prompt.to_string());
+    let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+    let mut session = session.lock_owned().await;
     let turn_ctx = myclaw::TurnContext {
         system_prompt: "",
         model_id: model_owned.as_deref(),

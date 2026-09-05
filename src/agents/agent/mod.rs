@@ -42,6 +42,7 @@ use crate::api::turn_event::TurnEvent;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{ChatMessage, StopReason, ToolSpec};
 use crate::providers::Capability;
+use tokio::sync::OwnedMutexGuard;
 
 // ── Module map ──────────────────────────────────────────────────────────────
 // mod.rs            Agent identity + run/run_inner orchestration
@@ -87,7 +88,7 @@ impl Agent {
     /// history. When no recovery is needed, delegates to [`Self::run_inner`].
     pub async fn run(
         &self,
-        session: &mut Session,
+        session: &mut OwnedMutexGuard<Session>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
     ) -> Result<TurnResult> {
@@ -103,7 +104,7 @@ impl Agent {
     /// through `run_recovery` indefinitely.
     async fn run_inner(
         &self,
-        session: &mut Session,
+        session: &mut OwnedMutexGuard<Session>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
     ) -> Result<TurnResult> {
@@ -179,18 +180,28 @@ impl Agent {
 
             // LLM request with same-model transient-error retry —
             // extracted to retry.rs as `chat_with_retry` (batch 3).
-            let response = chat_with_retry(
-                &session.id,
-                session.history.len(),
-                &provider,
-                &messages,
-                &tool_specs,
-                &model_id,
-                &turn_ctx,
-                &mut session.turn_stream,
-                runtime.user_registry.as_ref(),
-            )
-            .await?;
+            //
+            // `session` is `&mut OwnedMutexGuard<Session>` here: field access
+            // goes through `Deref`/`DerefMut` trait calls, so the borrow
+            // checker can't prove `&session.id` and `&mut session.turn_stream`
+            // below are disjoint within one call expression (it can for a
+            // plain `&mut Session`, where field projection is direct). A
+            // single reborrow into a plain `&mut Session` restores that.
+            let response = {
+                let session: &mut Session = session;
+                chat_with_retry(
+                    &session.id,
+                    session.history.len(),
+                    &provider,
+                    &messages,
+                    &tool_specs,
+                    &model_id,
+                    &turn_ctx,
+                    &mut session.turn_stream,
+                    runtime.user_registry.as_ref(),
+                )
+                .await?
+            };
 
             // Update Session.token_tracker from the API response. The tracker is
             // the source of truth for *usage reporting* (display + persistence,

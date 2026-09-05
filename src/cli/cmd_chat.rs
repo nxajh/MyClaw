@@ -123,7 +123,10 @@ pub async fn run(
     let agent_obj = myclaw::Agent::new(main_config);
 
     let session_key = agent.unwrap_or("cli");
-    let mut session = myclaw::Session::new(session_key.to_string());
+    let session = std::sync::Arc::new(tokio::sync::Mutex::new(myclaw::Session::new(
+        session_key.to_string(),
+    )));
+    let mut session = session.lock_owned().await;
 
     // #101 P2: CLI identity — required `--user` (shared helper with
     // `exec`, see `cli::resolve_cli_identity`). Same FQID shape as

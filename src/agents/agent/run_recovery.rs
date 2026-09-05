@@ -9,6 +9,7 @@ use super::exec_marker::{exec_marker_clear, exec_marker_read, persist_last};
 use crate::agents::AgentRuntime;
 use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
+use tokio::sync::OwnedMutexGuard;
 
 impl Agent {
     /// Resume a session whose history ends mid-turn (process crash,
@@ -30,7 +31,7 @@ impl Agent {
     /// mid-turn state (no recovery needed).
     pub async fn run_recovery(
         &self,
-        session: &mut Session,
+        session: &mut OwnedMutexGuard<Session>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
     ) -> Result<Option<TurnResult>> {
@@ -260,6 +261,15 @@ mod tests {
     use crate::config::agent::{PermissionMode, RunMode};
     use crate::providers::ToolCall;
 
+    /// Wrap a plain test-constructed `Session` in the `Arc<Mutex<_>>` +
+    /// owned-guard shape `run_recovery`/`run_inner` now require (Phase 1 of
+    /// issue #256's lock-chain refactor).
+    async fn owned(session: Session) -> OwnedMutexGuard<Session> {
+        std::sync::Arc::new(tokio::sync::Mutex::new(session))
+            .lock_owned()
+            .await
+    }
+
     #[test]
     fn interrupted_restart_cause_names_hot_switch_not_generic_daemon_restart() {
         assert_eq!(interrupted_restart_cause(true), "a deployment hot-switch restart");
@@ -334,7 +344,7 @@ mod tests {
         std::fs::write(marker_dir.join(".exec_marker"), call_id).unwrap();
         write_shell_entry(tmp.path(), session_id, "sh_lost", "lost_on_restart");
 
-        let mut session = session_with_orphan_shell_call(session_id, call_id);
+        let mut session = owned(session_with_orphan_shell_call(session_id, call_id)).await;
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -395,6 +405,7 @@ mod tests {
             None,
             None,
         );
+        let mut session = owned(session).await;
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -438,7 +449,7 @@ mod tests {
         let call_id = "call_no_marker";
 
         // Deliberately no `.exec_marker` file written at all.
-        let mut session = session_with_orphan_shell_call(session_id, call_id);
+        let mut session = owned(session_with_orphan_shell_call(session_id, call_id)).await;
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -480,7 +491,7 @@ mod tests {
         std::fs::create_dir_all(&marker_dir).unwrap();
         std::fs::write(marker_dir.join(".exec_marker"), "call_some_other_stale_id").unwrap();
 
-        let mut session = session_with_orphan_shell_call(session_id, call_id);
+        let mut session = owned(session_with_orphan_shell_call(session_id, call_id)).await;
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -523,7 +534,7 @@ mod tests {
         std::fs::create_dir_all(&marker_dir).unwrap();
         std::fs::write(marker_dir.join(".exec_marker"), "call_some_other_stale_id").unwrap();
 
-        let mut session = session_with_orphan_shell_call(session_id, call_id);
+        let mut session = owned(session_with_orphan_shell_call(session_id, call_id)).await;
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -557,7 +568,7 @@ mod tests {
         std::fs::create_dir_all(&marker_dir).unwrap();
         std::fs::write(marker_dir.join(".exec_marker"), call_id).unwrap();
 
-        let mut session = session_with_orphan_shell_call(session_id, call_id);
+        let mut session = owned(session_with_orphan_shell_call(session_id, call_id)).await;
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime().with_sessions_dir(tmp.path().to_path_buf());
         let turn_ctx = TurnContext {
@@ -609,6 +620,7 @@ mod tests {
             tool_call_id: call_id.to_string(),
             implicit: false,
         });
+        let mut session = owned(session).await;
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime();
         let turn_ctx = TurnContext {
@@ -647,7 +659,7 @@ mod tests {
     async fn sessions_yield_without_matching_pending_yield_falls_back_to_generic_case_a() {
         let session_id = "sess-yield-no-pending";
         let call_id = "call_y2";
-        let mut session = session_with_orphan_sessions_yield(session_id, call_id);
+        let mut session = owned(session_with_orphan_sessions_yield(session_id, call_id)).await;
         // Deliberately no `session.pending_yield` set.
         let agent = Agent::new(empty_config());
         let runtime = bailing_runtime();

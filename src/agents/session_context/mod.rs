@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::agents::session::{PersistHook, Session};
 
@@ -856,7 +856,7 @@ impl SessionContext {
         runtime: AgentRuntime,
     ) -> anyhow::Result<TurnResult> {
         let _turn_guard = self.turn_lock.lock().await;
-        let mut session = self.session.lock().await;
+        let mut session = Arc::clone(&self.session).lock_owned().await;
 
         let content = crate::str_utils::neutralize_spoofing(&inbound_msg.content.text);
         let reply_target = inbound_msg.receiver.id.clone();
@@ -1288,7 +1288,7 @@ impl SessionContext {
     #[allow(clippy::too_many_arguments)]
     async fn run_and_deliver(
         self: &Arc<Self>,
-        session: &mut Session,
+        session: &mut OwnedMutexGuard<Session>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
         channel_for_send: Option<Arc<dyn Channel>>,
@@ -1669,7 +1669,7 @@ impl SessionContext {
         runtime: AgentRuntime,
     ) -> anyhow::Result<TurnResult> {
         let _turn_guard = self.turn_lock.lock().await;
-        let mut session = self.session.lock().await;
+        let mut session = Arc::clone(&self.session).lock_owned().await;
 
         let persist_hook = session.persist.clone();
         let channel_for_send = session.resolve_channel();
