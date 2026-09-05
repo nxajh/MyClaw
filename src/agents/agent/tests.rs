@@ -121,7 +121,7 @@ async fn run_prechecks_recovery_without_recursing() {
     let mut session = Session::new("sess-1".into());
     session.add_user("pending question".into());
     let session = Arc::new(tokio::sync::Mutex::new(session));
-    let mut session = session.lock_owned().await;
+    let session = session.lock_owned().await;
     let agent = Agent::new(empty_config());
     let runtime = bailing_runtime();
     let turn_ctx = TurnContext {
