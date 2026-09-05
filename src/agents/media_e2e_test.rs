@@ -276,6 +276,8 @@ async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
             size_bytes: Some(5),
         }],
     );
+    let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+    let mut session = session.lock_owned().await;
 
     let agent = Agent::new(empty_config());
     let turn_ctx = TurnContext {
@@ -420,6 +422,8 @@ async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
             size_bytes: Some(5),
         }],
     );
+    let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+    let mut session = session.lock_owned().await;
 
     let agent = Agent::new(empty_config());
     let turn_ctx = TurnContext {

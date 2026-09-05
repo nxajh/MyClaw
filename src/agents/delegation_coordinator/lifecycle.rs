@@ -528,7 +528,7 @@ impl DelegationCoordinator {
 
             let turn_future = async {
                 let _turn_guard = sub_ctx.turn_lock.lock().await;
-                let mut session = sub_ctx.session.lock().await;
+                let mut session = Arc::clone(&sub_ctx.session).lock_owned().await;
                 let resolved = crate::agents::orchestrator::turn::ResolvedTurn::resolve(&session, &runtime);
                 let turn_ctx = resolved.turn_context();
                 let recovered = sub_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await;
