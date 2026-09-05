@@ -103,6 +103,7 @@ async fn async_send_to_parent_broadcasts_and_counts() {
         sub_session_id.clone(),
         RunningEntry {
             handle: tokio::spawn(async {}),
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: parent.session_id.clone(),
@@ -326,6 +327,7 @@ async fn resume_timed_out_rewrites_checkpoint_and_rearms_parent() {
         sub.id.clone(),
         RunningEntry {
             handle: tokio::spawn(async {}),
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: parent.session_id.clone(),
@@ -554,6 +556,7 @@ async fn cancel_broadcasts_failed_cancelled_to_parent_session() {
         sub_session_id.clone(),
         RunningEntry {
             handle: tokio::spawn(async {}),
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: parent.session_id.clone(),
@@ -689,6 +692,7 @@ async fn checkpoint_and_cancel_all_empties_running_and_writes_checkpoints() {
         sub_session_id.clone(),
         RunningEntry {
             handle: tokio::spawn(async {}),
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: "parent".to_string(),
@@ -902,6 +906,7 @@ async fn panic_in_inner_task_emits_failed_and_cleans_running() {
         sub_session_id.clone(),
         RunningEntry {
             handle,
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: parent.session_id.clone(),
@@ -963,6 +968,7 @@ async fn checkpoint_fallback_uses_running_entry_timeout_and_started_at() {
         sub_session_id.clone(),
         RunningEntry {
             handle: tokio::spawn(async {}),
+            sub_ctx: manager.get_or_create_context("mock:default:u1"),
             status: std::sync::RwLock::new(DelegationStatus::Running),
             agent_name: "coder".to_string(),
             parent_session_id: "parent".to_string(),
