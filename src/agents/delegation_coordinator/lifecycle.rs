@@ -536,7 +536,7 @@ impl DelegationCoordinator {
             let turn_future = async {
                 let mut turn_guard_slot = Some(Arc::clone(&sub_ctx.turn_lock).lock_owned().await);
                 let mut session_slot = Some(Arc::clone(&sub_ctx.session).lock_owned().await);
-                let resolved = crate::agents::orchestrator::turn::ResolvedTurn::resolve(&session, &runtime);
+                let resolved = crate::agents::orchestrator::turn::ResolvedTurn::resolve(session_slot.as_mut().expect("lifecycle: session slot empty"), &runtime);
                 let turn_ctx = resolved.turn_context();
                 let recovered = sub_ctx
                     .agent
@@ -555,7 +555,7 @@ impl DelegationCoordinator {
                     // `DelegationEvent::Failed`, which then hit #252's
                     // stale-repeat-call dedup and vanished, both losing the
                     // real result and orphaning the parent's pending entry).
-                    Ok(None) => Ok(existing_final_text(&session)),
+                    Ok(None) => Ok(existing_final_text(session_slot.as_mut().expect("lifecycle: session slot empty"))),
                     other => other,
                 }
             };

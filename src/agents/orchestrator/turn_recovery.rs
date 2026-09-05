@@ -148,7 +148,7 @@ fn spawn_recovery(
         let mut turn_guard_slot = Some(Arc::clone(&session_ctx.turn_lock).lock_owned().await);
         let mut session_slot = Some(Arc::clone(&session_ctx.session).lock_owned().await);
 
-        let resolved = ResolvedTurn::resolve(&session, &runtime);
+        let resolved = ResolvedTurn::resolve(session_slot.as_mut().expect("spawn_recovery: session slot empty"), &runtime);
         let turn_ctx = resolved.turn_context();
 
         match session_ctx
@@ -498,7 +498,7 @@ async fn recover_active_session(
     let text = {
         let mut turn_guard_slot = Some(Arc::clone(&session_ctx.turn_lock).lock_owned().await);
         let mut session_slot = Some(Arc::clone(&session_ctx.session).lock_owned().await);
-        let resolved = ResolvedTurn::resolve(&session, &ctx.runtime);
+        let resolved = ResolvedTurn::resolve(session_slot.as_mut().expect("recover_active: session slot empty"), &ctx.runtime);
         let turn_ctx = resolved.turn_context();
         let result = session_ctx
             .agent
@@ -512,7 +512,7 @@ async fn recover_active_session(
                 *session_ctx.pending_retry.lock().await = Some(pr.clone());
             }
         }
-        drop(session);
+        drop(session_slot);
         match result {
             Ok(Some(tr)) => {
                 tracing::info!(session = %sk, "startup recovery: turn completed");

@@ -369,10 +369,10 @@ impl Agent {
                 // no stub stream emission, no channel End, no EndTurn.
                 if let Some(ctx) = turn_ctx.yield_park.as_ref().and_then(|w| w.upgrade()) {
                     let session_id = session.id.clone();
-                    let mut session_opt = session_slot
+                    let session_opt = session_slot
                         .take()
                         .expect("execute_tool_batch: session slot empty at yield park");
-                    let mut turn_guard_opt = turn_guard_slot
+                    let turn_guard_opt = turn_guard_slot
                         .take()
                         .expect("execute_tool_batch: turn slot empty at yield park");
                     let (s, tg, filled) = ctx
