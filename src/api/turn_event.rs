@@ -110,6 +110,15 @@ pub enum TurnEvent {
         is_error: bool,
     },
 
+    /// 工具已挂起等待事件（契约 W，issue #256）：调用未完成——事件到达后
+    /// 将作为该 tool_call 的真实返回值写入（单写者=工具）。客户端应渲染为
+    /// 进行中（⏸），绝不渲染为完成态。
+    #[serde(rename = "tool_yielded")]
+    ToolYielded {
+        id: String,
+        name: String,
+    },
+
     /// Turn 被用户取消
     #[serde(rename = "cancelled")]
     Cancelled { partial: String },
