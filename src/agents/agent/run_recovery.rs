@@ -369,7 +369,7 @@ mod tests {
         // that happens, which is what this test inspects.
         let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
-        let tool_msg = session_slot
+        let tool_msg = session
             .as_deref()
             .unwrap()
             .history
@@ -431,7 +431,7 @@ mod tests {
 
         let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
-        let tool_msg = session_slot
+        let tool_msg = session
             .as_deref()
             .unwrap()
             .history
@@ -479,7 +479,7 @@ mod tests {
 
         let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
-        let tool_msg = session_slot
+        let tool_msg = session
             .as_deref()
             .unwrap()
             .history
@@ -525,7 +525,7 @@ mod tests {
 
         let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
-        let tool_msg = session_slot
+        let tool_msg = session
             .as_deref()
             .unwrap()
             .history
@@ -667,7 +667,7 @@ mod tests {
             "must report nothing-to-recover, not a synthesized turn result"
         );
         assert!(
-            !session_slot
+            !session
                 .as_deref()
                 .unwrap()
                 .history
@@ -706,7 +706,7 @@ mod tests {
 
         let _ = agent.run_recovery(&mut session, &mut turn_guard_slot, turn_ctx, &runtime).await;
 
-        let tool_msg = session_slot
+        let tool_msg = session
             .as_deref()
             .unwrap()
             .history
