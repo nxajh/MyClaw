@@ -323,9 +323,18 @@ pub(crate) async fn route_shell_completion(
         Some(_) => SubStatus::Failed,
     };
 
+    // issue #260: registry → live delegated sub context → disk. The
+    // coordinator fallback is what makes record_terminal (and the routing
+    // below) hit the real parked instance for contract-W sub-sessions,
+    // instead of rebuilding a duplicate from disk.
     let sctx = ctx
         .sessions
         .registered_context_by_session_id(&sc.session_id)
+        .or_else(|| {
+            ctx.delegator
+                .as_ref()
+                .and_then(|d| d.live_sub_context(&sc.session_id))
+        })
         .or_else(|| ctx.sessions.load_context_by_session_id(&sc.session_id));
     if let Some(sctx) = &sctx {
         match sctx.record_terminal(
@@ -397,10 +406,55 @@ pub(crate) async fn route_notice(
     // injection style: the "no materialized context" fallback right below
     // and the non-active `process_non_active` path at the bottom of this
     // function, neither of which this issue's redesign touches.
-    let sctx_opt = ctx
-        .sessions
-        .registered_context_by_session_id(session_id)
-        .or_else(|| ctx.sessions.load_context_by_session_id(session_id));
+    // issue #260: resolution order matters. A delegated sub-session parked
+    // in contract W (park_for_yield) is NOT in the `contexts` table — the
+    // registry lookup misses it and the old disk fallback built a SECOND
+    // SessionContext for the same id (double-live instance; the parked
+    // waiter never receives the event). Resolution order: registry (live
+    // active sessions) → coordinator-held live sub context (delegations in
+    // flight) → disk fallback (genuinely inactive sessions).
+    let (sctx_opt, via_live_sub) = {
+        let registered = ctx.sessions.registered_context_by_session_id(session_id);
+        if let Some(sctx) = registered {
+            (Some(sctx), false)
+        } else if let Some(sctx) = ctx
+            .delegator
+            .as_ref()
+            .and_then(|d| d.live_sub_context(session_id))
+        {
+            (Some(sctx), true)
+        } else {
+            (
+                ctx.sessions.load_context_by_session_id(session_id),
+                false,
+            )
+        }
+    };
+    // issue #260: a delegated sub-session that is live-parked in
+    // `park_for_yield` must receive this notice as the content of its
+    // pending `sessions_yield` — NOT as a new non-active turn (the old
+    // fallback rebuilt a second instance from disk, delivered the notice
+    // disguised as a user interjection, and left the delegation lifecycle
+    // dangling until the wall-clock timeout killed the finished sub-agent).
+    // Deliver through the park waiter instead and let the already-running
+    // turn write the result itself (single writer).
+    if via_live_sub {
+        if let Some(sctx) = &sctx_opt {
+            if sctx.has_live_yield_waiter() {
+                tracing::info!(
+                    session_id = %session_id,
+                    "issue #260: notice routed into live parked yield of delegated sub-session"
+                );
+                sctx.enqueue_pending_yield_event(
+                    crate::agents::session_context::PendingYieldEvent {
+                        content: content.clone(),
+                    },
+                );
+                sctx.try_fill_pending_yield(ctx.runtime.clone()).await;
+                return;
+            }
+        }
+    }
 
     let routing_key = &session.owner;
     let is_active = ctx

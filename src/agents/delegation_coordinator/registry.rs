@@ -28,6 +28,14 @@ pub struct RunningEntry {
     pub handle: JoinHandle<()>,
     pub status: std::sync::RwLock<DelegationStatus>,
     pub agent_name: String,
+    /// issue #260: the live sub-session SessionContext. Contract W (issue
+    /// #256) means the sub-agent's turn may be physically *parked* in
+    /// `park_for_yield` waiting for its own bg-shell completion — this Arc
+    /// is what lets delegation notice routing find the live parked instance
+    /// instead of rebuilding a second one from disk (double-live instance
+    /// bug). Lifetime mirrors the entry itself: removed at the terminal
+    /// transition together with the rest of the record.
+    pub sub_ctx: Arc<crate::agents::session_context::SessionContext>,
     /// Parent session id (FQID) this task was spawned from — kept so
     /// `cancel` (agent_kill) can broadcast the terminal
     /// `DelegationEvent::Failed { error: "cancelled" }` to the right
