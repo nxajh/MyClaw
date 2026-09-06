@@ -113,12 +113,79 @@ impl Agent {
                 .as_ref()
                 .is_some_and(|p| p.tool_call_id == pending_calls[0].id)
         {
-            tracing::debug!(
-                session = %session.id,
-                tool_call_id = %pending_calls[0].id,
-                "recovery: sessions_yield still genuinely pending (nothing queued) — leaving it unresolved"
-            );
-            return Ok(None);
+            // Phase 2d (issue #256): lazy replay. A sole, pending_yield-
+            // matching `sessions_yield` orphan is a deliberately deferred
+            // yield that survived a restart — instead of leaving the call
+            // unresolved (and risking a malformed tool_use/tool_result
+            // pairing downstream), re-dispatch it in the tool frame:
+            // `park_for_yield` registers the waiter (or fast-path drains an
+            // already-queued backlog), writes the tool_result itself (result
+            // single-writer, same as 2c), and we fall through to `run_inner`
+            // so the model processes the delivered events. Exactly ONE
+            // model call happens in this recovery — the one that handles
+            // the events; there is no separate "resume" inference.
+            if let Some(ctx) = turn_ctx.yield_park.as_ref().and_then(|w| w.upgrade()) {
+                let call_id = pending_calls[0].id.clone();
+                let session_id = session.id.clone();
+                let session_opt = session_slot
+                    .take()
+                    .expect("run_recovery: session slot empty at yield replay");
+                let turn_guard_opt = turn_guard_slot
+                    .take()
+                    .expect("run_recovery: turn slot empty at yield replay");
+                let (s, tg, filled) = ctx
+                    .park_for_yield(session_opt, turn_guard_opt, call_id.clone())
+                    .await;
+                *session_slot = Some(s);
+                *turn_guard_slot = Some(tg);
+                if filled {
+                    tracing::info!(
+                        session = %session_id,
+                        tool_call_id = %call_id,
+                        "phase 2d: pending yield replayed in-frame — result written, continuing the turn loop"
+                    );
+                    // History is well-formed again; drive the run loop
+                    // directly (same as the fall-through tail, but spelled
+                    // as a return so every arm of this branch returns —
+                    // that keeps the slot-reborrow shape identical to 2c's
+                    // in-frame park in `execute_tool_batch`).
+                    let tr = self
+                        .run_inner(session_slot, turn_guard_slot, turn_ctx, runtime)
+                        .await?;
+                    return Ok(Some(tr));
+                } else {
+                    // Superseded while parked (interjection / a newer
+                    // sessions_yield resolved this call from another task).
+                    // Mirror execute_tool_batch's Superseded shape: end the
+                    // turn without a stub delivery. #248 interjection
+                    // semantics are identical to 2c because the park is the
+                    // same code path.
+                    tracing::info!(
+                        session = %session_id,
+                        tool_call_id = %call_id,
+                        "phase 2d: pending yield replay superseded mid-park; ending turn without stub delivery"
+                    );
+                    return Ok(Some(TurnResult {
+                        text: String::new(),
+                        stop_reason: crate::providers::capability_chat::StopReason::EndTurn,
+                        pending_retry: None,
+                        has_pending: false,
+                    }));
+                }
+            } else {
+                // No live SessionContext handle (CLI/tests, or any turn
+                // built without a yield_park): keep the pre-2d behavior —
+                // leave the tool_call unresolved; the turn is still waiting
+                // exactly like it was before the restart, and whichever of
+                // the two tasks reaches the lock second is a no-op against
+                // the other's result.
+                tracing::debug!(
+                    session = %session.id,
+                    tool_call_id = %pending_calls[0].id,
+                    "recovery: sessions_yield still genuinely pending (nothing queued) — leaving it unresolved"
+                );
+                return Ok(None);
+            }
         }
 
         // Case A: close out orphan tool_calls so history ends well-formed.

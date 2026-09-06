@@ -52,6 +52,28 @@ pub fn identify_breakpoint(messages: &[ChatMessage]) -> Vec<BreakpointItem> {
         .collect()
 }
 
+/// Phase 2d (issue #256): the sole-orphan replay gate.
+///
+/// Returns `Some(tool_call_id)` only when the history contains exactly one
+/// unresolved tool_call (`identify_breakpoint`), it is a `sessions_yield`,
+/// and `pending_yield` names that same call — i.e. a *deliberately deferred*
+/// yield that survived a restart, safe to replay lazily. Mixed orphans (a
+/// `sessions_yield` alongside any other unresolved call) are a genuine
+/// crash: `None` — recovery must take Case A, never replay.
+pub fn sole_sessions_yield_orphan(
+    messages: &[ChatMessage],
+    pending_yield: Option<&crate::agents::session::PendingYield>,
+) -> Option<String> {
+    let breakpoints = identify_breakpoint(messages);
+    if breakpoints.len() != 1 || breakpoints[0].tool_name != "sessions_yield" {
+        return None;
+    }
+    let call_id = breakpoints[0].tool_call_id.clone();
+    pending_yield
+        .filter(|p| p.tool_call_id == call_id)
+        .map(|_| call_id)
+}
+
 /// Check whether the message history ends with an incomplete assistant turn
 /// (assistant emitted tool_calls but some/all are missing tool results).
 ///

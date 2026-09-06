@@ -21,7 +21,7 @@ use crate::providers::{
     VideoGenerationProvider,
 };
 
-pub(super) fn empty_config() -> SubAgentConfig {
+pub(crate) fn empty_config() -> SubAgentConfig {
     SubAgentConfig {
         name: "test".into(),
         system_prompt: String::new(),
