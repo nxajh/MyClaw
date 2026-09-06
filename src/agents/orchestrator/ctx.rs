@@ -348,20 +348,68 @@ mod tests {
         sctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("sub-agent finished while the daemon was down".to_string()));
         ctx.sessions.drop_context("mock:default:u1");
 
-        // The call under test — no explicit try_fill_pending_yield call
-        // anywhere in this test, and nothing spawned in the background.
+        // Phase 2d (issue #256): the eager pass no longer cold-writes the
+        // fill — a sole deliberate yield orphan is replayed LAZILY in the
+        // tool frame. `session_context_for` must return with the yield still
+        // outstanding and the backlog still queued; the spawned replay turn
+        // re-dispatches the dangling tool_call (run_recovery →
+        // park_for_yield), writes the result under the original id, and the
+        // model processes the events in that same turn.
         let sctx2 = ctx.session_context_for("mock:default:u1").await;
 
+        {
+            let session = sctx2.session.lock().await;
+            assert_eq!(
+                session.pending_yield.as_ref().map(|p| p.tool_call_id.as_str()),
+                Some("call_y1"),
+                "phase 2d: pending_yield stays outstanding until the replay fills it in-frame"
+            );
+            assert!(
+                !session
+                    .history
+                    .iter()
+                    .any(|m| m.tool_call_id.as_deref() == Some("call_y1")),
+                "phase 2d: no cold write by the eager pass"
+            );
+            assert!(
+                !sctx2
+                    .pending_yield_events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty(),
+                "phase 2d: backlog stays queued for the replay's fast path"
+            );
+        }
+
+        // Drive the spawned replay turn to its in-frame fill (the test
+        // runtime's provider bails right after — the fill happens in
+        // run_recovery before any LLM call).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let session = sctx2.session.lock().await;
+                let filled = session
+                    .history
+                    .iter()
+                    .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call_y1"))
+                    && session.pending_yield.is_none();
+                if filled {
+                    break;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "phase 2d: replay turn never filled the pending yield"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
         let session = sctx2.session.lock().await;
-        assert!(
-            session.pending_yield.is_none(),
-            "pending_yield must already be filled by the time session_context_for returns"
-        );
         let filled = session
             .history
             .iter()
             .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call_y1"))
-            .expect("the sessions_yield call must already have its result");
+            .expect("the sessions_yield call must have its result after the replay");
         assert!(filled.text_content().contains("sub-agent finished while the daemon was down"));
     }
 }

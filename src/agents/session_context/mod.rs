@@ -140,6 +140,13 @@ pub struct SessionContext {
     /// falls back to the pre-existing `pending_yield_events` +
     /// `try_fill_pending_yield` + `resume_after_yield` path unchanged.
     pub(crate) yield_waiter: std::sync::Mutex<Option<YieldWaiter>>,
+    /// Phase 2d (issue #256): set while a lazily-replayed pending yield is
+    /// in flight (the replay turn re-dispatches the dangling tool_call
+    /// in-frame). Gates `try_fill_pending_yield`'s replay spawn so two
+    /// near-simultaneous event arrivals cannot spawn two replay turns;
+    /// cleared when the replay turn ends (see `ClearReplayFlagOnDrop`).
+    /// Runtime-only, never persisted.
+    pub(crate) yield_replay_in_flight: std::sync::atomic::AtomicBool,
 }
 
 /// Phase 2b (issue #256): see `SessionContext::yield_waiter`.
@@ -232,6 +239,60 @@ fn spawn_resume_after_yield(sctx: Arc<SessionContext>, runtime: AgentRuntime) {
     });
 }
 
+/// Phase 2d (issue #256): clears `yield_replay_in_flight` when the replay
+/// turn task ends — including via panic or early `?` — so the replay gate
+/// can never wedge permanently.
+struct ClearReplayFlagOnDrop(Arc<SessionContext>);
+
+impl Drop for ClearReplayFlagOnDrop {
+    fn drop(&mut self) {
+        self.0
+            .yield_replay_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Phase 2d (issue #256): lazy replay of a restart-surviving pending yield.
+/// Spawned by `try_fill_pending_yield`'s cold path when the sole-orphan
+/// replay gate passes INSTEAD of the pre-2d "write the result here, then
+/// spawn `resume_after_yield`" — nothing has been written to history yet.
+/// The spawned turn re-enters `run_recovery`, which re-dispatches the
+/// dangling tool_call in the tool frame (`park_for_yield`): the queued
+/// backlog becomes the tool_result (single writer), and the loop continues
+/// with exactly one model call — the one that processes the events.
+/// Plain (non-async) function so its `tokio::spawn` isn't inlined into an
+/// async body, same rationale as `spawn_resume_after_yield`.
+fn spawn_yield_replay(sctx: Arc<SessionContext>, runtime: AgentRuntime) {
+    // Swap under the caller's session-lock hold: serializes competing
+    // `try_fill_pending_yield` callers so only one replay turn is ever
+    // spawned per pending yield.
+    if sctx
+        .yield_replay_in_flight
+        .swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        tracing::debug!(
+            session_id = %sctx.session_id,
+            "phase 2d: yield replay already in flight — not spawning a second one"
+        );
+        return;
+    }
+    let clear_flag = ClearReplayFlagOnDrop(Arc::clone(&sctx));
+    tokio::spawn(async move {
+        let _clear_flag = clear_flag;
+        tracing::info!(
+            session_id = %sctx.session_id,
+            "phase 2d: replaying restart-surviving pending yield in-frame"
+        );
+        if let Err(e) = sctx.resume_after_yield(runtime).await {
+            tracing::error!(
+                session_id = %sctx.session_id,
+                err = %e,
+                "phase 2d: yield replay turn failed"
+            );
+        }
+    });
+}
+
 /// issue #224: how long a `record_terminal`'d sub_session_id is remembered
 /// for duplicate detection after `turn_suspension` clears. Matches the 1h
 /// convention already established by `STALE_LOST_NOTICE_AFTER_SECS`
@@ -318,6 +379,7 @@ impl SessionContext {
             recently_recorded_terminals: std::sync::Mutex::new(Vec::new()),
             pending_yield_events: std::sync::Mutex::new(std::collections::VecDeque::new()),
             yield_waiter: std::sync::Mutex::new(None),
+            yield_replay_in_flight: std::sync::atomic::AtomicBool::new(false),
         };
         ctx.restore_suspension();
         ctx.restore_pending_yield_events();
@@ -343,6 +405,7 @@ impl SessionContext {
             recently_recorded_terminals: std::sync::Mutex::new(Vec::new()),
             pending_yield_events: std::sync::Mutex::new(std::collections::VecDeque::new()),
             yield_waiter: std::sync::Mutex::new(None),
+            yield_replay_in_flight: std::sync::atomic::AtomicBool::new(false),
         };
         ctx.restore_suspension();
         ctx.restore_pending_yield_events();
@@ -687,6 +750,18 @@ impl SessionContext {
     /// queue is empty on disk either way once this returns (whether the
     /// caller consumes the events or restores `pending_yield` untouched),
     /// so persisting unconditionally here keeps the file in sync.
+    /// Phase 2d (issue #256): non-destructive emptiness check for the
+    /// replay gate (contrast [`Self::take_pending_yield_events`], which
+    /// drains and re-persists). The caller holds the session lock, so the
+    /// answer cannot go stale behind its back within `try_fill_pending_yield`.
+    fn has_queued_pending_yield_events(&self) -> bool {
+        !self
+            .pending_yield_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+
     pub fn take_pending_yield_events(&self) -> Vec<PendingYieldEvent> {
         let taken: Vec<PendingYieldEvent> = std::mem::take(
             &mut *self
@@ -721,7 +796,11 @@ impl SessionContext {
     /// fresh task. `pending_yield` is put back in that case too: the
     /// waking task re-validates and clears it itself.
     pub async fn try_fill_pending_yield(self: &Arc<Self>, runtime: AgentRuntime) {
-        let should_resume = {
+        // Phase 2d (issue #256): the cold path below can either spawn a lazy
+        // replay turn or take the pre-2d fill-and-resume fallback.
+        let mut should_resume = false;
+        let mut should_replay = false;
+        {
             let mut session = self.session.lock().await;
             let Some(pending) = session.pending_yield.take() else {
                 return;
@@ -760,15 +839,44 @@ impl SessionContext {
                 }
             }
             // issue #255: same drain contract for the cold (non-parked) path.
-            let Some(content) = self.drain_pending_yield_for_fill() else {
+            //
+            // Phase 2d (issue #256): lazy replay gate first. When the
+            // breakpoints say this pending yield is a SOLE deliberate
+            // `sessions_yield` orphan (the restart-reconstruction shape) and
+            // a backlog is actually queued, do NOT write the result here —
+            // spawn a replay turn that re-dispatches the dangling tool_call
+            // in the tool frame instead (`run_recovery` → `park_for_yield`).
+            // Result stays single-writer (park_for_yield writes it), and the
+            // turn loop continues with exactly one model call — the one that
+            // processes the queued events. Mixed orphans, an empty queue, or
+            // a replay already in flight fall through to the pre-2d cold
+            // path below (write + spawn resume) — the guaranteed fallback.
+            let replay_gate = crate::agents::session::sole_sessions_yield_orphan(
+                &session.history,
+                Some(&pending),
+            )
+            .is_some();
+            if replay_gate
+                && self.has_queued_pending_yield_events()
+                && !self
+                    .yield_replay_in_flight
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
                 session.pending_yield = Some(pending);
-                return;
-            };
-            session.add_tool_result(pending.tool_call_id, "sessions_yield", content, false);
-            session.persist_last();
-            true
+                should_replay = true;
+            } else {
+                let Some(content) = self.drain_pending_yield_for_fill() else {
+                    session.pending_yield = Some(pending);
+                    return;
+                };
+                session.add_tool_result(pending.tool_call_id, "sessions_yield", content, false);
+                session.persist_last();
+                should_resume = true;
+            }
         };
-        if should_resume {
+        if should_replay {
+            spawn_yield_replay(Arc::clone(self), runtime);
+        } else if should_resume {
             spawn_resume_after_yield(Arc::clone(self), runtime);
         }
     }
@@ -2057,6 +2165,7 @@ mod pending_yield_tests {
     use super::*;
     use crate::agents::SessionManager;
     use crate::agents::session::PendingYield;
+    use crate::providers::capability_chat::ChatMessage;
 
     fn make_ctx() -> Arc<SessionContext> {
         let manager = Arc::new(SessionManager::in_memory());
@@ -2065,6 +2174,275 @@ mod pending_yield_tests {
 
     fn bailing_runtime() -> AgentRuntime {
         crate::agents::agent::tests::bailing_runtime()
+    }
+
+    /// Phase 2d helper: an assistant message carrying a single unresolved
+    /// tool_call (restart-reconstruction shape for a deferred yield).
+    fn assistant_with_calls(id_names: &[(&str, &str)]) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            parts: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(
+                id_names
+                    .iter()
+                    .map(|(id, name)| crate::providers::ToolCall {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        arguments: "{}".to_string(),
+                    })
+                    .collect(),
+            ),
+            is_error: None,
+            model: None,
+            usage: None,
+        }
+    }
+
+    /// Poll until the spawned replay turn has filled the pending yield
+    /// in-frame (the bailing provider errors right after — the fill itself
+    /// happens in `run_recovery` before any LLM call).
+    async fn wait_for_replay_fill(ctx: &Arc<SessionContext>, call_id: &str) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let session = ctx.session.lock().await;
+                let filled = session
+                    .history
+                    .iter()
+                    .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some(call_id))
+                    && session.pending_yield.is_none();
+                if filled {
+                    return;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "phase 2d: replay turn never filled the pending yield"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Phase 2d (issue #256) test (a): restart simulation. A reconstructed
+    /// pending yield (sole sessions_yield orphan) plus a queued backlog must
+    /// NOT be cold-filled by `try_fill_pending_yield` — the backlog stays
+    /// queued and `pending_yield` stays outstanding until the spawned replay
+    /// turn re-dispatches the dangling tool_call in the tool frame, writes
+    /// the result under the ORIGINAL tool_call_id, and lets the (single,
+    /// subsequent) model call process the events.
+    #[tokio::test]
+    async fn restart_pending_yield_is_replayed_in_frame_not_cold_filled() {
+        let ctx = make_ctx();
+        {
+            let mut session = ctx.session.lock().await;
+            session.add_user("do the async thing".to_string());
+            session.history.push(assistant_with_calls(&[("call_y1", "sessions_yield")]));
+            session.pending_yield = Some(PendingYield {
+                tool_call_id: "call_y1".to_string(),
+                implicit: false,
+            });
+        }
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh(
+            "sub-agent finished while the daemon was down".to_string(),
+        ));
+
+        ctx.try_fill_pending_yield(bailing_runtime()).await;
+
+        // Lazy: nothing synchronously written...
+        {
+            let session = ctx.session.lock().await;
+            assert_eq!(
+                session.pending_yield.as_ref().map(|p| p.tool_call_id.as_str()),
+                Some("call_y1"),
+                "phase 2d: try_fill must leave the replay to the in-frame path"
+            );
+            assert!(
+                !session
+                    .history
+                    .iter()
+                    .any(|m| m.tool_call_id.as_deref() == Some("call_y1")),
+                "phase 2d: no cold write — the replay turn owns the result"
+            );
+        }
+        // ...and the backlog is still queued for the replay's fast path.
+        assert_eq!(
+            ctx.pending_yield_events.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1,
+            "backlog must stay queued for the in-frame replay"
+        );
+
+        wait_for_replay_fill(&ctx, "call_y1").await;
+
+        let session = ctx.session.lock().await;
+        let result = session
+            .history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call_y1"))
+            .expect("the replayed yield must have its result under the original id");
+        assert_eq!(result.name.as_deref(), Some("sessions_yield"));
+        assert_eq!(result.is_error, Some(false));
+        assert!(result.text_content().contains("daemon was down"));
+        assert!(
+            !ctx.yield_replay_in_flight
+                .load(std::sync::atomic::Ordering::Acquire),
+            "replay flag must be cleared once the replay turn ends"
+        );
+    }
+
+    /// Phase 2d (issue #256) test (b): mixed orphans are a genuine crash —
+    /// never replayed. `try_fill_pending_yield` must take the pre-2d cold
+    /// path (synchronous write + resume spawn) exactly as before.
+    #[tokio::test]
+    async fn mixed_orphans_fall_back_to_cold_fill_never_replay() {
+        let ctx = make_ctx();
+        {
+            let mut session = ctx.session.lock().await;
+            session.history.push(assistant_with_calls(&[
+                ("call_y1", "sessions_yield"),
+                ("call_s1", "shell"),
+            ]));
+            session.pending_yield = Some(PendingYield {
+                tool_call_id: "call_y1".to_string(),
+                implicit: false,
+            });
+        }
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("backlog".to_string()));
+
+        ctx.try_fill_pending_yield(bailing_runtime()).await;
+
+        let session = ctx.session.lock().await;
+        assert!(
+            session.pending_yield.is_none(),
+            "mixed orphans: pre-2d cold fill must still clear pending_yield"
+        );
+        let cold = session
+            .history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call_y1"))
+            .expect("mixed orphans take the cold path: result written synchronously");
+        assert!(cold.text_content().contains("backlog"));
+        assert!(
+            !ctx.yield_replay_in_flight
+                .load(std::sync::atomic::Ordering::Acquire),
+            "mixed orphans must never spawn a replay turn"
+        );
+    }
+
+    /// Phase 2d (issue #256) test (c): a replay that finds an empty queue
+    /// parks IN the tool frame; an event arriving during the replay park is
+    /// taken over by the existing 2c waiter mechanism (try_fill signals the
+    /// live waiter; the parked task writes the result itself).
+    #[tokio::test]
+    async fn replay_parks_in_frame_and_live_waiter_takes_over() {
+        let ctx = make_ctx();
+        {
+            let mut session = ctx.session.lock().await;
+            session.history.push(assistant_with_calls(&[("call_y1", "sessions_yield")]));
+            session.pending_yield = Some(PendingYield {
+                tool_call_id: "call_y1".to_string(),
+                implicit: false,
+            });
+        }
+
+        // The replay entry: run_recovery on the reconstructed session, with
+        // a live SessionContext handle (what the replay turn carries).
+        let agent = std::sync::Arc::new(crate::agents::Agent::new(
+            crate::agents::agent::tests::empty_config(),
+        ));
+        let agent = std::sync::Arc::clone(&agent);
+        let ctx2 = std::sync::Arc::clone(&ctx);
+        let task = tokio::spawn(async move {
+            // Built inside the task: TurnContext borrows the system prompt,
+            // and tokio::spawn requires a 'static future.
+            let system_prompt = String::new();
+            let turn_ctx = TurnContext {
+                system_prompt: &system_prompt,
+                model_id: None,
+                thinking: None,
+                permission_mode: crate::config::agent::PermissionMode::Default,
+                run_mode: crate::config::agent::RunMode::Interactive,
+                yield_park: Some(std::sync::Arc::downgrade(&ctx2)),
+            };
+            let mut session_slot = Some(std::sync::Arc::clone(&ctx2.session).lock_owned().await);
+            let mut turn_guard_slot =
+                Some(std::sync::Arc::clone(&ctx2.turn_lock).lock_owned().await);
+            agent
+                .run_recovery(
+                    &mut session_slot,
+                    &mut turn_guard_slot,
+                    turn_ctx,
+                    &crate::agents::agent::tests::bailing_runtime(),
+                )
+                .await
+        });
+
+        // Parked with no queue? Wait for the live waiter to be registered.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ctx.has_live_yield_waiter() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "replay must park in-frame awaiting the event"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Event arrives during the replay park — the 2c waiter branch takes it.
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh(
+            "event delivered during replay".to_string(),
+        ));
+        ctx.try_fill_pending_yield(crate::agents::agent::tests::bailing_runtime())
+            .await;
+
+        let _ = task.await; // bailing provider errors after the in-frame fill
+
+        let session = ctx.session.lock().await;
+        let result = session
+            .history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call_y1"))
+            .expect("waiter-signaled replay park must write the result");
+        assert!(result.text_content().contains("event delivered during replay"));
+        assert!(
+            session.pending_yield.is_none(),
+            "park_for_yield clears pending_yield once it writes the result"
+        );
+    }
+
+    /// Phase 2d (issue #256) test (d): when the replay entry is unavailable
+    /// (here: the replay slot already claimed — the same gate that refuses a
+    /// second spawn), `try_fill_pending_yield` falls back to the pre-2d cold
+    /// path and still delivers: write + resume spawn, unchanged behavior.
+    #[tokio::test]
+    async fn try_fill_cold_fallback_still_works_when_replay_entry_unavailable() {
+        let ctx = make_ctx();
+        {
+            let mut session = ctx.session.lock().await;
+            session.history.push(assistant_with_calls(&[("call_y1", "sessions_yield")]));
+            session.pending_yield = Some(PendingYield {
+                tool_call_id: "call_y1".to_string(),
+                implicit: false,
+            });
+        }
+        ctx.enqueue_pending_yield_event(PendingYieldEvent::fresh("fallback fill".to_string()));
+        // Simulate "replay entry unavailable": the slot is claimed.
+        ctx.yield_replay_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        ctx.try_fill_pending_yield(bailing_runtime()).await;
+
+        let session = ctx.session.lock().await;
+        assert!(
+            session.pending_yield.is_none(),
+            "fallback: pending_yield cleared by the cold write"
+        );
+        let filled = session
+            .history
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call_y1"))
+            .expect("fallback cold path must still write the result synchronously");
+        assert!(filled.text_content().contains("fallback fill"));
     }
 
     #[tokio::test]
