@@ -277,7 +277,7 @@ async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
         }],
     );
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
-    let mut session = session.lock_owned().await;
+    let session = session.lock_owned().await;
 
     let agent = Agent::new(empty_config());
     let turn_ctx = TurnContext {
@@ -286,10 +286,12 @@ async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
         thinking: None,
         permission_mode: PermissionMode::Full,
         run_mode: RunMode::default(),
+        yield_park: None,
     };
 
+    let mut session_slot = Some(session);
     let result = agent
-        .run(&mut session, turn_ctx, &runtime)
+        .run(&mut session_slot, &mut None, turn_ctx, &runtime)
         .await
         .expect("turn ok");
 
@@ -423,7 +425,7 @@ async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
         }],
     );
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
-    let mut session = session.lock_owned().await;
+    let session = session.lock_owned().await;
 
     let agent = Agent::new(empty_config());
     let turn_ctx = TurnContext {
@@ -432,10 +434,12 @@ async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
         thinking: None,
         permission_mode: PermissionMode::Full,
         run_mode: RunMode::default(),
+        yield_park: None,
     };
 
+    let mut session_slot = Some(session);
     let result = agent
-        .run(&mut session, turn_ctx, &runtime)
+        .run(&mut session_slot, &mut None, turn_ctx, &runtime)
         .await
         .expect("turn ok");
 

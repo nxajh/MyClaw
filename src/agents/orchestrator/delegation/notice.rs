@@ -446,9 +446,7 @@ pub(crate) async fn route_notice(
                     "issue #260: notice routed into live parked yield of delegated sub-session"
                 );
                 sctx.enqueue_pending_yield_event(
-                    crate::agents::session_context::PendingYieldEvent {
-                        content: content.clone(),
-                    },
+                    crate::agents::session_context::PendingYieldEvent::fresh(content.clone()),
                 );
                 sctx.try_fill_pending_yield(ctx.runtime.clone()).await;
                 return;
@@ -498,9 +496,7 @@ pub(crate) async fn route_notice(
         // `identify_breakpoint` on load, so an event queued here survives a
         // daemon restart before it's delivered.
         if let Some(sctx) = &sctx_opt {
-            sctx.enqueue_pending_yield_event(crate::agents::session_context::PendingYieldEvent {
-                content,
-            });
+            sctx.enqueue_pending_yield_event(crate::agents::session_context::PendingYieldEvent::fresh(content));
             let fill_ctx = ctx.clone();
             let fill_sid = session_id.to_string();
             tokio::spawn(async move {

@@ -145,15 +145,15 @@ fn spawn_recovery(
 ) {
     tokio::spawn(async move {
         let _guard = turn_tracker.track();
-        let _turn_guard = Arc::clone(&session_ctx.turn_lock).lock_owned().await;
-        let mut session = Arc::clone(&session_ctx.session).lock_owned().await;
+        let mut turn_guard_slot = Some(Arc::clone(&session_ctx.turn_lock).lock_owned().await);
+        let mut session_slot = Some(Arc::clone(&session_ctx.session).lock_owned().await);
 
-        let resolved = ResolvedTurn::resolve(&session, &runtime);
+        let resolved = ResolvedTurn::resolve(session_slot.as_mut().expect("spawn_recovery: session slot empty"), &runtime);
         let turn_ctx = resolved.turn_context();
 
         match session_ctx
             .agent
-            .run_recovery(&mut session, turn_ctx, &runtime)
+            .run_recovery(&mut session_slot, &mut turn_guard_slot, turn_ctx, &runtime)
             .await
         {
             Ok(Some(tr)) if !tr.text.is_empty() => {
@@ -496,15 +496,15 @@ async fn recover_active_session(
     let session_ctx = ctx.session_context_for(&sk).await;
 
     let text = {
-        let _turn_guard = Arc::clone(&session_ctx.turn_lock).lock_owned().await;
-        let mut session = Arc::clone(&session_ctx.session).lock_owned().await;
-        let resolved = ResolvedTurn::resolve(&session, &ctx.runtime);
+        let mut turn_guard_slot = Some(Arc::clone(&session_ctx.turn_lock).lock_owned().await);
+        let mut session_slot = Some(Arc::clone(&session_ctx.session).lock_owned().await);
+        let resolved = ResolvedTurn::resolve(session_slot.as_mut().expect("recover_active: session slot empty"), &ctx.runtime);
         let turn_ctx = resolved.turn_context();
         let result = session_ctx
             .agent
-            .run_recovery(&mut session, turn_ctx, &ctx.runtime)
+            .run_recovery(&mut session_slot, &mut turn_guard_slot, turn_ctx, &ctx.runtime)
             .await;
-        session.incomplete_turn = false;
+        session_slot.as_mut().expect("recover_active: session slot empty").incomplete_turn = false;
         // Stash `pending_retry` while the session lock is held (same pattern
         // as process_turn's tail) so a later retry button keeps working.
         if let Ok(Some(tr)) = &result {
@@ -512,7 +512,7 @@ async fn recover_active_session(
                 *session_ctx.pending_retry.lock().await = Some(pr.clone());
             }
         }
-        drop(session);
+        drop(session_slot);
         match result {
             Ok(Some(tr)) => {
                 tracing::info!(session = %sk, "startup recovery: turn completed");

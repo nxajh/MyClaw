@@ -166,6 +166,14 @@ pub struct TurnContext<'a> {
 
     /// Run mode resolved as `SessionOverride > Interactive`.
     pub run_mode: RunMode,
+
+    /// Phase 2c (issue #256): weak handle back to the owning SessionContext.
+    /// `Some` only at construction sites that own one (session_context) —
+    /// lets `execute_tool_batch` park the sessions_yield wait inside the
+    /// tool frame (result single-writer stays with the waking turn task).
+    /// `None` (CLI/tests) → legacy deterministic EndTurn; the
+    /// run_and_deliver tail park handles the wait as in Phase 2b.
+    pub yield_park: Option<std::sync::Weak<crate::agents::session_context::SessionContext>>,
 }
 
 /// Result of a single turn.

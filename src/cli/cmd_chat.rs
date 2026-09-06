@@ -144,9 +144,11 @@ pub async fn run(
             thinking: None,
             permission_mode: myclaw::PermissionMode::default(),
             run_mode: myclaw::RunMode::default(),
+            yield_park: None,
         };
+        let mut session_slot = Some(session);
         let result = agent_obj
-            .run(&mut session, turn_ctx, &agent_runtime)
+            .run(&mut session_slot, &mut None, turn_ctx, &agent_runtime)
             .await?;
         println!("{}", result.text);
         return Ok(());
@@ -188,14 +190,17 @@ pub async fn run(
             thinking: None,
             permission_mode: myclaw::PermissionMode::default(),
             run_mode: myclaw::RunMode::default(),
+            yield_park: None,
         };
+        let mut session_slot = Some(session);
         match agent_obj
-            .run(&mut session, turn_ctx, &agent_runtime)
+            .run(&mut session_slot, &mut None, turn_ctx, &agent_runtime)
             .await
         {
             Ok(result) => println!("{}\n", result.text),
             Err(e) => eprintln!("error: {}\n", e),
         }
+        session = session_slot.take().expect("session slot restored");
     }
 
     Ok(())

@@ -50,6 +50,7 @@ impl ResolvedTurn {
             thinking: self.thinking.as_ref(),
             permission_mode: self.permission_mode,
             run_mode: self.run_mode,
+            yield_park: None,
         }
     }
 }

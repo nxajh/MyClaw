@@ -88,14 +88,18 @@ impl Agent {
     /// history. When no recovery is needed, delegates to [`Self::run_inner`].
     pub async fn run(
         &self,
-        session: &mut OwnedMutexGuard<Session>,
+        session_slot: &mut Option<OwnedMutexGuard<Session>>,
+        turn_guard_slot: &mut Option<OwnedMutexGuard<()>>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
     ) -> Result<TurnResult> {
-        if let Some(tr) = self.run_recovery(session, turn_ctx.clone(), runtime).await? {
+        if let Some(tr) = self
+            .run_recovery(session_slot, turn_guard_slot, turn_ctx.clone(), runtime)
+            .await?
+        {
             return Ok(tr);
         }
-        self.run_inner(session, turn_ctx, runtime).await
+        self.run_inner(session_slot, turn_guard_slot, turn_ctx, runtime).await
     }
 
     /// The raw LLM ↔ tool loop (no recovery pre-check). Called by [`Self::run`]
@@ -104,7 +108,8 @@ impl Agent {
     /// through `run_recovery` indefinitely.
     async fn run_inner(
         &self,
-        session: &mut OwnedMutexGuard<Session>,
+        session_slot: &mut Option<OwnedMutexGuard<Session>>,
+        turn_guard_slot: &mut Option<OwnedMutexGuard<()>>,
         turn_ctx: TurnContext<'_>,
         runtime: &AgentRuntime,
     ) -> Result<TurnResult> {
@@ -112,7 +117,7 @@ impl Agent {
         // seed, request prefix, spec conversion, orphan-tool folding) —
         // extracted to `prepare_turn` below (batch 4).
         let (provider, model_id, allowed_tools, tool_specs, mut messages, mut loop_breaker) =
-            self.prepare_turn(session, &turn_ctx, runtime).await?;
+            self.prepare_turn(session_slot.as_mut().expect("run_inner: session slot empty"), &turn_ctx, runtime).await?;
 
         // Shared CompactionEngine singleton — RFC v2 target shape. Token
         // tracking lives solely on `Session.token_tracker`; CompactionEngine
@@ -124,6 +129,11 @@ impl Agent {
         const MAX_OVERFLOW_RETRIES: usize = 3;
 
         loop {
+            // Phase 2c (issue #256): per-iteration reborrow from the slot.
+            // The borrow ends at its last use before `execute_tool_batch`
+            // takes the slots for the in-frame yield park (NLL-safe), and a
+            // fresh one is taken on the next iteration.
+            let session = session_slot.as_mut().expect("run_inner: session slot empty");
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
             if crate::is_shutting_down() {
                 return Ok(TurnResult {
@@ -341,12 +351,13 @@ impl Agent {
             // ToolBatchOutcome.)
             match self
                 .execute_tool_batch(
-                    session,
+                    session_slot,
+                    turn_guard_slot,
                     &response,
                     &mut messages,
                     runtime,
                     &model_id,
-                    &turn_ctx.permission_mode,
+                    &turn_ctx,
                     &allowed_tools,
                     &tool_specs,
                     &mut turn_state,
@@ -356,6 +367,18 @@ impl Agent {
             {
                 ToolBatchOutcome::Continue => {}
                 ToolBatchOutcome::EndTurn(tr) => return Ok(*tr),
+                // Phase 2c (issue #256): the in-frame yield park woke
+                // cancelled/superseded — the tool_call was resolved by
+                // another task while we waited. Return the current
+                // TurnResult without looping or re-delivering.
+                ToolBatchOutcome::Superseded => {
+                    return Ok(TurnResult {
+                        text: response.text.clone(),
+                        stop_reason: StopReason::EndTurn,
+                        pending_retry: None,
+                        has_pending: turn_state.has_pending(),
+                    });
+                }
                 ToolBatchOutcome::Abort(err) => return Err(err.into()),
             }
 

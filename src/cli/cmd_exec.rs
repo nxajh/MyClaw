@@ -132,16 +132,18 @@ pub async fn run(
 
     session.add_user(prompt.to_string());
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
-    let mut session = session.lock_owned().await;
+    let session = session.lock_owned().await;
     let turn_ctx = myclaw::TurnContext {
         system_prompt: "",
         model_id: model_owned.as_deref(),
         thinking: None,
         permission_mode: myclaw::PermissionMode::default(),
         run_mode: myclaw::RunMode::default(),
+        yield_park: None,
     };
+    let mut session_slot = Some(session);
     let result = agent_obj
-        .run(&mut session, turn_ctx, &agent_runtime)
+        .run(&mut session_slot, &mut None, turn_ctx, &agent_runtime)
         .await?;
     let response = result.text;
 

@@ -121,7 +121,7 @@ async fn run_prechecks_recovery_without_recursing() {
     let mut session = Session::new("sess-1".into());
     session.add_user("pending question".into());
     let session = Arc::new(tokio::sync::Mutex::new(session));
-    let mut session = session.lock_owned().await;
+    let session = session.lock_owned().await;
     let agent = Agent::new(empty_config());
     let runtime = bailing_runtime();
     let turn_ctx = TurnContext {
@@ -130,8 +130,13 @@ async fn run_prechecks_recovery_without_recursing() {
         thinking: None,
         permission_mode: PermissionMode::Default,
         run_mode: RunMode::Interactive,
+        yield_park: None,
     };
-    let err = match agent.run(&mut session, turn_ctx, &runtime).await {
+    let mut session_slot = Some(session);
+    let err = match agent
+        .run(&mut session_slot, &mut None, turn_ctx, &runtime)
+        .await
+    {
         Ok(_) => panic!("expected recovery to run the LLM and hit the stub registry"),
         Err(e) => e,
     };
